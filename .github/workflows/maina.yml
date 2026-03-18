@@ -10,6 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        name: Checkout code
+
+      # 进入项目根目录（防止找不到 Cargo.toml）
+      - name: Verify Cargo.toml exists
+        run: |
+          ls -la
+          test -f Cargo.toml || exit 1
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -24,22 +31,25 @@ jobs:
           mv android-ndk-r29 $HOME/android-ndk
           echo "ANDROID_NDK=$HOME/android-ndk" >> $GITHUB_ENV
 
-      # 配置 NDK r29 编译器
-      - name: Set Cross Compile Env
+      # 交叉编译工具配置
+      - name: Configure Cross Compile Tools
         run: |
           TOOLCHAIN="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "TOOLCHAIN_BASE=$TOOLCHAIN" >> $GITHUB_ENV
           echo "CC=$TOOLCHAIN/bin/aarch64-linux-android24-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/aarch64-linux-android24-clang++" >> $GITHUB_ENV
           echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
           echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "LD=$TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
 
-      # 静态编译
-      - name: Build Static Binary
+      # 编译（指定链接器，修复 Android 静态编译问题）
+      - name: Build forgedns
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static"
+          RUSTFLAGS: "-C linker=$TOOLCHAIN_BASE/bin/aarch64-linux-android24-clang -C link-arg=-static"
         run: |
           cargo build --release --target aarch64-linux-android
 
-      - name: Upload forgedns
+      - name: Upload final binary
         uses: actions/upload-artifact@v4
         with:
           name: forgedns-android-arm64
