@@ -1,49 +1,54 @@
-name: Build Hickory-DNS aarch64-musl static
+name: Build Hickory-DNS static aarch64-musl
 on:
   workflow_dispatch:
 
 jobs:
-  build-musl-static:
+  build-static-musl:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Hickory-DNS
+        uses: actions/checkout@v4
         with:
           repository: hickory-dns/hickory-dns
           ref: main
 
-      - name: Install Rust + aarch64-musl target
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
 
-      # 安装支持 arm64 的 llvm-strip 工具
-      - name: Install llvm
-        run: sudo apt update && sudo apt install -y llvm
+      # 安装 cross 交叉编译工具（自带musl，无需系统依赖）
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      # 关键：纯 musl 静态编译，不依赖 cross，不依赖系统交叉编译器
-      - name: Build release (all features)
+      # 纯静态 musl 编译，全开所有功能
+      - name: Build with cross (aarch64-unknown-linux-musl)
         run: |
-          export RUSTFLAGS="-C opt-level=z -C panic=abort -C strip=symbols"
-          cargo build \
+          export RUSTFLAGS="-C opt-level=z -C panic=abort -C link-arg=-static"
+          cross build \
             --release \
             --target aarch64-unknown-linux-musl \
             --all-features \
             -p hickory-dns
 
-      - name: Package binary
+      - name: Strip & package
         run: |
           mkdir -p release-bin
           BIN=target/aarch64-unknown-linux-musl/release/hickory-dns
-          llvm-strip -strip-all "$BIN"
-          cp "$BIN" release-bin/
+          
+          # 只改这一句：用 ARM64 专用 strip，不再用系统默认 strip
+          sudo apt update && sudo apt install -y binutils-aarch64-linux-gnu
+          aarch64-linux-gnu-strip $BIN
+          
+          cp $BIN release-bin/
 
+      # 验证纯静态（无任何so依赖）
       - name: Check static
         run: |
           BIN=release-bin/hickory-dns
-          file "$BIN"
-          readelf -d "$BIN" 2>/dev/null || echo "✅ 100% static, no .so dependency"
+          file $BIN
+          readelf -d $BIN || echo "✅ 100% 纯静态，无动态库依赖"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: hickory-dns-aarch64-musl-static
           path: release-bin/*
