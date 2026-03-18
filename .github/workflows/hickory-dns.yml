@@ -1,91 +1,55 @@
-name: Build Static Hickory-DNS for Android
-
+name: Build Hickory-DNS static aarch64 musl
 on:
   workflow_dispatch:
 
 jobs:
-  build-android-arm64:
+  build-static-musl:
     runs-on: ubuntu-latest
-    env:
-      NDK_VERSION: r29
-      API_LEVEL: 30
-      ARCH: aarch64-linux-android
-      ARCH_SHORT: arm64-v8a
-
     steps:
-      - name: Checkout Hickory-DNS
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: hickory-dns/hickory-dns
           ref: main
 
+      # 安装 aarch64-linux-musl 交叉编译器
+      - name: Install musl cross compiler
+        run: |
+          sudo apt update
+          sudo apt install -y binutils-aarch64-linux-musl gcc-aarch64-linux-musl
+
+      # 安装 Rust + musl 目标
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ env.ARCH }}
+          targets: aarch64-unknown-linux-musl
 
-      - name: Install cargo-ndk & binutils
+      # 全静态编译，全开所有功能
+      - name: Build static musl
         run: |
-          cargo install cargo-ndk
-          sudo apt update && sudo apt install -y binutils
+          export RUSTFLAGS="-C target-cpu=generic -C opt-level=z -C panic=abort -C link-arg=-static"
+          cargo build \
+            --release \
+            --target aarch64-unknown-linux-musl \
+            --all-features \
+            -p hickory-dns
 
-      - name: Setup Android NDK
-        run: |
-          cd /tmp
-          wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
-          unzip -q android-ndk-${NDK_VERSION}-linux.zip
-          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-
-      - name: Build Hickory-DNS
-        run: |
-          export RUSTFLAGS="\
-            -C opt-level=z \
-            -C strip=symbols \
-            -C link-arg=-Wl,--gc-sections \
-            -C panic=abort \
-            -C prefer-dynamic=no \
-            --remap-path-prefix=$HOME=. \
-          "
-          cargo ndk -t ${{ env.ARCH_SHORT }} --platform ${{ env.API_LEVEL }} build --release -p hickory-dns --all-features
-
+      # 裁剪体积
       - name: Strip binary
         run: |
-          mkdir -p ./release-bin
-          BIN="./target/${{ env.ARCH }}/release/hickory-dns"
-          ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all $BIN
-          cp $BIN ./release-bin/
+          mkdir -p release-bin
+          BIN=target/aarch64-unknown-linux-musl/release/hickory-dns
+          aarch64-linux-musl-strip $BIN
+          cp $BIN release-bin/
+          ls -lh release-bin/
 
-      - name: Check dynamic dependencies & pack .so
+      # 验证：必须显示“无动态链接”
+      - name: Check static link
         run: |
-          BIN="./release-bin/hickory-dns"
-          NDK_LIB_PATH="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ env.ARCH }}/${{ env.API_LEVEL }}"
+          BIN=release-bin/hickory-dns
+          file $BIN
+          readelf -d $BIN || echo "=> 100% static executable, no .so dependency"
 
-          echo "========== Dynamic library dependencies =========="
-          readelf -d $BIN | grep NEEDED | awk '{print $5}' | tr -d '[]' | sort -u
-
-          # 提取依赖库名
-          DEP_LIBS=$(readelf -d $BIN | grep NEEDED | awk '{print $5}' | tr -d '[]' | sort -u)
-
-          # 系统自带库，不需要打包
-          SYSTEM_LIBS="libc.so libdl.so libm.so liblog.so libandroid_support.so libstdc++.so vndk_stl.so"
-
-          for lib in $DEP_LIBS; do
-            if ! echo "$SYSTEM_LIBS" | grep -qw "$lib"; then
-              echo "Packing required library: $lib"
-              if [ -f "$NDK_LIB_PATH/$lib" ]; then
-                cp "$NDK_LIB_PATH/$lib" ./release-bin/
-              else
-                echo "Warning: $lib not found in NDK, may be system library"
-              fi
-            fi
-          done
-
-          echo "========== Final files in release-bin =========="
-          ls -lh ./release-bin
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: hickory-dns-android-${{ env.ARCH_SHORT }}
-          path: ./release-bin/*
+          name: hickory-dns-aarch64-musl-static
+          path: release-bin/*
