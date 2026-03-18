@@ -1,4 +1,4 @@
-name: Build ForgedNS Android ARM64 Static
+name: Build ForgedNS Android ARM64
 on:
   workflow_dispatch:
   push:
@@ -8,13 +8,20 @@ jobs:
   build-android-arm64:
     runs-on: ubuntu-latest
     steps:
-      - name: Clone forgedns repository
+      - name: Clone forgedns
         run: |
           git clone https://github.com/SvenShi/forgedns.git
           cd forgedns
-          ls -la
 
-      - name: Install Rust target
+      - name: Patch: Remove jemalloc (fix segfault on Android)
+        run: |
+          cd forgedns
+          sed -i '/tikv-jemallocator/d' Cargo.toml
+          sed -i '/jemalloc/d' Cargo.toml
+          sed -i '/use tikv_jemallocator/d' src/main.rs || true
+          sed -i '/#[global_allocator]/d' src/main.rs || true
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -25,27 +32,30 @@ jobs:
           unzip -q ndk.zip
           mv android-ndk-r29 ~/android-ndk
 
-      - name: Configure cross compile environment
+      - name: Setup cross compile env
         run: |
-          # NDK 工具链路径
           TOOLCHAIN="$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64"
-          # 加入 PATH，让 cc-rs 能找到编译器
           echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
-          # 设置交叉编译变量，解决 cc-rs 找不到工具问题
           echo "CC=aarch64-linux-android24-clang" >> $GITHUB_ENV
           echo "CXX=aarch64-linux-android24-clang++" >> $GITHUB_ENV
           echo "AR=llvm-ar" >> $GITHUB_ENV
           echo "RANLIB=llvm-ranlib" >> $GITHUB_ENV
 
-      - name: Build static binary
+      - name: Build release
         env:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: aarch64-linux-android24-clang
-          RUSTFLAGS: "-C link-arg=-static"
+          RUSTFLAGS: "-C link-arg=-fuse-ld=lld -C opt-level=3 -C debuginfo=0"
         run: |
           cd forgedns
           cargo build --release --target aarch64-linux-android
 
-      - name: Upload forgedns android arm64
+      - name: Strip binary
+        run: |
+          cd forgedns/target/aarch64-linux-android/release
+          llvm-strip forgedns
+          chmod +x forgedns
+
+      - name: Upload forgedns
         uses: actions/upload-artifact@v4
         with:
           name: forgedns-android-arm64
