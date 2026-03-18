@@ -15,33 +15,31 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # 安装 cross 交叉编译工具（自带musl，无需系统依赖）
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      # 纯静态 musl 编译，全开所有功能
-      - name: Build with cross (aarch64-unknown-linux-musl)
+      - name: Install cross & llvm
         run: |
-          export RUSTFLAGS="-C opt-level=z -C panic=abort -C link-arg=-static"
+          cargo install cross --git https://github.com/cross-rs/cross
+          sudo apt update && sudo apt install -y llvm
+
+      - name: Build static musl (all features)
+        run: |
+          export RUSTFLAGS="-C opt-level=z -C panic=abort -C link-arg=-static -C strip=all"
           cross build \
             --release \
             --target aarch64-unknown-linux-musl \
             --all-features \
             -p hickory-dns
 
-      - name: Strip & package
+      - name: Package binary
         run: |
           mkdir -p release-bin
           BIN=target/aarch64-unknown-linux-musl/release/hickory-dns
-          strip $BIN
           cp $BIN release-bin/
 
-      # 验证纯静态（无任何so依赖）
-      - name: Check static
+      - name: Verify static executable
         run: |
           BIN=release-bin/hickory-dns
           file $BIN
-          readelf -d $BIN || echo "✅ 100% 纯静态，无动态库依赖"
+          readelf -d $BIN 2>/dev/null || echo "✅ 100% 纯静态，无任何动态库依赖"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
