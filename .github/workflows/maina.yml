@@ -13,7 +13,7 @@ jobs:
           git clone https://github.com/SvenShi/forgedns.git
           cd forgedns
 
-      - name: Patch: Remove jemalloc (fix segfault on Android)
+      - name: Remove jemalloc (fix segfault on Android)
         run: |
           cd forgedns
           sed -i '/tikv-jemallocator/d' Cargo.toml
