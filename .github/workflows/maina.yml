@@ -9,13 +9,11 @@ jobs:
   build-android-arm64:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: List files
-        run: ls -la
+      - name: Clone forgedns repo
+        run: |
+          git clone https://github.com/SvenShi/forgedns.git
+          cd forgedns
+          ls -la
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -33,10 +31,11 @@ jobs:
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           RUSTFLAGS: "-C link-arg=-static"
         run: |
+          cd forgedns
           cargo build --release --target aarch64-linux-android
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: forgedns-android-arm64
-          path: target/aarch64-linux-android/release/forgedns
+          path: forgedns/target/aarch64-linux-android/release/forgedns
