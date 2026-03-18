@@ -1,0 +1,32 @@
+name: Build ForgedNS for Android (ARM64 Static)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust & ARM64 Target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Build Static Binary
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cargo build --release --target aarch64-linux-android
+
+      - name: Upload ARM64 Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: forgedns-android-arm64
+          path: target/aarch64-linux-android/release/forgedns
