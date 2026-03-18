@@ -1,21 +1,21 @@
-name: Build Hickory-DNS for Android
+name: Build Static Hickory-DNS for Android
 
 on:
-  workflow_dispatch: # 支持手动触发编译
+  workflow_dispatch:
 
 jobs:
   build-android-arm64:
     runs-on: ubuntu-latest
     env:
       NDK_VERSION: r29
-      API_LEVEL: 30 # 使用 API 30 兼顾了现代特性支持与运行兼容性
+      API_LEVEL: 30
 
     steps:
       - name: Checkout Hickory-DNS Repository
         uses: actions/checkout@v4
         with:
           repository: hickory-dns/hickory-dns
-          ref: main # 默认拉取主分支最新代码，也可改为具体的 tag 版本号（如 v0.24.2）
+          ref: main
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -31,25 +31,27 @@ jobs:
           echo "Downloading Android NDK ${NDK_VERSION}..."
           wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
           unzip -q android-ndk-${NDK_VERSION}-linux.zip
-          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-
-      - name: Build Hickory-DNS with All Features
-        run: |
-          # 优化编译产物体积
-          export RUSTFLAGS="-C opt-level=z -C link-arg=-Wl,--gc-sections"
           
-          # 使用 cargo-ndk 进行交叉编译，自动处理 C/C++ 依赖和 Linker 环境
+          # 关键修复：强制覆盖所有相关环境变量，消除与 GitHub 预装 NDK 的冲突
+          echo "ANDROID_NDK_HOME=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+          echo "ANDROID_NDK=/tmp/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: Build Hickory-DNS (Static)
+        run: |
+          # +crt-static 尝试静态链接 Bionic libc
+          export RUSTFLAGS="-C opt-level=z -C link-arg=-Wl,--gc-sections -C target-feature=+crt-static"
           cargo ndk -t arm64-v8a -p ${{ env.API_LEVEL }} build --release -p hickory-dns --all-features
 
       - name: Strip and Prepare Artifact
         run: |
           mkdir -p ./release-bin
-          # 使用 NDK 自带的 strip 工具去除符号表，大幅缩小二进制文件体积
+          # 裁剪符号表，减小体积
           /tmp/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip ./target/aarch64-linux-android/release/hickory-dns
           cp ./target/aarch64-linux-android/release/hickory-dns ./release-bin/hickory-dns
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hickory-dns-android-arm64
+          name: hickory-dns-android-arm64-static
           path: ./release-bin/hickory-dns
