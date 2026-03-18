@@ -1,5 +1,4 @@
 name: Build ForgedNS Android ARM64 Static
-
 on:
   workflow_dispatch:
   push:
@@ -9,13 +8,13 @@ jobs:
   build-android-arm64:
     runs-on: ubuntu-latest
     steps:
-      - name: Clone forgedns repo
+      - name: Clone forgedns repository
         run: |
           git clone https://github.com/SvenShi/forgedns.git
           cd forgedns
           ls -la
 
-      - name: Install Rust
+      - name: Install Rust target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -26,15 +25,27 @@ jobs:
           unzip -q ndk.zip
           mv android-ndk-r29 ~/android-ndk
 
-      - name: Build forgedns
+      - name: Configure cross compile environment
+        run: |
+          # NDK 工具链路径
+          TOOLCHAIN="$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64"
+          # 加入 PATH，让 cc-rs 能找到编译器
+          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
+          # 设置交叉编译变量，解决 cc-rs 找不到工具问题
+          echo "CC=aarch64-linux-android24-clang" >> $GITHUB_ENV
+          echo "CXX=aarch64-linux-android24-clang++" >> $GITHUB_ENV
+          echo "AR=llvm-ar" >> $GITHUB_ENV
+          echo "RANLIB=llvm-ranlib" >> $GITHUB_ENV
+
+      - name: Build static binary
         env:
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: aarch64-linux-android24-clang
           RUSTFLAGS: "-C link-arg=-static"
         run: |
           cd forgedns
           cargo build --release --target aarch64-linux-android
 
-      - name: Upload binary
+      - name: Upload forgedns android arm64
         uses: actions/upload-artifact@v4
         with:
           name: forgedns-android-arm64
