@@ -1,29 +1,30 @@
-name: Build Hickory-DNS static aarch64-musl
+name: Build Hickory-DNS aarch64-musl static
 on:
   workflow_dispatch:
 
 jobs:
-  build-static-musl:
+  build-musl-static:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Hickory-DNS
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: hickory-dns/hickory-dns
           ref: main
 
-      - name: Setup Rust
+      - name: Install Rust + aarch64-musl target
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
 
-      - name: Install cross & llvm
-        run: |
-          cargo install cross --git https://github.com/cross-rs/cross
-          sudo apt update && sudo apt install -y llvm
+      # 安装支持 arm64 的 llvm-strip 工具
+      - name: Install llvm
+        run: sudo apt update && sudo apt install -y llvm
 
-      - name: Build static musl (all features)
+      # 关键：纯 musl 静态编译，不依赖 cross，不依赖系统交叉编译器
+      - name: Build release (all features)
         run: |
-          export RUSTFLAGS="-C opt-level=z -C panic=abort -C link-arg=-static -C strip=all"
-          cross build \
+          export RUSTFLAGS="-C opt-level=z -C panic=abort -C strip=symbols"
+          cargo build \
             --release \
             --target aarch64-unknown-linux-musl \
             --all-features \
@@ -33,16 +34,16 @@ jobs:
         run: |
           mkdir -p release-bin
           BIN=target/aarch64-unknown-linux-musl/release/hickory-dns
-          cp $BIN release-bin/
+          llvm-strip -strip-all "$BIN"
+          cp "$BIN" release-bin/
 
-      - name: Verify static executable
+      - name: Check static
         run: |
           BIN=release-bin/hickory-dns
-          file $BIN
-          readelf -d $BIN 2>/dev/null || echo "✅ 100% 纯静态，无任何动态库依赖"
+          file "$BIN"
+          readelf -d "$BIN" 2>/dev/null || echo "✅ 100% static, no .so dependency"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: hickory-dns-aarch64-musl-static
           path: release-bin/*
