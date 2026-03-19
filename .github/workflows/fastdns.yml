@@ -12,7 +12,7 @@ jobs:
         with:
           go-version: "1.23"
 
-      # 直接在 Action 里生成 dns.go，不需要你仓库有源码
+      # 自动生成 dns.go 源码
       - name: Generate dns.go
         run: |
           cat > dns.go << 'EOF'
@@ -108,16 +108,22 @@ jobs:
           }
           EOF
 
-      # 编译安卓 arm64 静态二进制
-      - name: Build for android arm64
+      # 初始化go模块 + 下载依赖（修复go.mod错误）
+      - name: Init go module
+        run: |
+          go mod init fastdns
+          go mod tidy
+
+      # 编译安卓arm64静态二进制
+      - name: Build android arm64
         run: |
           CGO_ENABLED=0 \
           GOOS=android \
           GOARCH=arm64 \
           go build -ldflags="-s -w" -o fastdns-arm64
 
-      # 上传成品
-      - name: Upload binary
+      # 上传编译好的文件
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: fastdns-arm64
