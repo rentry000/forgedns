@@ -1,62 +1,36 @@
-name: Build rusthole Android arm64 (full cli support)
+name: Build rusthole arm64 musl static (Android compatible)
 on:
   workflow_dispatch:
 
 jobs:
-  build-android:
+  build-musl-static:
     runs-on: ubuntu-latest
     steps:
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -yqq
-          sudo apt-get install -yqq git wget unzip
-
-      - name: Clone rusthole
-        run: git clone --depth 1 https://github.com/KevinKickass/rusthole.git
-
-      - name: Install Rust target
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: KevinKickass/rusthole
+          
+      - name: Install Rust + musl target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: aarch64-unknown-linux-musl
 
-      - name: Install NDK r29 & fix tool names
+      - name: Install musl tools
         run: |
-          wget -qO ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          unzip -q ndk.zip
-          mv android-ndk-r29 ~/ndk
-          NDK_BIN="$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "NDK_BIN=$NDK_BIN" >> $GITHUB_ENV
-          # 软链接补齐 aws-lc-sys 需要的无版本号工具
-          ln -s $NDK_BIN/aarch64-linux-android21-clang $NDK_BIN/aarch64-linux-android-clang
-          ln -s $NDK_BIN/aarch64-linux-android21-clang++ $NDK_BIN/aarch64-linux-android-clang++
-          ln -s $NDK_BIN/llvm-ar $NDK_BIN/aarch64-linux-android-ar
-          ln -s $NDK_BIN/llvm-ranlib $NDK_BIN/aarch64-linux-android-ranlib
-          echo "$NDK_BIN" >> $GITHUB_PATH
+          sudo apt-get update -yqq
+          sudo apt-get install -yqq musl-tools
 
-      - name: Set full cross env
+      - name: Build full static binary
         run: |
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android21-clang" >> $GITHUB_ENV
-          echo "CC_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-clang" >> $GITHUB_ENV
-          echo "CXX_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-clang++" >> $GITHUB_ENV
-          echo "AR_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-ar" >> $GITHUB_ENV
-          echo "RANLIB_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-ranlib" >> $GITHUB_ENV
+          cargo build --release --target aarch64-unknown-linux-musl --all-features
 
-      # 关键：测试CLI参数是否正常，确保--config可用
-      - name: Build & check cli support
+      - name: Strip binary
         run: |
-          cd rusthole
-          # 完整编译，不裁剪功能
-          cargo build --release --target aarch64-linux-android --all-features
-          # 测试帮助信息（验证参数正常）
-          echo ">>> Checking CLI support"
-          ./target/aarch64-linux-android/release/rusthole --help 2>/dev/null || true
+          strip target/aarch64-unknown-linux-musl/release/rusthole
 
-      - name: Strip
-        run: |
-          $NDK_BIN/llvm-strip rusthole/target/aarch64-linux-android/release/rusthole
-
-      - name: Upload
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rusthole-android-arm64
-          path: rusthole/target/aarch64-linux-android/release/rusthole
+          name: rusthole-arm64-musl-static
+          path: target/aarch64-unknown-linux-musl/release/rusthole
