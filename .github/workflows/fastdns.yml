@@ -29,8 +29,7 @@ jobs:
           )
           
           const (
-          	ListenUDP = "udp://:6005"
-          	ListenTCP = "tcp://:6005"
+          	ListenAddr = ":6005"
           )
           
           var chinaDNS = []string{
@@ -74,37 +73,36 @@ jobs:
           }
           
           func (s *SmartDNS) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
-          	var upstream string
+          	upstream := randUpstream(foreignDNS)
           	if isChinaDomain(req.Question.Name) {
           		upstream = randUpstream(chinaDNS)
-          	} else {
-          		upstream = randUpstream(foreignDNS)
           	}
           
-          	resp := new(fastdns.Message)
-          	client := fastdns.Client{Timeout: 5 * time.Second}
+          	resp := fastdns.AcquireMessage()
+          	defer fastdns.ReleaseMessage(resp)
+          
+          	client := fastdns.Client{
+          		Timeout: 5 * time.Second,
+          		Addr:    upstream,
+          	}
           
           	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
           	defer cancel()
           
-          	err := client.Exchange(ctx, upstream, req, resp)
-          	if err != nil {
+          	if err := client.Exchange(ctx, req, resp); err != nil {
           		log.Printf("upstream %s error: %v", upstream, err)
           		return
           	}
           
-          	_, err = rw.Write(resp.Raw)
-          	if err != nil {
-          		log.Printf("write response error: %v", err)
-          	}
+          	_, _ = rw.Write(resp.Raw)
           }
           
           func main() {
           	flag.Parse()
-          	log.Printf("smart dns server started on udp/tcp 6005")
+          	log.Printf("smart dns server started on :6005")
           
-          	handler := new(SmartDNS)
-          	if err := fastdns.ListenAndServe(ListenUDP, ListenTCP, handler); err != nil {
+          	handler := &SmartDNS{}
+          	if err := fastdns.ListenAndServe("udp", ListenAddr, handler); err != nil {
           		log.Fatal(err)
           	}
           }
