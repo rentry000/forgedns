@@ -7,7 +7,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -21,22 +20,21 @@ jobs:
           import (
           	"log"
           	"math/rand"
-          	"net"
           	"strings"
           	"time"
           
-          	"github.com/phuslu/fastdns"
+          	"github.com/miekg/dns"
           )
           
           const (
-          	ListenAddr = ":6005"
+          	ListenPort = ":6005"
           )
           
           var chinaDNS = []string{
           	"223.5.5.5:53",
           	"223.6.6.6:53",
           	"114.114.114.114:53",
-          	"119.29.29.29:29",
+          	"119.29.29.29:53",
           }
           
           var foreignDNS = []string{
@@ -46,76 +44,84 @@ jobs:
           }
           
           var chinaSuffix = []string{
-          	".cn", ".com.cn", ".net.cn", ".gov.cn", ".edu.cn",
+          	".cn",
+          	".com.cn",
+          	".net.cn",
+          	".org.cn",
+          	".gov.cn",
+          	".edu.cn",
           }
           
-          func randUp() string {
+          func randUp(servers []string) string {
           	rand.Seed(time.Now().UnixNano())
-          	return chinaDNS[rand.Intn(len(chinaDNS))]
+          	return servers[rand.Intn(len(servers))]
           }
           
-          func randForeign() string {
-          	rand.Seed(time.Now().UnixNano())
-          	return foreignDNS[rand.Intn(len(foreignDNS))]
-          }
-          
-          func isCN(name []byte) bool {
-          	d := strings.ToLower(string(name))
-          	for _, s := range chinaSuffix {
-          		if strings.HasSuffix(d, s) {
+          func isChinaDomain(qName string) bool {
+          	name := strings.ToLower(qName)
+          	for _, suf := range chinaSuffix {
+          		if strings.HasSuffix(name, suf) {
           			return true
           		}
           	}
           	return false
           }
           
-          func main() {
-          	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 6005})
+          type dnsHandler struct{}
+          
+          func (h *dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+          	msg := new(dns.Msg)
+          	msg.SetReply(r)
+          	msg.Compress = false
+          
+          	if len(r.Question) == 0 {
+          		dns.HandleFailed(w, r)
+          		return
+          	}
+          
+          	q := r.Question[0]
+          	upstream := randUp(foreignDNS)
+          	if isChinaDomain(q.Name) {
+          		upstream = randUp(chinaDNS)
+          	}
+          
+          	resp, _, err := dns.Exchange(r, upstream)
           	if err != nil {
-          		log.Fatal(err)
+          		dns.HandleFailed(w, r)
+          		return
           	}
-          	defer conn.Close()
           
-          	log.Println("smart dns running on :6005 (udp)")
+          	w.WriteMsg(resp)
+          }
           
-          	buf := make([]byte, 512)
-          	for {
-          		n, addr, err := conn.ReadFromUDP(buf)
-          		if err != nil || n == 0 {
-          			continue
-          		}
-          
-          		req := &fastdns.Message{}
-          		if err := req.Unmarshal(buf[:n]); err != nil {
-          			continue
-          		}
-          
-          		up := randForeign()
-          		if isCN(req.Question.Name) {
-          			up = randUp()
-          		}
-          
-          		resp, err := fastdns.Exchange(up, req)
-          		if err != nil {
-          			continue
-          		}
-          
-          		raw, _ := resp.Marshal()
-          		_, _ = conn.WriteToUDP(raw, addr)
+          func main() {
+          	log.Printf("DNS server started on 0.0.0.0" + ListenPort + " (udp/tcp)")
+          	
+          	handler := new(dnsHandler)
+          	dns.HandleFunc(".", handler.ServeDNS)
+          	
+          	server := &dns.Server{
+          		Addr: ListenPort,
+          		Net:  "udp",
           	}
+          	
+          	log.Fatal(server.ListenAndServe())
           }
           EOF
-          
-      - name: Init module
+
+      - name: Init Go module
         run: |
           go mod init fastdns
           go mod tidy
 
-      - name: Build arm64
+      - name: Build Android arm64
         run: |
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o fastdns-arm64
+          CGO_ENABLED=0 \
+          GOOS=android \
+          GOARCH=arm64 \
+          go build -ldflags="-s -w" -o fastdns-arm64
 
-      - name: Upload
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: fastdns-arm64
