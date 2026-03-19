@@ -85,7 +85,8 @@ jobs:
           		upstream = randUp(chinaDNS)
           	}
           
-          	resp, _, err := dns.Exchange(r, upstream)
+          	// 这里修复：只接收 2 个返回值
+          	resp, err := dns.Exchange(r, upstream)
           	if err != nil {
           		dns.HandleFailed(w, r)
           		return
@@ -95,7 +96,7 @@ jobs:
           }
           
           func main() {
-          	log.Printf("DNS server started on 0.0.0.0" + ListenPort + " (udp/tcp)")
+          	log.Printf("DNS server started on 0.0.0.0:6005 (udp)")
           	
           	handler := new(dnsHandler)
           	dns.HandleFunc(".", handler.ServeDNS)
