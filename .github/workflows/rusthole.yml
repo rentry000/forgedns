@@ -1,36 +1,50 @@
-name: Build rusthole arm64 musl static (Android compatible)
+name: Build rusthole arm64 musl (Android full CLI)
 on:
   workflow_dispatch:
 
 jobs:
-  build-musl-static:
+  build-musl:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: KevinKickass/rusthole
-          
-      - name: Install Rust + musl target
+
+      - name: Install cross musl toolchain
+        run: |
+          sudo apt update -yqq
+          sudo apt install -yqq \
+            gcc-aarch64-linux-gnu \
+            musl-tools \
+            libc6-dev-arm64-cross \
+            binutils-aarch64-linux-gnu
+
+          # 关键修复：创建 aws-lc-sys 要的 musl 编译器软链接
+          sudo ln -s /usr/bin/aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-musl-gcc
+          sudo ln -s /usr/bin/aarch64-linux-gnu-ar /usr/bin/aarch64-linux-musl-ar
+          sudo ln -s /usr/bin/aarch64-linux-gnu-ranlib /usr/bin/aarch64-linux-musl-ranlib
+
+      - name: Install Rust musl target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl tools
+      - name: Set cross compiler env
         run: |
-          sudo apt-get update -yqq
-          sudo apt-get install -yqq musl-tools
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> $GITHUB_ENV
+          echo "AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar" >> $GITHUB_ENV
+          echo "RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib" >> $GITHUB_ENV
 
-      - name: Build full static binary
+      - name: Build static binary
         run: |
           cargo build --release --target aarch64-unknown-linux-musl --all-features
 
-      - name: Strip binary
+      - name: Strip
         run: |
-          strip target/aarch64-unknown-linux-musl/release/rusthole
+          aarch64-linux-gnu-strip target/aarch64-unknown-linux-musl/release/rusthole
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: rusthole-arm64-musl-static
+          name: rusthole-arm64-musl-android
           path: target/aarch64-unknown-linux-musl/release/rusthole
