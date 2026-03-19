@@ -7,6 +7,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -18,10 +19,9 @@ jobs:
           package main
           
           import (
-          	"context"
-          	"flag"
           	"log"
           	"math/rand"
+          	"net"
           	"strings"
           	"time"
           
@@ -36,91 +36,86 @@ jobs:
           	"223.5.5.5:53",
           	"223.6.6.6:53",
           	"114.114.114.114:53",
-          	"119.29.29.29:53",
+          	"119.29.29.29:29",
           }
           
           var foreignDNS = []string{
           	"8.8.8.8:53",
           	"8.8.4.4:53",
           	"1.1.1.1:53",
-          	"1.0.0.1:53",
           }
           
           var chinaSuffix = []string{
-          	".cn",
-          	".com.cn",
-          	".net.cn",
-          	".org.cn",
-          	".gov.cn",
-          	".edu.cn",
+          	".cn", ".com.cn", ".net.cn", ".gov.cn", ".edu.cn",
           }
           
-          type SmartDNS struct{}
-          
-          func randUpstream(servers []string) string {
+          func randUp() string {
           	rand.Seed(time.Now().UnixNano())
-          	return servers[rand.Intn(len(servers))]
+          	return chinaDNS[rand.Intn(len(chinaDNS))]
           }
           
-          func isChinaDomain(name []byte) bool {
-          	domain := strings.ToLower(string(name))
+          func randForeign() string {
+          	rand.Seed(time.Now().UnixNano())
+          	return foreignDNS[rand.Intn(len(foreignDNS))]
+          }
+          
+          func isCN(name []byte) bool {
+          	d := strings.ToLower(string(name))
           	for _, s := range chinaSuffix {
-          		if strings.HasSuffix(domain, s) {
+          		if strings.HasSuffix(d, s) {
           			return true
           		}
           	}
           	return false
           }
           
-          func (s *SmartDNS) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
-          	upstream := randUpstream(foreignDNS)
-          	if isChinaDomain(req.Question.Name) {
-          		upstream = randUpstream(chinaDNS)
-          	}
-          
-          	resp := fastdns.AcquireMessage()
-          	defer fastdns.ReleaseMessage(resp)
-          
-          	client := fastdns.Client{
-          		Timeout: 5 * time.Second,
-          		Addr:    upstream,
-          	}
-          
-          	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-          	defer cancel()
-          
-          	if err := client.Exchange(ctx, req, resp); err != nil {
-          		log.Printf("upstream %s error: %v", upstream, err)
-          		return
-          	}
-          
-          	_, _ = rw.Write(resp.Raw)
-          }
-          
           func main() {
-          	flag.Parse()
-          	log.Printf("smart dns server started on :6005")
-          
-          	handler := &SmartDNS{}
-          	if err := fastdns.ListenAndServe("udp", ListenAddr, handler); err != nil {
+          	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 6005})
+          	if err != nil {
           		log.Fatal(err)
+          	}
+          	defer conn.Close()
+          
+          	log.Println("smart dns running on :6005 (udp)")
+          
+          	buf := make([]byte, 512)
+          	for {
+          		n, addr, err := conn.ReadFromUDP(buf)
+          		if err != nil || n == 0 {
+          			continue
+          		}
+          
+          		req := &fastdns.Message{}
+          		if err := req.Unmarshal(buf[:n]); err != nil {
+          			continue
+          		}
+          
+          		up := randForeign()
+          		if isCN(req.Question.Name) {
+          			up = randUp()
+          		}
+          
+          		resp, err := fastdns.Exchange(up, req)
+          		if err != nil {
+          			continue
+          		}
+          
+          		raw, _ := resp.Marshal()
+          		_, _ = conn.WriteToUDP(raw, addr)
           	}
           }
           EOF
-
-      - name: Init go module
+          
+      - name: Init module
         run: |
           go mod init fastdns
           go mod tidy
 
-      - name: Build android arm64
+      - name: Build arm64
         run: |
-          CGO_ENABLED=0 \
-          GOOS=android \
-          GOARCH=arm64 \
-          go build -ldflags="-s -w" -o fastdns-arm64
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o fastdns-arm64
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: fastdns-arm64
