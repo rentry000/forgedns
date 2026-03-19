@@ -10,111 +10,112 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.22"
 
-      # 自动生成 dns.go 源码
+      # 生成修复语法后的 dns.go
       - name: Generate dns.go
         run: |
           cat > dns.go << 'EOF'
-          package main
+package main
 
-          import (
-            "flag"
-            "log"
-            "math/rand"
-            "net"
-            "strings"
-            "time"
+import (
+	"flag"
+	"log"
+	"math/rand"
+	"net"
+	"strings"
+	"time"
 
-            "github.com/phuslu/fastdns"
-          )
+	"github.com/phuslu/fastdns"
+)
 
-          const (
-            ListenAddr = "udp://:6005 tcp://:6005"
-          )
+const (
+	ListenAddr = "udp://:6005 tcp://:6005"
+)
 
-          var chinaDNS = []string{
-            "223.5.5.5:53",
-            "223.6.6.6:53",
-            "114.114.114.114:53",
-            "119.29.29.29:53",
-          }
+var chinaDNS = []string{
+	"223.5.5.5:53",
+	"223.6.6.6:53",
+	"114.114.114.114:53",
+	"119.29.29.29:53",
+}
 
-          var foreignDNS = []string{
-            "8.8.8.8:53",
-            "8.8.4.4:53",
-            "1.1.1.1:53",
-            "1.0.0.1:53",
-            "9.9.9.9:53",
-          }
+var foreignDNS = []string{
+	"8.8.8.8:53",
+	"8.8.4.4:53",
+	"1.1.1.1:53",
+	"1.0.0.1:53",
+	"9.9.9.9:53",
+}
 
-          var chinaSuffix = []string{
-            ".cn", ".com.cn", ".net.cn", ".org.cn", ".gov.cn", ".edu.cn",
-          }
+var chinaSuffix = []string{
+	".cn", ".com.cn", ".net.cn", ".org.cn", ".gov.cn", ".edu.cn",
+}
 
-          type smartDNS struct{}
+type smartDNS struct{}
 
-          func randUpstream(servers []string) string {
-            rand.Seed(time.Now().UnixNano())
-            return servers[rand.Intn(len(servers))]
-          }
+func randUpstream(servers []string) string {
+	return servers[rand.Intn(len(servers))]
+}
 
-          func isChinaDomain(domain string) bool {
-            for _, s := range chinaSuffix {
-              if strings.HasSuffix(domain, s) {
-                return true
-              }
-            }
-            return false
-          }
+func isChinaDomain(domain string) bool {
+	for _, s := range chinaSuffix {
+		if strings.HasSuffix(domain, s) {
+			return true
+		}
+	}
+	return false
+}
 
-          func (s *smartDNS) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
-            domain := strings.TrimSuffix(req.Question.Domain, ".")
-            up := randUpstream(foreignDNS)
-            if isChinaDomain(domain) {
-              up = randUpstream(chinaDNS)
-            }
-            _ = fastdns.ProxyUpstream(rw, req, up)
-          }
+func (s *smartDNS) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
+	domain := strings.TrimSuffix(req.Question.Domain, ".")
+	up := randUpstream(foreignDNS)
+	if isChinaDomain(domain) {
+		up = randUpstream(chinaDNS)
+	}
+	fastdns.ProxyUpstream(rw, req, up)
+}
 
-          func dig(domain string) {
-            req := &fastdns.Message{
-              Question: fastdns.Question{Domain: domain, Type: fastdns.TypeA},
-            }
-            up := randUpstream(foreignDNS)
-            if isChinaDomain(domain) {
-              up = randUpstream(chinaDNS)
-            }
-            resp, err := fastdns.Exchange(up, req)
-            if err != nil {
-              log.Fatal(err)
-            }
-            log.Printf("domain: %s upstream: %s", domain, up)
-            for _, ans := range resp.Answers {
-              if a, ok := ans.(fastdns.ARecord); ok {
-                log.Printf("A: %s", a.IP)
-              }
-            }
-          }
+func dig(domain string) {
+	req := &fastdns.Message{
+		Question: fastdns.Question{Domain: domain, Type: fastdns.TypeA},
+	}
+	up := randUpstream(foreignDNS)
+	if isChinaDomain(domain) {
+		up = randUpstream(chinaDNS)
+	}
+	resp, err := fastdns.Exchange(up, req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("domain: %s upstream: %s", domain, up)
+	for _, ans := range resp.Answers {
+		if a, ok := ans.(fastdns.ARecord); ok {
+			log.Printf("A: %s", a.IP)
+		}
+	}
+}
 
-          func main() {
-            flag.Parse()
-            if len(flag.Args()) == 0 {
-              log.Printf("dns server started on %s", ListenAddr)
-              log.Fatal(fastdns.ListenAndServe(strings.Fields(ListenAddr)..., &smartDNS{}))
-              return
-            }
-            dig(flag.Arg(0))
-          }
+func main() {
+	rand.Seed(time.Now().UnixNano())
+	flag.Parse()
+	if len(flag.Args()) == 0 {
+		log.Printf("dns server started on %s", ListenAddr)
+		addrs := strings.Fields(ListenAddr)
+		log.Fatal(fastdns.ListenAndServe(addrs[0], addrs[1], &smartDNS{}))
+		return
+	}
+	dig(flag.Arg(0))
+}
           EOF
 
-      # 初始化go模块 + 下载依赖（修复go.mod错误）
+      # 初始化模块并下载依赖
       - name: Init go module
         run: |
           go mod init fastdns
           go mod tidy
 
-      # 编译安卓arm64静态二进制
+      # 编译安卓 arm64
       - name: Build android arm64
         run: |
           CGO_ENABLED=0 \
@@ -122,7 +123,7 @@ jobs:
           GOARCH=arm64 \
           go build -ldflags="-s -w" -o fastdns-arm64
 
-      # 上传编译好的文件
+      # 上传成品
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
