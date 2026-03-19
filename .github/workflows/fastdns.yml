@@ -21,7 +21,6 @@ jobs:
           	"flag"
           	"log"
           	"math/rand"
-          	"net"
           	"strings"
           	"time"
           
@@ -44,7 +43,6 @@ jobs:
           	"8.8.4.4:53",
           	"1.1.1.1:53",
           	"1.0.0.1:53",
-          	"9.9.9.9:53",
           }
           
           var chinaSuffix = []string{
@@ -63,7 +61,8 @@ jobs:
           	return servers[rand.Intn(len(servers))]
           }
           
-          func isChinaDomain(domain string) bool {
+          func isChinaDomain(name []byte) bool {
+          	domain := strings.ToLower(string(name))
           	for _, s := range chinaSuffix {
           		if strings.HasSuffix(domain, s) {
           			return true
@@ -72,57 +71,38 @@ jobs:
           	return false
           }
           
-          func (s *smartDNS) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
-          	domain := strings.TrimSuffix(req.Question.Domain, ".")
-          	up := randUpstream(foreignDNS)
+          func (s *smartDNS) ServeDNS(w fastdns.ResponseWriter, m *fastdns.Message) {
+          	if len(m.Question) == 0 {
+          		return
+          	}
           
-          	if isChinaDomain(domain) {
+          	q := m.Question[0]
+          	up := randUpstream(foreignDNS)
+          	if isChinaDomain(q.Name) {
           		up = randUpstream(chinaDNS)
           	}
           
-          	fastdns.ProxyUpstream(rw, req, up)
-          }
-          
-          func dig(domain string) {
-          	req := &fastdns.Message{
-          		Question: fastdns.Question{
-          			Domain: domain,
-          			Type:   fastdns.TypeA,
-          		},
-          	}
-          
-          	up := randUpstream(foreignDNS)
-          	if isChinaDomain(domain) {
-          		up = randUpstream(chinaDNS)
-          	}
-          
-          	resp, err := fastdns.Exchange(up, req)
+          	c := fastdns.Client{Timeout: 5 * time.Second}
+          	resp, err := c.Exchange(up, m)
           	if err != nil {
-          		log.Fatal(err)
+          		log.Printf("exchange error: %v", err)
+          		return
           	}
           
-          	log.Printf("domain: %s upstream: %s", domain, up)
-          	for _, ans := range resp.Answers {
-          		if a, ok := ans.(fastdns.ARecord); ok {
-          			log.Printf("A: %s", a.IP)
-          		}
-          	}
+          	w.WriteMsg(resp)
           }
           
           func main() {
           	flag.Parse()
+          	log.Printf("dns server started on %s", ListenAddr)
           
-          	if len(flag.Args()) == 0 {
-          		log.Printf("dns server started on %s", ListenAddr)
-          		parts := strings.Fields(ListenAddr)
-          		log.Fatal(fastdns.ListenAndServe(parts[0], parts[1], &smartDNS{}))
-          		return
+          	parts := strings.Fields(ListenAddr)
+          	if err := fastdns.Serve(parts[0], &smartDNS{}); err != nil {
+          		log.Fatal(err)
           	}
-          
-          	dig(flag.Arg(0))
           }
           EOF
-
+          
       - name: Init go module
         run: |
           go mod init fastdns
