@@ -1,48 +1,47 @@
-name: Build rusthole Android arm64 static
-
+name: Build rusthole for Android arm64
 on:
   workflow_dispatch:
 
 jobs:
-  build-android:
+  build-android-arm64:
     runs-on: ubuntu-latest
     env:
       TARGET: aarch64-linux-android
       NDK_VER: r29
-      API: 21
-      REPO_URL: https://github.com/KevinKickass/rusthole.git
+      API_LEVEL: 21
+      REPO: https://github.com/KevinKickass/rusthole.git
 
     steps:
-      - name: Install dependencies
-        run: apt update && apt install -y git wget unzip
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git wget unzip
 
       - name: Clone rusthole
         run: |
-          git clone $REPO_URL rusthole
-          cd rusthole && ls -la
+          git clone --depth 1 $REPO rusthole
 
-      - name: Install Rust + Android target
+      - name: Install Rust target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.TARGET }}
 
-      - name: Install NDK ${{ env.NDK_VER }}
+      - name: Download & setup NDK r29
         run: |
-          wget -O ndk.zip https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip
+          wget -qO ndk.zip https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip
           unzip -q ndk.zip
-          mv android-ndk-${NDK_VER} /opt/ndk
-          echo "TOOLCHAIN=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+          mv android-ndk-${NDK_VER} ~/ndk
+          echo "TOOLCHAIN=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
 
-      - name: Export full cross compile env
+      - name: Set cross compile env (fix ar/ring/zstd)
         run: |
-          TARGET=aarch64_linux_android
-          echo "CARGO_TARGET_${TARGET}_LINKER=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> $GITHUB_ENV
-          echo "CC_${TARGET}=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> $GITHUB_ENV
-          echo "CXX_${TARGET}=$TOOLCHAIN/aarch64-linux-android${API}-clang++" >> $GITHUB_ENV
-          # 关键修复：NDK r29 用 llvm-ar 替代旧的 aarch64-linux-android-ar
-          echo "AR_${TARGET}=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
-          echo "RANLIB_${TARGET}=$TOOLCHAIN/llvm-ranlib" >> $GITHUB_ENV
-          echo "STRIP_${TARGET}=$TOOLCHAIN/llvm-strip" >> $GITHUB_ENV
+          TARGET_ENV=aarch64_linux_android
+          echo "CARGO_TARGET_${TARGET_ENV}_LINKER=$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang" >> $GITHUB_ENV
+          echo "CC_${TARGET_ENV}=$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang" >> $GITHUB_ENV
+          echo "CXX_${TARGET_ENV}=$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++" >> $GITHUB_ENV
+          echo "AR_${TARGET_ENV}=$TOOLCHAIN/llvm-ar" >> $GITHUB_ENV
+          echo "RANLIB_${TARGET_ENV}=$TOOLCHAIN/llvm-ranlib" >> $GITHUB_ENV
+          echo "STRIP_${TARGET_ENV}=$TOOLCHAIN/llvm-strip" >> $GITHUB_ENV
 
       - name: Build release
         run: |
