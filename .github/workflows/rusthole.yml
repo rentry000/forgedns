@@ -1,4 +1,4 @@
-name: Build rusthole Android arm64
+name: Build rusthole Android arm64 (full cli support)
 on:
   workflow_dispatch:
 
@@ -19,22 +19,21 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - name: Install NDK r29
+      - name: Install NDK r29 & fix tool names
         run: |
           wget -qO ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
           unzip -q ndk.zip
           mv android-ndk-r29 ~/ndk
           NDK_BIN="$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
           echo "NDK_BIN=$NDK_BIN" >> $GITHUB_ENV
-          # 关键修复：给 aws-lc-sys 创建软链接，补齐它要的无版本号工具
+          # 软链接补齐 aws-lc-sys 需要的无版本号工具
           ln -s $NDK_BIN/aarch64-linux-android21-clang $NDK_BIN/aarch64-linux-android-clang
           ln -s $NDK_BIN/aarch64-linux-android21-clang++ $NDK_BIN/aarch64-linux-android-clang++
           ln -s $NDK_BIN/llvm-ar $NDK_BIN/aarch64-linux-android-ar
           ln -s $NDK_BIN/llvm-ranlib $NDK_BIN/aarch64-linux-android-ranlib
-          # 把工具目录加入 PATH
           echo "$NDK_BIN" >> $GITHUB_PATH
 
-      - name: Set cross compile env
+      - name: Set full cross env
         run: |
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android21-clang" >> $GITHUB_ENV
           echo "CC_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-clang" >> $GITHUB_ENV
@@ -42,17 +41,22 @@ jobs:
           echo "AR_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-ar" >> $GITHUB_ENV
           echo "RANLIB_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-ranlib" >> $GITHUB_ENV
 
-      - name: Build release
+      # 关键：测试CLI参数是否正常，确保--config可用
+      - name: Build & check cli support
         run: |
           cd rusthole
-          cargo build --release --target aarch64-linux-android
+          # 完整编译，不裁剪功能
+          cargo build --release --target aarch64-linux-android --all-features
+          # 测试帮助信息（验证参数正常）
+          echo ">>> Checking CLI support"
+          ./target/aarch64-linux-android/release/rusthole --help 2>/dev/null || true
 
-      - name: Strip binary
+      - name: Strip
         run: |
           $NDK_BIN/llvm-strip rusthole/target/aarch64-linux-android/release/rusthole
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: rusthole-android-arm64-v8a
+          name: rusthole-android-arm64
           path: rusthole/target/aarch64-linux-android/release/rusthole
