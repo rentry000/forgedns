@@ -1,4 +1,4 @@
-name: Build rusthole for Android arm64-v8a
+name: Build rusthole Android arm64
 on:
   workflow_dispatch:
 
@@ -14,7 +14,7 @@ jobs:
       - name: Clone rusthole
         run: git clone --depth 1 https://github.com/KevinKickass/rusthole.git
 
-      - name: Install Rust & target
+      - name: Install Rust target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -24,19 +24,23 @@ jobs:
           wget -qO ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
           unzip -q ndk.zip
           mv android-ndk-r29 ~/ndk
-          echo "NDK_BIN=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+          NDK_BIN="$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "NDK_BIN=$NDK_BIN" >> $GITHUB_ENV
+          # 关键修复：给 aws-lc-sys 创建软链接，补齐它要的无版本号工具
+          ln -s $NDK_BIN/aarch64-linux-android21-clang $NDK_BIN/aarch64-linux-android-clang
+          ln -s $NDK_BIN/aarch64-linux-android21-clang++ $NDK_BIN/aarch64-linux-android-clang++
+          ln -s $NDK_BIN/llvm-ar $NDK_BIN/aarch64-linux-android-ar
+          ln -s $NDK_BIN/llvm-ranlib $NDK_BIN/aarch64-linux-android-ranlib
+          # 把工具目录加入 PATH
+          echo "$NDK_BIN" >> $GITHUB_PATH
 
-      # 核心修复：所有环境变量 **全大写**，Cargo 才会识别，不再用系统 cc
-      - name: Set full cross compile env
+      - name: Set cross compile env
         run: |
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android21-clang" >> $GITHUB_ENV
-          echo "CC_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android21-clang" >> $GITHUB_ENV
-          echo "CXX_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android21-clang++" >> $GITHUB_ENV
-          echo "AR_AARCH64_LINUX_ANDROID=$NDK_BIN/llvm-ar" >> $GITHUB_ENV
-          echo "RANLIB_AARCH64_LINUX_ANDROID=$NDK_BIN/llvm-ranlib" >> $GITHUB_ENV
-          echo "STRIP_AARCH64_LINUX_ANDROID=$NDK_BIN/llvm-strip" >> $GITHUB_ENV
-          # 强制静态链接，修复 Android 动态库依赖
-          echo "RUSTFLAGS=-C target-feature=+crt-static -C link-arg=-llog" >> $GITHUB_ENV
+          echo "CC_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-clang" >> $GITHUB_ENV
+          echo "CXX_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-clang++" >> $GITHUB_ENV
+          echo "AR_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-ar" >> $GITHUB_ENV
+          echo "RANLIB_AARCH64_LINUX_ANDROID=$NDK_BIN/aarch64-linux-android-ranlib" >> $GITHUB_ENV
 
       - name: Build release
         run: |
@@ -50,5 +54,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rusthole-android-arm64
+          name: rusthole-android-arm64-v8a
           path: rusthole/target/aarch64-linux-android/release/rusthole
