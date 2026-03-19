@@ -14,20 +14,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cross (auto handle musl arm64 toolchain)
+      - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      # 核心：cross 自动处理所有工具链、链接器，100%无架构错误
       - name: Build static binary for Android arm64
         run: |
           cross build --release \
             --target aarch64-unknown-linux-musl \
             --all-features
-
-      - name: Strip binary
-        run: |
-          cross run --strip aarch64-unknown-linux-musl \
-            target/aarch64-unknown-linux-musl/release/rusthole
 
       - name: Upload final binary
         uses: actions/upload-artifact@v4
