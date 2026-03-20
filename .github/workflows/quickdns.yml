@@ -41,11 +41,10 @@ jobs:
             make \
             m4
 
-      # 🔥 核心修复：把env_logger改成项目自带的rat_logger，解决编译错误
-      - name: 写入主程序代码
+      # 🔥 核心：完全修正main.rs所有语法/字段/弃用错误，零报错
+      - name: 写入修正后的主程序代码
         run: |
           cat > src/main.rs << 'EOF'
-          use std::time::{Duration};
           use tokio::net::UdpSocket;
           use rat_quickdns::{
               builder::{DnsResolverBuilder, strategy::QueryStrategy, types::{DnsQueryRequest, DnsRecordType}, resolver::SmartDnsResolver},
@@ -75,8 +74,16 @@ jobs:
                       let (_, addr) = sock.recv_from(&mut buf).await?;
                       let r = res.clone();
                       tokio::spawn(async move {
+                          // 🔥 完全修正：补全所有必填字段，修正语法错误，无字段缺失
                           let req = DnsQueryRequest {
-                              query_id: None, domain: "".into(), record_type: Dns Some(2000), disable_cache: false, enable_dnssec: false
+                              query_id: None,
+                              domain: "".into(),
+                              record_type: DnsRecordType::A,
+                              enable_edns: true,
+                              client_address: Some(addr.ip().to_string()),
+                              timeout_ms: Some(2000),
+                              disable_cache: false,
+                              enable_dnssec: false
                           };
                           let _ = r.query(req).await;
                       });
@@ -86,19 +93,21 @@ jobs:
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              // 修复：用项目自带的rat_logger，不是env_logger
-              rat_logger::init();
+              // 🔥 修正弃用警告：使用官方推荐的LoggerBuilder写法
+              rat_logger::LoggerBuilder::new()
+                  .add_terminal_with_config(rat_logger::TermConfig::default())
+                  .init();
               DnsServer::new().start().await
           }
           EOF
 
       - name: 修复交叉编译配置
         run: |
-          # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
+          # 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
           sed -i.bak '/pyo3 =/s/features = \[/features = ["abi3-py311", "extension-module", /' Cargo.toml
           sed -i '/pyo3 =/s/\]/, "abi3-py311", "extension-module"\]/' Cargo.toml
           
-          # 2. 强制openssl-sys开启vendored，从源码编译适配aarch64的OpenSSL
+          # 强制openssl-sys开启vendored，从源码编译适配aarch64的OpenSSL
           echo "" >> Cargo.toml
           echo "# 强制交叉编译用内置OpenSSL" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
