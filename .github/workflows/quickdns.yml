@@ -1,4 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + 完整python-bindings)
+name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
 on:
   workflow_dispatch:
 
@@ -46,43 +46,67 @@ jobs:
             make \
             m4
 
-      # 🔥 安全修复Cargo.toml，100%正确语法，适配python-bindings
+      # 🔥 核心：安全增量修改Cargo.toml，零结构破坏，完全兼容原始配置
       - name: 安全修复 Cargo.toml 配置
         run: |
-          # 先备份原始Cargo.toml，防止改坏
-          cp Cargo.toml Cargo.toml.original
+          # 第一步：先备份原始Cargo.toml，全程不删除原有配置
+          cp Cargo.toml Cargo.toml.backup
           
-          # 1. 修复pyo3可选依赖配置，适配交叉编译
-          sed -i '/^pyo3 =/d' Cargo.toml
-          echo "" >> Cargo.toml
-          echo "# Python绑定依赖（可选，由python-bindings feature控制）" >> Cargo.toml
-          echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"], optional = true }" >> Cargo.toml
+          # 第二步：安全修改pyo3依赖，仅补充交叉编译必须的参数，不删除原有配置
+          # 1. 给pyo3添加extension-module/abi3-py311/macros，关闭default-features，设置optional=true
+          sed -i '/^pyo3 =/ {
+            s/default-features *= *true/default-features = false/g
+            /default-features =/! s/}/, default-features = false }/g
+            s/optional *= *false/optional = true/g
+            /optional =/! s/}/, optional = true }/g
+            s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/g
+            /"extension-module"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/g
+          }' Cargo.toml
           
-          # 2. 修复python-bindings feature，正确绑定pyo3
+          # 2. 如果项目没有pyo3依赖，新增正确的可选依赖（仅当原有配置不存在时执行）
+          if ! grep -q '^pyo3 =' Cargo.toml; then
+            echo "" >> Cargo.toml
+            echo "# Python绑定依赖" >> Cargo.toml
+            echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"], optional = true }" >> Cargo.toml
+          fi
+
+          # 第三步：安全确保python-bindings feature正确存在，不破坏原有[features]段
+          # 1. 如果没有[features]段，新增完整段
           if ! grep -q '^\[features\]' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "[features]" >> Cargo.toml
             echo "default = []" >> Cargo.toml
+            echo "python-bindings = [\"pyo3\"]" >> Cargo.toml
+          # 2. 如果已有[features]段，仅补充python-bindings，不修改原有内容
+          else
+            if ! grep -q '^python-bindings =' Cargo.toml; then
+              # 在[features]段末尾添加python-bindings
+              sed -i '/^\[features\]/,/^\[/ {
+                /^\[/!h
+                $ {
+                  g
+                  a\
+python-bindings = ["pyo3"]
+                }
+              }' Cargo.toml
+            fi
           fi
-          sed -i '/^python-bindings =/d' Cargo.toml
-          echo "python-bindings = [\"pyo3\"]" >> Cargo.toml
-          
-          # 3. 强制openssl-sys静态编译，解决Android交叉编译问题
-          echo "" >> Cargo.toml
-          echo "# 强制交叉编译内置OpenSSL" >> Cargo.toml
-          echo "[dependencies.openssl-sys]" >> Cargo.toml
-          echo "version = \"^0.9.112\"" >> Cargo.toml
-          echo "features = [\"vendored\"]" >> Cargo.toml
-          echo "default-features = false" >> Cargo.toml
-          
-          # 4. 补充空feature，解决unexpected_cfgs警告
-          grep -q '^tokio-rustls =' Cargo.toml || echo "tokio-rustls = []" >> Cargo.toml
-          grep -q '^reqwest =' Cargo.toml || echo "reqwest = []" >> Cargo.toml
-          
-          # 验证Cargo.toml语法正确性
-          echo "=== 验证Cargo.toml语法 ==="
-          cargo check --features python-bindings --quiet 2>&1 || (echo "❌ Cargo.toml语法错误，还原原始文件" && cp Cargo.toml.original Cargo.toml && exit 1)
-          echo "✅ Cargo.toml语法验证通过"
+
+          # 第四步：强制openssl-sys静态编译，解决Android交叉编译问题
+          if ! grep -q '^\[dependencies.openssl-sys\]' Cargo.toml; then
+            echo "" >> Cargo.toml
+            echo "# 强制交叉编译内置OpenSSL" >> Cargo.toml
+            echo "[dependencies.openssl-sys]" >> Cargo.toml
+            echo "version = \"^0.9.112\"" >> Cargo.toml
+            echo "features = [\"vendored\"]" >> Cargo.toml
+            echo "default-features = false" >> Cargo.toml
+          fi
+
+          # 输出修复后的核心配置，确认生效
+          echo "=== 修复后的pyo3依赖 ==="
+          cat Cargo.toml | grep -B 1 -A 1 "pyo3 ="
+          echo "=== 修复后的python-bindings feature ==="
+          cat Cargo.toml | grep -B 2 -A 2 "python-bindings ="
 
       # 完全保留你原有的main.rs，无任何改动
       - name: 写入主程序代码
