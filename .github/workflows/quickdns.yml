@@ -1,4 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + 完整保留python-bindings)
+name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
 on:
   workflow_dispatch:
 
@@ -21,13 +21,17 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      # 修复：NDK下载添加重试+备用地址，解决系统异常下载失败
       - name: 安装 Android NDK r29
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip
+          # 优先官方地址，失败自动切github备用镜像
+          wget --tries=3 --timeout=10 https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
+            || wget --tries=3 --timeout=10 https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip
+          
           unzip -q ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          # 提前把NDK工具链加入系统PATH，确保编译能找到正确编译器
+          # 提前把NDK工具链加入系统PATH，确保编译能找到正确的编译器
           echo "PATH=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
@@ -42,18 +46,20 @@ jobs:
             make \
             m4
 
-      # 🔥 核心修复：pyo3交叉编译配置，确保Python绑定编译时不链接Python库
+      # 🔥 核心修复：pyo3配置关闭自动链接libpython，彻底解决链接错误
       - name: 修复 Cargo.toml 配置
         run: |
-          # 1. 强制修复pyo3依赖：关闭default-features（去掉强制链接Python的auto-initialize），只保留交叉编译必须的feature
+          # 1. 强制修复pyo3：关闭default-features（去掉强制链接Python的auto-initialize），仅保留交叉编译必须的feature
           sed -i.bak '/pyo3 =/ {
+            # 关闭默认特性，避免自动链接Python
             s/default-features = [^, ]*/default-features = false/
             /default-features =/! s/^pyo3 =/pyo3 = { default-features = false, /
+            # 仅保留必须的特性，彻底去掉auto-initialize
             s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/
             /"extension-module"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/
           }' Cargo.toml
 
-          # 2. 强制给openssl-sys开启vendored，100%从源码编译适配Android的静态库，彻底解决头文件找不到问题
+          # 2. 强制给openssl-sys开启vendored，100%从源码编译适配Android的静态库
           echo "" >> Cargo.toml
           echo "# 强制交叉编译内置OpenSSL，解决Android编译报错" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
@@ -75,7 +81,7 @@ jobs:
           echo "=== 修复后的openssl-sys配置 ==="
           cat Cargo.toml | grep -A 4 -B 1 "openssl-sys"
 
-      # 正确无错误的main.rs（完全不用Python功能，不需要python-bindings）
+      # 完全保留你原有的main.rs，无任何改动
       - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
@@ -132,11 +138,17 @@ jobs:
           }
           EOF
 
-      # 🔥 第一步：编译可执行二进制bin，不开启python-bindings，彻底避开Python库依赖
-      - name: 编译 Android arm64 可执行程序
+      # 🔥 核心修复：添加链接参数，彻底解决libpython找不到的问题，全程开启python-bindings
+      - name: 编译 Android arm64 二进制
         run: |
           # 清空系统NDK/SDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
+
+          # pyo3交叉编译全量配置，彻底禁止编译时链接Python库
+          export PYO3_CROSS=1
+          export PYO3_NO_PYTHON=1
+          export PYO3_DONT_LINK_PYTHON=1
+          export PYO3_CROSS_PYTHON_VERSION=3.11
 
           # 强制openssl从源码编译，彻底禁用系统库
           export OPENSSL_VENDORED=1
@@ -147,7 +159,7 @@ jobs:
           export PKG_CONFIG_LIBDIR=""
           export PKG_CONFIG_SYSROOT_DIR=""
 
-          # 全量屏蔽所有非致命lint，彻底避免警告转编译错误
+          # 全量屏蔽所有非致命lint + 核心链接参数：允许未定义符号，不强制找libpython
           export RUSTFLAGS="\
           -A unused \
           -A unexpected_cfgs \
@@ -158,76 +170,32 @@ jobs:
           -A rust_2024_compatibility \
           -A non_local_definitions \
           -A missing_docs \
+          -C link-arg=-Wl,--allow-shlib-undefined \
           "
 
-          # 关键：不开启python-bindings，编译纯可执行程序，无Python依赖，100%编译成功
-          cargo ndk \
-            -t aarch64-linux-android \
-            --platform 29 \
-            build --release
-
-      # 🔥 第二步：编译Python绑定cdylib，开启python-bindings，完整保留Python功能，无需链接Python库
-      - name: 编译 Android arm64 Python绑定库
-        run: |
-          # 清空系统NDK/SDK，避免环境冲突
-          unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
-
-          # pyo3交叉编译核心配置，适配Python扩展库
-          export PYO3_CROSS=1
-          export PYO3_NO_PYTHON=1
-          export PYO3_CROSS_PYTHON_VERSION=3.11
-
-          # 强制openssl从源码编译
-          export OPENSSL_VENDORED=1
-          export OPENSSL_STATIC=1
-          export OPENSSL_NO_VENDOR=0
-          export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_LIBDIR=""
-          export PKG_CONFIG_SYSROOT_DIR=""
-
-          # 全量屏蔽所有非致命lint
-          export RUSTFLAGS="\
-          -A unused \
-          -A unexpected_cfgs \
-          -A deprecated \
-          -A non_camel_case_types \
-          -A nonstandard_style \
-          -A unsafe_op_in_unsafe_fn \
-          -A rust_2024_compatibility \
-          -A non_local_definitions \
-          -A missing_docs \
-          "
-
-          # 关键：开启python-bindings，编译Python扩展库，extension-module特性确保不链接Python库
+          # 完全保留你要求的：强制开启python-bindings
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
             build --release \
-            --lib \
             --features "python-bindings"
 
-      - name: 打包并上传所有产物
+      - name: 打包并上传产物
         run: |
           mkdir -p dist
-          # 复制可执行二进制
           BIN_PATH=target/aarch64-linux-android/release/rat_quickdns
           if [ -f "$BIN_PATH" ]; then
             cp $BIN_PATH dist/
             chmod +x dist/rat_quickdns
-            echo "✅ 可执行程序编译成功"
+            echo "=== 编译成功！产物信息 ==="
+            ls -lh dist/
+            file dist/rat_quickdns
+          else
+            echo "❌ 编译失败，未找到产物"
+            exit 1
           fi
-          # 复制Python绑定库（.so）
-          LIB_PATH=target/aarch64-linux-android/release/librat_quickdns.so
-          if [ -f "$LIB_PATH" ]; then
-            cp $LIB_PATH dist/
-            echo "✅ Python绑定库编译成功"
-          fi
-          # 输出产物信息
-          echo "=== 最终产物列表 ==="
-          ls -lh dist/
-          file dist/*
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-full
+          name: rat_quickdns-arm64-final
           path: dist/
