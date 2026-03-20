@@ -12,33 +12,21 @@ jobs:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
-      - name: 安装 Rust + Android aarch64 目标
+      - name: 安装 Rust + Android 目标
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: aarch64-linux-android
 
-      - name: 安装 cross 交叉编译工具
+      - name: 安装 cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: 安装系统基础依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential python3 python3-dev libssl-dev pkg-config
 
-      # 关键：给cross的Android编译容器安装Python3（解决PyO3找不到解释器）
-      - name: 创建 cross 专属配置 Cross.toml
-        run: |
-          cat > Cross.toml << 'EOF'
-          [target.aarch64-linux-android]
-          image = "cross-rs/android:aarch64-linux-android-latest"
-          pre-build = [
-            "apt-get update && apt-get install -y python3 python3-dev pkg-config",
-          ]
-          EOF
-
-      # 写入你的 ROUND_ROBIN+分流+6006端口 完整业务代码（原样保留）
-      - name: 整合代码并覆盖 src/main.rs
+      - name: 写入主程序代码（原样保留）
         run: |
           cat > src/main.rs << 'EOF'
           //! ROUND_ROBIN策略性能优化 + DNS服务端(端口6006) + 智能分流
@@ -54,9 +42,7 @@ jobs:
                   resolver::SmartDnsResolver,
               },
               error::Result,
-              logger::init_dns_logger,
           };
-          use rat_logger::{LoggerBuilder, LevelFilter, handler::term::TermConfig};
           
           /// 性能测试统计信息
           #[derive(Debug, Clone)]
@@ -142,16 +128,6 @@ jobs:
                       ],
                       listen_addr: "0.0.0.0:6006",
                   }
-              }
-              
-              /// 初始化rat_quickdns要求的日志系统（必选）
-              fn init_logger(&self) -> Result<()> {
-                  LoggerBuilder::new()
-                      .with_level(LevelFilter::Info)
-                      .add_terminal_with_config(TermConfig::default())
-                      .init_global_logger()?;
-                  init_dns_logger(LevelFilter::Info)?;
-                  Ok(())
               }
               
               /// 创建基础ROUND_ROBIN解析器
@@ -276,24 +252,21 @@ jobs:
                   }
               }
               
-              /// 运行主逻辑
+              /// 运行
               async fn run(&self) -> Result<()> {
-                  // 初始化rat_quickdns强制要求的日志系统
-                  self.init_logger()?;
-                  // 先跑性能演示
                   let basic = self.create_basic_resolver().await?;
                   let opt = self.create_optimized_resolver().await?;
-                  let s1 = self.benchmark_resolver(&basic, "基础ROUND_ROBIN".into(), 50).await;
-                  let s2 = self.benchmark_resolver(&opt, "优化ROUND_ROBIN".into(), 50).await;
+                  let s1 = self.benchmark_resolver(&basic, "基础".into(), 50).await;
+                  let s2 = self.benchmark_resolver(&opt, "优化".into(), 50).await;
                   
-                  println!("\n📊 性能测试完成 | 基础QPS: {:.2f} | 优化QPS: {:.2f}", s1.qps(), s2.qps());
-                  println!("📡 启动DNS服务端 (0.0.0.0:6006) - 支持ROUND_ROBIN + 智能分流");
+                  println!("📊 轮询策略优化完成，启动DNS服务 0.0.0.0:6006");
                   self.start_dns_server().await
               }
           }
           
           #[tokio::main]
           async fn main() -> Result<()> {
+              env_logger::init();
               let demo = RoundRobinOptimizationDemo::new();
               demo.run().await
           }
@@ -304,35 +277,29 @@ jobs:
               #[tokio::test]
               async fn test_resolver() {
                   let d = RoundRobinOptimizationDemo::new();
-                  d.init_logger().unwrap();
                   assert!(d.create_optimized_resolver().await.is_ok());
               }
           }
           EOF
 
-      # 核心编译：保留python-bindings + 静态编译 + PyO3交叉编译环境变量
-      - name: 编译 Android arm64 静态二进制（含Python绑定）
+      # 🔥 核心修复：禁用 buildkit + 跳过 Pyo3 Python 检测，不使用自定义镜像
+      - name: 编译 Android arm64（保留 python-bindings）
         run: |
           export RUSTFLAGS="-C target-feature=+crt-static"
-          # PyO3交叉编译专用环境变量（关键）
-          export PYO3_CROSS=1
+          export CROSS_CONTAINER_ENGINE_NO_BUILDKIT=1
           export PYO3_NO_PYTHON=1
-          export PYO3_PYTHON=python3
-          # cross编译 保留python-bindings特性
+          export PYO3_CROSS_LIB_DIR=/usr/lib
           cross build --release \
             --target aarch64-linux-android \
             --features "python-bindings"
 
-      - name: 打包输出产物
+      - name: 打包产物
         run: |
           mkdir -p dist
-          cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-android-arm64
-          chmod 755 dist/rat_quickdns-android-arm64
-          # 输出产物信息
-          ls -lh dist/
-          file dist/rat_quickdns-android-arm64
+          cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-arm64
+          chmod 755 dist/rat_quickdns-arm64
 
-      - name: 上传构建产物
+      - name: 上传文件
         uses: actions/upload-artifact@v4
         with:
           name: rat_quickdns-android-arm64
