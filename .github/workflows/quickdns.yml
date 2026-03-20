@@ -1,5 +1,4 @@
 name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
-
 on:
   workflow_dispatch:
 
@@ -30,7 +29,7 @@ jobs:
           ls -la | grep -E 'android-ndk|ndk'
           echo "当前 HOME: $HOME"
           
-          # 🔥 最简单最可靠写法（专治你这个问题）
+          # 最简单最可靠写法
           rm -rf $HOME/ndk 2>/dev/null || true
           mkdir -p $HOME
           mv android-ndk-r29 $HOME/ndk
@@ -107,20 +106,26 @@ jobs:
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.12
+          
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
           
-          cargo ndk -t aarch64-linux-android -p 29 build --release --features python-bindings
+          cargo ndk \
+            -t aarch64-linux-android \
+            --platform 29 \
+            build --release --features python-bindings
           
           echo "=== 编译完成，产物列表 ==="
           ls -lh target/aarch64-linux-android/release/ || echo "没找到target目录"
 
-      - name: 打包并上传
+      - name: 打包并上传产物
         run: |
           mkdir -p dist
           cp target/aarch64-linux-android/release/rat_quickdns dist/ 2>/dev/null || true
+          cp target/aarch64-linux-android/release/librat_quickdns.so dist/ 2>/dev/null || true
           cp target/aarch64-linux-android/release/*.so dist/ 2>/dev/null || true
+          
           chmod +x dist/* 2>/dev/null || true
           ls -lh dist/
           
