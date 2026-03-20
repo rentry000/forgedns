@@ -17,28 +17,24 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      # 🔥 修复NDK安装+完整工具链路径（彻底解决ar/clang找不到）
+      # 🔥 核心改动 1：安装 cargo-ndk
+      - name: 安装 cargo-ndk
+        run: cargo install cargo-ndk
+
+      # 🔥 核心改动 2：下载 NDK 并仅设置 ANDROID_NDK_HOME
       - name: 安装 Android NDK r29
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip
           unzip -q android-ndk-r29-linux.zip
           mv android-ndk-r29 ~/ndk
-          # 核心：把NDK工具链完整加入PATH
-          NDK_BIN="$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "PATH=$NDK_BIN:$PATH" >> $GITHUB_ENV
-          # 显式指定所有交叉编译工具（解决ring/cc-rs报错）
-          echo "AR=aarch64-linux-android-ar" >> $GITHUB_ENV
-          echo "CC=aarch64-linux-android29-clang" >> $GITHUB_ENV
-          echo "CXX=aarch64-linux-android29-clang++" >> $GITHUB_ENV
-          echo "RANLIB=aarch64-linux-android-ranlib" >> $GITHUB_ENV
-          echo "LD=aarch64-linux-android-ld" >> $GITHUB_ENV
+          # cargo-ndk 只需要这一个环境变量就能自动接管所有工具链路径
+          echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config python3-dev
 
-      # 业务代码原样保留
       - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
@@ -92,27 +88,31 @@ jobs:
           }
           EOF
 
-      # 🔥 核心编译：修复所有依赖报错，强制开启python-bindings
+      # 🔥 核心改动 3：使用 cargo-ndk 执行编译
       - name: 编译 Android arm64 二进制
         run: |
-          # PyO3 交叉编译（保留python绑定，不依赖本地Python）
+          # PyO3 交叉编译参数（保留你的原始设定）
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.14
-          # 修复OpenSSL/ring交叉编译
+          
+          # OpenSSL 交叉编译参数（强制使用 vendored 源码编译，彻底避开系统动态库不兼容问题）
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
-          # 强制开启python-bindings
-          cargo build --release \
-            --target aarch64-linux-android \
-            --features "python-bindings"
+          
+          # 使用 cargo ndk 命令代替普通的 cargo build
+          # -t arm64-v8a: 自动映射为 aarch64-linux-android
+          # -p 29: 指定 Android API Level
+          cargo ndk -t arm64-v8a -p 29 build --release --features "python-bindings"
 
       - name: 打包并上传产物
         run: |
           mkdir -p dist
+          # cargo-ndk 生成的二进制文件依然会在标准的 target 目录下
           cp target/aarch64-linux-android/release/rat_quickdns dist/
           chmod 755 dist/rat_quickdns
+          
       - uses: actions/upload-artifact@v4
         with:
           name: rat_quickdns-arm64-ndk29
