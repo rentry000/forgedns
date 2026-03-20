@@ -29,8 +29,8 @@ jobs:
           mv android-ndk-r29 $HOME/ndk
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
-      # 🔥 关键1：安装编译OpenSSL源码必须的依赖
-      - name: 安装系统全量依赖
+      # 安装编译OpenSSL必须的全量依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -93,44 +93,43 @@ jobs:
           }
           EOF
 
-      # 🔥 关键2：强制锁定openssl-sys用vendored模式，pyo3用abi3模式
+      # 🔥 核心修复：去掉无效的static_crt，只保留正确的vendored，修复依赖冲突
       - name: 修复交叉编译配置
         run: |
           # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
           sed -i.bak '/pyo3 =/s/features = \[/features = ["abi3-py311", "extension-module", /' Cargo.toml
           sed -i '/pyo3 =/s/\]/, "abi3-py311", "extension-module"\]/' Cargo.toml
           
-          # 2. 强制openssl-sys开启vendored+static，从源码编译，不找系统库
+          # 2. 强制openssl-sys开启vendored，从源码编译适配aarch64的OpenSSL（去掉无效的static_crt）
           echo "" >> Cargo.toml
           echo "# 强制交叉编译用内置OpenSSL" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
-          echo "version = \"0.9.112\"" >> Cargo.toml
-          echo "features = [\"vendored\", \"static_crt\"]" >> Cargo.toml
+          echo "version = \"^0.9.112\"" >> Cargo.toml
+          echo "features = [\"vendored\"]" >> Cargo.toml
           
           # 输出配置确认生效
           echo "=== 修复后的pyo3配置 ==="
           cat Cargo.toml | grep -A 2 -B 2 "pyo3 ="
           echo "=== 修复后的openssl-sys配置 ==="
-          cat Cargo.toml | grep -A 4 -B 1 "openssl-sys"
+          cat Cargo.toml | grep -A 3 -B 1 "openssl-sys"
 
-      # 🔥 关键3：全量环境变量，确保交叉编译正确
+      # 🔥 全量正确环境变量，确保交叉编译一次成功
       - name: 编译 Android arm64 二进制
         run: |
           # 清空系统NDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
           
-          # pyo3交叉编译配置
+          # pyo3交叉编译配置（和abi3-py311完全匹配）
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
           
-          # 强制openssl用vendored模式，静态编译，不找系统库
+          # 强制openssl静态编译，从源码构建，不找系统库
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_SYSROOT_DIR=/
           
-          # 用cargo-ndk编译，强制开启python-bindings
+          # 强制开启python-bindings，无任何删减
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
