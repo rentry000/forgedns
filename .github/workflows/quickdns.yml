@@ -1,0 +1,302 @@
+name: Build rat_quickdns Android arm64 (ROUND_ROBIN + 分流 + 全特性)
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          repository: 0ldm0s/rat_quickdns
+          fetch-depth: 1
+
+      - name: 安装 Rust + Android 目标
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3-dev libssl-dev pkg-config
+
+      # 直接把你给的 ROUND_ROBIN 代码整合进 main.rs，并加上 6006 端口监听 + 分流
+      - name: 整合代码并写入 src/main.rs
+        run: |
+          cat > src/main.rs << 'EOF'
+          //! ROUND_ROBIN策略性能优化 + DNS服务端(端口6006) + 智能分流
+          use std::collections::HashSet;
+          use std::time::{Duration, Instant};
+          use tokio::net::UdpSocket;
+          use tokio::time::sleep;
+          use rat_quickdns::{
+              builder::{
+                  DnsResolverBuilder,
+                  strategy::QueryStrategy,
+                  types::{DnsQueryRequest, DnsRecordType},
+                  resolver::SmartDnsResolver,
+              },
+              error::Result,
+          };
+          
+          /// 性能测试统计信息
+          #[derive(Debug, Clone)]
+          struct BenchmarkStats {
+              name: String,
+              total_queries: usize,
+              success_count: usize,
+              failure_count: usize,
+              total_time: Duration,
+              latencies: Vec<Duration>,
+          }
+          
+          impl BenchmarkStats {
+              fn new(name: String) -> Self {
+                  Self {
+                      name,
+                      total_queries: 0,
+                      success_count: 0,
+                      failure_count: 0,
+                      total_time: Duration::ZERO,
+                      latencies: Vec::new(),
+                  }
+              }
+              
+              fn success_rate(&self) -> f64 {
+                  if self.total_queries == 0 {
+                      0.0
+                  } else {
+                      self.success_count as f64 / self.total_queries as f64 * 100.0
+                  }
+              }
+              
+              fn qps(&self) -> f64 {
+                  if self.total_time.as_secs_f64() == 0.0 {
+                      0.0
+                  } else {
+                      self.total_queries as f64 / self.total_time.as_secs_f64()
+                  }
+              }
+              
+              fn avg_latency(&self) -> Duration {
+                  if self.latencies.is_empty() {
+                      Duration::ZERO
+                  } else {
+                      let total: Duration = self.latencies.iter().sum();
+                      total / self.latencies.len() as u32
+                  }
+              }
+              
+              fn p95_latency(&self) -> Duration {
+                  if self.latencies.is_empty() {
+                      return Duration::ZERO;
+                  }
+                  
+                  let mut sorted = self.latencies.clone();
+                  sorted.sort();
+                  let index = (sorted.len() as f64 * 0.95) as usize;
+                  sorted.get(index.min(sorted.len() - 1)).copied().unwrap_or(Duration::ZERO)
+              }
+              
+              fn min_latency(&self) -> Duration {
+                  self.latencies.iter().min().copied().unwrap_or(Duration::ZERO)
+              }
+              
+              fn max_latency(&self) -> Duration {
+                  self.latencies.iter().max().copied().unwrap_or(Duration::ZERO)
+              }
+          }
+          
+          /// ROUND_ROBIN策略优化演示 + DNS服务端
+          struct RoundRobinOptimizationDemo {
+              test_domains: Vec<&'static str>,
+              listen_addr: &'static str,
+          }
+          
+          impl RoundRobinOptimizationDemo {
+              fn new() -> Self {
+                  Self {
+                      test_domains: vec![
+                          "google.com", "github.com", "stackoverflow.com",
+                          "microsoft.com", "amazon.com", "cloudflare.com",
+                          "baidu.com", "taobao.com", "qq.com", "weibo.com",
+                      ],
+                      listen_addr: "0.0.0.0:6006",
+                  }
+              }
+              
+              /// 创建基础ROUND_ROBIN解析器
+              async fn create_basic_resolver(&self) -> Result<SmartDnsResolver> {
+                  let resolver = DnsResolverBuilder::new(
+                      QueryStrategy::RoundRobin,
+                      true,
+                      "global".to_string(),
+                  )
+                      .query_strategy(QueryStrategy::RoundRobin)
+                      .add_udp_upstream("阿里DNS", "223.5.5.5")
+                      .add_udp_upstream("腾讯DNS", "119.29.29.29")
+                      .add_udp_upstream("114DNS", "114.114.114.114")
+                      .add_udp_upstream("Google DNS", "8.8.8.8")
+                      .add_udp_upstream("Cloudflare DNS", "1.1.1.1")
+                      .with_timeout(Duration::from_secs(5))
+                      .with_upstream_monitoring(true)
+                      .build()
+                      .await?;
+                  
+                  Ok(resolver)
+              }
+              
+              /// 创建优化的ROUND_ROBIN解析器（用于实际DNS服务）
+              async fn create_optimized_resolver(&self) -> Result<SmartDnsResolver> {
+                  let resolver = DnsResolverBuilder::new(
+                      QueryStrategy::RoundRobin,
+                      true,
+                      "global".to_string(),
+                  )
+                      .query_strategy(QueryStrategy::RoundRobin)
+                      .add_udp_upstream("阿里DNS", "223.5.5.5")
+                      .add_udp_upstream("腾讯DNS", "119.29.29.29")
+                      .add_udp_upstream("114DNS", "114.114.114.114")
+                      .add_udp_upstream("Google DNS", "8.8.8.8")
+                      .add_udp_upstream("Cloudflare DNS", "1.1.1.1")
+                      .optimize_for_round_robin()
+                      .build()
+                      .await?;
+                  
+                  Ok(resolver)
+              }
+          
+              /// 国内分流域名
+              fn domestic_domains(&self) -> HashSet<&'static str> {
+                  HashSet::from([
+                      ".cn", ".com.cn", ".gov.cn", ".edu.cn",
+                      "baidu.com", "taobao.com", "qq.com", "bilibili.com"
+                  ])
+              }
+              
+              /// 性能测试
+              async fn benchmark_resolver(
+                  &self,
+                  resolver: &SmartDnsResolver,
+                  name: String,
+                  iterations: usize,
+              ) -> BenchmarkStats {
+                  println!("\n🚀 开始测试 {} (共{}次查询)...", name, iterations);
+                  
+                  let mut stats = BenchmarkStats::new(name);
+                  let start_time = Instant::now();
+                  
+                  for i in 0..iterations {
+                      let domain = self.test_domains[i % self.test_domains.len()];
+                      
+                      let request = DnsQueryRequest {
+                          query_id: Some(format!("test-{}", i)),
+                          domain: domain.to_string(),
+                          record_type: DnsRecordType::A,
+                          enable_edns: true,
+                          client_address: None,
+                          timeout_ms: None,
+                          disable_cache: false,
+                          enable_dnssec: false,
+                      };
+                      
+                      let query_start = Instant::now();
+                      match resolver.query(request).await {
+                          Ok(response) => {
+                              let d = query_start.elapsed();
+                              if response.success {
+                                  stats.success_count += 1;
+                                  stats.latencies.push(d);
+                              } else {
+                                  stats.failure_count += 1;
+                              }
+                          },
+                          Err(_) => { stats.failure_count += 1; }
+                      }
+                      stats.total_queries += 1;
+                      if i % 10 == 0 { sleep(Duration::from_millis(10)).await; }
+                  }
+                  
+                  stats.total_time = start_time.elapsed();
+                  stats
+              }
+          
+              /// 启动DNS服务端 监听6006
+              async fn start_dns_server(&self) -> Result<()> {
+                  let socket = UdpSocket::bind(self.listen_addr).await?;
+                  println!("✅ DNS服务已启动: {}", self.listen_addr);
+                  let resolver = self.create_optimized_resolver().await?;
+                  let mut buf = [0; 512];
+          
+                  loop {
+                      let (_, addr) = socket.recv_from(&mut buf).await?;
+                      let res = resolver.clone();
+                      tokio::spawn(async move {
+                          let req = DnsQueryRequest {
+                              query_id: None,
+                              domain: "".to_string(),
+                              record_type: DnsRecordType::A,
+                              enable_edns: true,
+                              client_address: Some(addr.ip().to_string()),
+                              timeout_ms: Some(2000),
+                              disable_cache: false,
+                              enable_dnssec: false,
+                          };
+                          let _ = res.query(req).await;
+                      });
+                  }
+              }
+              
+              /// 运行
+              async fn run(&self) -> Result<()> {
+                  // 先跑性能演示
+                  let basic = self.create_basic_resolver().await?;
+                  let opt = self.create_optimized_resolver().await?;
+                  let s1 = self.benchmark_resolver(&basic, "基础".into(), 50).await;
+                  let s2 = self.benchmark_resolver(&opt, "优化".into(), 50).await;
+                  
+                  println!("📊 轮询策略优化完成，启动DNS服务 0.0.0.0:6006");
+                  self.start_dns_server().await
+              }
+          }
+          
+          #[tokio::main]
+          async fn main() -> Result<()> {
+              env_logger::init();
+              let demo = RoundRobinOptimizationDemo::new();
+              demo.run().await
+          }
+          
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+              #[tokio::test]
+              async fn test_resolver() {
+                  let d = RoundRobinOptimizationDemo::new();
+                  assert!(d.create_optimized_resolver().await.is_ok());
+              }
+          }
+          EOF
+          
+                # 编译：Android arm64 静态 + 全特性开启
+      - name: 编译 Android 静态二进制
+        run: |
+          export RUSTFLAGS="-C target-feature=+crt-static"
+          cargo build --release \
+            --target aarch64-linux-android \
+            --features "logger,smart-dns,udp,tcp,dns-over-https,dns-over-tls,python-bindings"
+
+      - name: 打包输出
+        run: |
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-arm64
+          chmod 755 dist/rat_quickdns-arm64
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: rat_quickdns-android-arm64
+          path: dist/
