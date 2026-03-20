@@ -86,7 +86,7 @@ jobs:
                 $ {
                   g
                   a\
-python-bindings = ["pyo3"]
+                  python-bindings = ["pyo3"]
                 }
               }' Cargo.toml
             fi
