@@ -21,14 +21,27 @@ jobs:
       - name: 安装 cargo-ndk（最新稳定版）
         run: cargo install cargo-ndk --locked
 
-      - name: 安装 Android NDK r29
+      - name: 安装 Android NDK r29（已防目录名不匹配）
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip
           unzip -q ndk.zip
-          mv android-ndk-r29 \~/ndk
+          
+          echo "=== 解压后的文件列表（用于调试）==="
+          ls -la | grep -E 'android-ndk|ndk'
+          
+          # 🔥 自动匹配任意 r29 变体（r29 / r29b / r29c ...）
+          mv android-ndk-r* \~/ndk 2>/dev/null || {
+            echo "❌ 未找到 android-ndk-r* 目录！完整列表："
+            ls -la
+            exit 1
+          }
+          
+          echo "✅ NDK 成功移动到 \~/ndk"
+          ls -l \~/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -5
+          
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$HOME/ndk" >> $GITHUB_ENV
-          echo "CARGO_NDK_PLATFORM=29" >> $GITHUB_ENV   # 🔥 关键：cargo-ndk 官方推荐
+          echo "CARGO_NDK_PLATFORM=29" >> $GITHUB_ENV
 
       - name: 安装系统依赖
         run: |
@@ -90,37 +103,30 @@ jobs:
           }
           EOF
 
-      - name: 编译 Android arm64（完整修复版）
+      - name: 编译 Android arm64（完整最终版）
         run: |
-          # 🔥 彻底清理干扰变量
-          unset ANDROID_SDK_ROOT
-          unset ANDROID_NDK
-          unset ANDROID_HOME
+          unset ANDROID_SDK_ROOT ANDROID_NDK ANDROID_HOME
           
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
-          export PYO3_CROSS_PYTHON_VERSION=3.12     # ← 改为真实可用版本
-          
+          export PYO3_CROSS_PYTHON_VERSION=3.12
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
-          export CARGO_NDK_PLATFORM=29               # ← cargo-ndk 必须的平台设置
           
-          echo "=== 当前 NDK 路径 ==="
-          ls -l $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -5
+          echo "=== 开始编译（API 29）==="
           
-          # ✅ 最终正确命令（已删除所有无效 flag）
           cargo ndk \
             -t aarch64-linux-android \
+            -p 29 \
             build --release --features python-bindings
 
           echo "=== 编译产物列表 ==="
-          ls -lh target/aarch64-linux-android/release/
+          ls -lh target/aarch64-linux-android/release/ || echo "target 目录为空？"
 
       - name: 打包并上传产物
         run: |
           mkdir -p dist
-          # 同时兼容二进制和 .so（你原来的逻辑）
           cp target/aarch64-linux-android/release/rat_quickdns dist/ 2>/dev/null || true
           cp target/aarch64-linux-android/release/librat_quickdns.so dist/ 2>/dev/null || true
           cp target/aarch64-linux-android/release/*.so dist/ 2>/dev/null || true
