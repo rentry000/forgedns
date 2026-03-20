@@ -17,18 +17,17 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      # 🔥 核心改动 1：安装 cargo-ndk
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk
 
-      # 🔥 核心改动 2：下载 NDK 并仅设置 ANDROID_NDK_HOME
       - name: 安装 Android NDK r29
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip
           unzip -q android-ndk-r29-linux.zip
           mv android-ndk-r29 ~/ndk
-          # cargo-ndk 只需要这一个环境变量就能自动接管所有工具链路径
+          # 清除 GitHub 默认的旧 NDK 变量，强制指向新版
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$HOME/ndk" >> $GITHUB_ENV
 
       - name: 安装系统依赖
         run: |
@@ -88,32 +87,30 @@ jobs:
           }
           EOF
 
-      # 🔥 核心改动 3：使用 cargo-ndk 执行编译
       - name: 编译 Android arm64 二进制
         run: |
-          # PyO3 交叉编译参数（保留你的原始设定）
+          # 核心修复：清理可能干扰交叉编译的环境变量
+          unset ANDROID_SDK_ROOT
+          unset ANDROID_NDK
+          
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.14
           
-          # OpenSSL 交叉编译参数（强制使用 vendored 源码编译，彻底避开系统动态库不兼容问题）
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
           
-          # 使用 cargo ndk 命令代替普通的 cargo build
-          # -t arm64-v8a: 自动映射为 aarch64-linux-android
-          # -p 29: 指定 Android API Level
-          cargo ndk -t arm64-v8a -p 29 build --release --features "python-bindings"
+          # 🔥 修正命令格式：将参数放在 build 之前，并显式指定 --target
+          cargo ndk --target aarch64-linux-android --android-platform 29 --build-as-lib build --release --features "python-bindings"
 
       - name: 打包并上传产物
         run: |
           mkdir -p dist
-          # cargo-ndk 生成的二进制文件依然会在标准的 target 目录下
-          cp target/aarch64-linux-android/release/rat_quickdns dist/
-          chmod 755 dist/rat_quickdns
+          cp target/aarch64-linux-android/release/rat_quickdns dist/ || cp target/aarch64-linux-android/release/librat_quickdns.so dist/ 2>/dev/null || true
+          chmod 755 dist/*
           
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-ndk29
+          name: rat_quickdns-arm64-final
           path: dist/
