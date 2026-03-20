@@ -1,4 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
+name: Build rat_quickdns Android arm64 (NDK r29 + 强制python-bindings)
 on:
   workflow_dispatch:
 
@@ -6,15 +6,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出源码
+      - name: 检出 rat_quickdns 源码
         uses: actions/checkout@v4
         with:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
-      - name: 安装 Rust + 交叉目标
+      - name: 安装 Rust + aarch64 交叉目标
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           targets: aarch64-linux-android
 
       - name: 安装 cargo-ndk
@@ -26,7 +27,6 @@ jobs:
           unzip -q ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          # 写入NDK路径
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
       - name: 安装系统依赖
@@ -34,13 +34,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config python3-dev build-essential
 
-      - name: 写入主程序代码
+      - name: 写入主程序代码（修复语法错误）
         run: |
           cat > src/main.rs << 'EOF'
-          use std::collections::HashSet;
-          use std::time::{Duration, Instant};
+          use std::time::{Duration};
           use tokio::net::UdpSocket;
-          use tokio::time::sleep;
           use rat_quickdns::{
               builder::{DnsResolverBuilder, strategy::QueryStrategy, types::{DnsQueryRequest, DnsRecordType}, resolver::SmartDnsResolver},
               error::Result,
@@ -87,22 +85,32 @@ jobs:
           }
           EOF
 
-      - name: 编译 Android arm64
+      # 🔥 核心修复：给pyo3注入abi3特征，解决无Python解释器编译报错
+      - name: 修复pyo3交叉编译配置
         run: |
-          # 🔥 核心：强制屏蔽系统自带NDK，只用我们的NDK r29
+          # 临时给Cargo.toml的pyo3添加abi3-py311 + extension-module特征（交叉编译必须）
+          sed -i.bak '/pyo3 =/s/features = \[/features = ["abi3-py311", "extension-module", /' Cargo.toml
+          sed -i '/pyo3 =/s/\]/, "abi3-py311", "extension-module"\]/' Cargo.toml
+          # 输出修改后的pyo3配置，确认生效
+          echo "=== 修复后的pyo3配置 ==="
+          cat Cargo.toml | grep -A 2 -B 2 "pyo3 ="
+
+      - name: 编译 Android arm64 二进制（保留python-bindings）
+        run: |
+          # 强制清空系统自带NDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
           
-          # 静态编译OpenSSL，彻底解决openssl-sys找不到报错
+          # 🔥 pyo3交叉编译核心配置（和abi3-py311完全匹配）
+          export PYO3_CROSS=1
+          export PYO3_NO_PYTHON=1
+          export PYO3_CROSS_PYTHON_VERSION=3.11
+          
+          # 静态编译OpenSSL，彻底解决openssl-sys报错
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
           
-          # PyO3交叉编译配置，保留python绑定
-          export PYO3_CROSS=1
-          export PYO3_NO_PYTHON=1
-          export PYO3_CROSS_PYTHON_VERSION=3.14
-          
-          # 正确编译：只开项目存在的python-bindings，无rustls
+          # 强制开启python-bindings，无任何删减
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
@@ -114,7 +122,9 @@ jobs:
           mkdir -p dist
           cp target/aarch64-linux-android/release/rat_quickdns dist/
           chmod +x dist/rat_quickdns
+          echo "=== 编译产物信息 ==="
           ls -lh dist/
+          file dist/rat_quickdns
 
       - uses: actions/upload-artifact@v4
         with:
