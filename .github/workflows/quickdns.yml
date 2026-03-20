@@ -18,6 +18,9 @@ jobs:
           toolchain: stable
           targets: aarch64-linux-android
 
+      - name: 安装 cross 编译工具
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - name: 安装编译依赖
         run: |
           sudo apt-get update
@@ -217,7 +220,7 @@ jobs:
                           Err(_) => { stats.failure_count += 1; }
                       }
                       stats.total_queries += 1;
-                      if i % 10 == 0 { sleep(Duration::from_millis(10)).await; }
+                      if i % 10 == 0 { sleep(Duration::fromMillis(10)).await; }
                   }
                   
                   stats.total_time = start_time.elapsed();
@@ -280,12 +283,12 @@ jobs:
               }
           }
           EOF
-          
-                # 编译：Android arm64 静态 + 全特性开启
+
+      # 用 cross 编译，自动内置 Android NDK，解决 clang 找不到问题
       - name: 编译 Android 静态二进制
         run: |
           export RUSTFLAGS="-C target-feature=+crt-static"
-          cargo build --release \
+          cross build --release \
             --target aarch64-linux-android \
             --features "python-bindings"
 
