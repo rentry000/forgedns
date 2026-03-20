@@ -18,7 +18,7 @@ jobs:
           toolchain: stable
           targets: aarch64-linux-android
 
-      - name: 安装 cross
+      - name: 安装 cross 交叉编译工具
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: 安装系统依赖
@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential python3 python3-dev libssl-dev pkg-config
 
-      - name: 写入主程序代码（原样保留）
+      - name: 写入主程序代码（原样完整保留）
         run: |
           cat > src/main.rs << 'EOF'
           //! ROUND_ROBIN策略性能优化 + DNS服务端(端口6006) + 智能分流
@@ -83,7 +83,7 @@ jobs:
                   }
               }
               
-              fn avg_latency(&self) -> Duration {
+              avg_latency(&self) -> Duration {
                   if self.latencies.is_empty() {
                       Duration::ZERO
                   } else {
@@ -254,6 +254,7 @@ jobs:
               
               /// 运行
               async fn run(&self) -> Result<()> {
+                  env_logger::init();
                   let basic = self.create_basic_resolver().await?;
                   let opt = self.create_optimized_resolver().await?;
                   let s1 = self.benchmark_resolver(&basic, "基础".into(), 50).await;
@@ -282,24 +283,30 @@ jobs:
           }
           EOF
 
-      # 🔥 核心修复：禁用 buildkit + 跳过 Pyo3 Python 检测，不使用自定义镜像
-      - name: 编译 Android arm64（保留 python-bindings）
+      # 🔥 终极修复：解决 OpenSSL + PyO3 + Docker 全部报错
+      - name: 编译 Android arm64 静态二进制
         run: |
           export RUSTFLAGS="-C target-feature=+crt-static"
+          # 修复 Docker buildkit 权限/镜像拉取失败
           export CROSS_CONTAINER_ENGINE_NO_BUILDKIT=1
+          # 修复 PyO3 找不到 Python
           export PYO3_NO_PYTHON=1
-          export PYO3_CROSS_LIB_DIR=/usr/lib
+          # 修复 OpenSSL 交叉编译缺失（静态编译内置openssl）
+          export OPENSSL_STATIC=1
+          export OPENSSL_VENDORED=1
+          export PKG_CONFIG_ALLOW_CROSS=1
+          # 编译（保留python-bindings）
           cross build --release \
             --target aarch64-linux-android \
             --features "python-bindings"
 
-      - name: 打包产物
+      - name: 打包输出产物
         run: |
           mkdir -p dist
           cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-arm64
           chmod 755 dist/rat_quickdns-arm64
 
-      - name: 上传文件
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: rat_quickdns-android-arm64
