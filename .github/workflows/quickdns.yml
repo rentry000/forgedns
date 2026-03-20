@@ -1,4 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + 强制python-bindings)
+name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
 on:
   workflow_dispatch:
 
@@ -29,12 +29,20 @@ jobs:
           mv android-ndk-r29 $HOME/ndk
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
-      - name: 安装系统依赖
+      # 🔥 关键1：安装编译OpenSSL源码必须的依赖
+      - name: 安装系统全量依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config python3-dev build-essential
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            python3-dev \
+            perl \
+            make \
+            m4
 
-      - name: 写入主程序代码（修复语法错误）
+      - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
           use std::time::{Duration};
@@ -85,32 +93,44 @@ jobs:
           }
           EOF
 
-      # 🔥 核心修复：给pyo3注入abi3特征，解决无Python解释器编译报错
-      - name: 修复pyo3交叉编译配置
+      # 🔥 关键2：强制锁定openssl-sys用vendored模式，pyo3用abi3模式
+      - name: 修复交叉编译配置
         run: |
-          # 临时给Cargo.toml的pyo3添加abi3-py311 + extension-module特征（交叉编译必须）
+          # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
           sed -i.bak '/pyo3 =/s/features = \[/features = ["abi3-py311", "extension-module", /' Cargo.toml
           sed -i '/pyo3 =/s/\]/, "abi3-py311", "extension-module"\]/' Cargo.toml
-          # 输出修改后的pyo3配置，确认生效
+          
+          # 2. 强制openssl-sys开启vendored+static，从源码编译，不找系统库
+          echo "" >> Cargo.toml
+          echo "# 强制交叉编译用内置OpenSSL" >> Cargo.toml
+          echo "[dependencies.openssl-sys]" >> Cargo.toml
+          echo "version = \"0.9.112\"" >> Cargo.toml
+          echo "features = [\"vendored\", \"static_crt\"]" >> Cargo.toml
+          
+          # 输出配置确认生效
           echo "=== 修复后的pyo3配置 ==="
           cat Cargo.toml | grep -A 2 -B 2 "pyo3 ="
+          echo "=== 修复后的openssl-sys配置 ==="
+          cat Cargo.toml | grep -A 4 -B 1 "openssl-sys"
 
-      - name: 编译 Android arm64 二进制（保留python-bindings）
+      # 🔥 关键3：全量环境变量，确保交叉编译正确
+      - name: 编译 Android arm64 二进制
         run: |
-          # 强制清空系统自带NDK，避免环境冲突
+          # 清空系统NDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
           
-          # 🔥 pyo3交叉编译核心配置（和abi3-py311完全匹配）
+          # pyo3交叉编译配置
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
           
-          # 静态编译OpenSSL，彻底解决openssl-sys报错
+          # 强制openssl用vendored模式，静态编译，不找系统库
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_SYSROOT_DIR=/
           
-          # 强制开启python-bindings，无任何删减
+          # 用cargo-ndk编译，强制开启python-bindings
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
