@@ -287,7 +287,7 @@ jobs:
           export RUSTFLAGS="-C target-feature=+crt-static"
           cargo build --release \
             --target aarch64-linux-android \
-            --features "logger,smart-dns,udp,tcp,dns-over-https,dns-over-tls,python-bindings"
+            --features "python-bindings"
 
       - name: 打包输出
         run: |
