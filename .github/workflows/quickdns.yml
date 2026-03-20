@@ -113,9 +113,8 @@ jobs:
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.12
           
-          export OPENSSL_VENDORED=1
-          export OPENSSL_STATIC=1
-          export PKG_CONFIG_ALLOW_CROSS=1
+          # 换 rustls 后，不需要 openssl 相关 env 了，已移除 OPENSSL_* 和 PKG_CONFIG_ALLOW_CROSS
+          # 如果需要调试依赖树，可加：cargo tree | grep tls
           
           cargo ndk \
             -t aarch64-linux-android \
