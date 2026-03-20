@@ -29,43 +29,38 @@ jobs:
           mv android-ndk-r29 $HOME/ndk
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
-      - name: 安装系统全量依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
-            libssl-dev \
             pkg-config \
-            python3-dev \
-            perl \
-            make \
-            m4
+            python3-dev
 
-      # 🔥 核心：安全修复Cargo.toml，无无效配置，无不存在的feature
-      - name: 安全修复 Cargo.toml 配置
+      # 🔥 核心：安全修复Cargo.toml，pyo3交叉编译配置 + 无无效feature
+      - name: 修复 Cargo.toml 配置
         run: |
-          # 1. 安全给pyo3添加交叉编译必须的abi3-py311 + extension-module特征，无语法错误
+          # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
           sed -i.bak '/pyo3 =/ {
             s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
             /"abi3-py311"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
           }' Cargo.toml
 
-          # 2. 补充代码里用到的feature定义，解决unexpected_cfgs lint警告（空feature，不影响功能）
+          # 2. 补充feature定义，解决unexpected_cfgs警告
           if ! grep -q '^\[features\]' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "[features]" >> Cargo.toml
           fi
-          # 只加代码里存在cfg判断的feature，不加不存在的
           grep -q '^tokio-rustls =' Cargo.toml || echo "tokio-rustls = []" >> Cargo.toml
           grep -q '^reqwest =' Cargo.toml || echo "reqwest = []" >> Cargo.toml
 
-          # 输出修复后的配置，确认无语法错误
-          echo "=== 修复后的Cargo.toml [features] ==="
+          # 输出配置确认
+          echo "=== 修复后的features ==="
           cat Cargo.toml | grep -A 10 "\[features\]"
           echo "=== 修复后的pyo3配置 ==="
           cat Cargo.toml | grep -B 2 -A 2 "pyo3 ="
 
-      # 正确无语法错误的main.rs
+      # 正确无错误的main.rs
       - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
@@ -116,7 +111,7 @@ jobs:
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              // 兼容日志初始化，无弃用警告
+              // 兼容日志初始化
               let _ = rat_logger::LoggerBuilder::new()
                   .add_terminal_with_config(rat_logger::TermConfig::default())
                   .try_init();
@@ -124,31 +119,27 @@ jobs:
           }
           EOF
 
-      # 🔥 核心编译：无无效feature，用环境变量控制静态openssl，强制开启python-bindings
+      # 🔥 核心编译：彻底干掉openssl，用rustls，强制开启python-bindings
       - name: 编译 Android arm64 二进制
         run: |
           # 清空系统NDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
 
-          # pyo3交叉编译配置（适配Android，无Python解释器模式）
+          # pyo3交叉编译配置
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
 
-          # 🔥 正确方式：用环境变量开启openssl静态编译，不需要项目有对应feature
-          export OPENSSL_VENDORED=1
-          export OPENSSL_STATIC=1
-          export PKG_CONFIG_ALLOW_CROSS=1
-
-          # 关闭所有非致命lint，避免警告转为编译错误
+          # 关闭所有非致命lint，避免警告转错误
           export RUSTFLAGS="-A unused -A unexpected_cfgs -A deprecated -A non_camel_case_types -A nonstandard_style"
 
-          # 只开启项目真实存在的feature：python-bindings，无任何无效feature
+          # 🔥 根治openssl报错：关闭默认features（干掉openssl），开启tokio-rustls + python-bindings
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
             build --release \
-            --features "python-bindings"
+            --no-default-features \
+            --features "tokio-rustls,python-bindings"
 
       - name: 打包并上传产物
         run: |
