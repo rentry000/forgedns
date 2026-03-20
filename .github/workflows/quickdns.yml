@@ -1,5 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
-
+name: Build rat_quickdns Android arm64 (NDK r29 + rustls + python-bindings)
 on:
   workflow_dispatch:
 
@@ -25,26 +24,15 @@ jobs:
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip
           unzip -q ndk.zip
-          
-          echo "=== 解压结果 ==="
-          ls -la | grep -E 'android-ndk|ndk'
-          echo "当前 HOME: $HOME"
-          
-          rm -rf $HOME/ndk 2>/dev/null || true
-          mkdir -p $HOME
+          rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          
-          echo "✅ NDK 已成功移动到 $HOME/ndk"
-          ls -l $HOME/ndk/ | head -3
-          
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$HOME/ndk" >> $GITHUB_ENV
           echo "CARGO_NDK_PLATFORM=29" >> $GITHUB_ENV
 
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config python3-dev build-essential clang libclang-dev
+          sudo apt-get install -y python3-dev build-essential pkg-config
 
       - name: 写入主程序代码
         run: |
@@ -62,13 +50,13 @@ jobs:
           impl DnsServer {
               fn new() -> Self { Self { listen_addr: "0.0.0.0:6006" } }
               async fn create_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global".into())
-                      .query_strategy(QueryStrategy::RoundRobin)
+                  DnsResolverBuilder::new(QueryStrategy.RoundRobin, true, "global".into())
+                      .query_strategy(QueryStrategy.RoundRobin)
                       .add_udp_upstream("阿里DNS","223.5.5.5")
                       .add_udp_upstream("腾讯DNS","119.29.29.29")
                       .add_udp_upstream("114DNS","114.114.114.114")
-                      .add_udp_upstream("Google","8.8.8.8")
-                      .add_udp_upstream("Cloudflare","1.1.1.1")
+                      .add_udp_upstream("Google DNS","8.8.8.8")
+                      .add_udp_upstream("Cloudflare DNS","1.1.1.1")
                       .optimize_for_round_robin()
                       .build().await
               }
@@ -82,7 +70,7 @@ jobs:
                       let r = res.clone();
                       tokio::spawn(async move {
                           let req = DnsQueryRequest {
-                              query_id: None, domain: "".into(), record_type: DnsRecordType::A,
+                              query_id: None, domain: "".into(), record_type: DnsRecordType.A,
                               enable_edns: true, client_address: Some(addr.ip().to_string()),
                               timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false
                           };
@@ -99,42 +87,31 @@ jobs:
           }
           EOF
 
-      - name: 编译 Android arm64
+      - name: 编译 Android arm64（rustls 替代 openssl）
         run: |
           unset ANDROID_SDK_ROOT ANDROID_NDK ANDROID_HOME
           
-          # 临时注入 abi3-py312 feature 到 Cargo.toml（仅本次构建有效）
-          sed -i '/pyo3 =/s/features = \[/features = ["abi3-py312", "extension-module", /' Cargo.toml || echo "注入 abi3 feature 失败，继续尝试构建"
-          sed -i '/pyo3 =/s/\]/, "abi3-py312", "extension-module"\]/' Cargo.toml || true  # 防已有 features
-          
-          cat Cargo.toml | grep pyo3   # 调试：显示修改后样子
-          
+          # PyO3 交叉编译，跳过Python检测
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
-          export PYO3_CROSS_PYTHON_VERSION=3.12
+          export PYO3_CROSS_PYTHON_VERSION=3.14
           
-          # 换 rustls 后，不需要 openssl 相关 env 了，已移除 OPENSSL_* 和 PKG_CONFIG_ALLOW_CROSS
-          # 如果需要调试依赖树，可加：cargo tree | grep tls
-          
+          # 🔥 核心：关闭默认openssl，启用rustls + python-bindings
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
-            build --release --features python-bindings
-          
-          echo "=== 编译完成，产物列表 ==="
-          ls -lh target/aarch64-linux-android/release/ || echo "没找到target目录"
+            build --release \
+            --no-default-features \
+            --features "rustls,python-bindings"
 
       - name: 打包并上传产物
         run: |
           mkdir -p dist
-          cp target/aarch64-linux-android/release/rat_quickdns dist/ 2>/dev/null || true
-          cp target/aarch64-linux-android/release/librat_quickdns.so dist/ 2>/dev/null || true
-          cp target/aarch64-linux-android/release/*.so dist/ 2>/dev/null || true
-          
-          chmod +x dist/* 2>/dev/null || true
+          cp target/aarch64-linux-android/release/rat_quickdns dist/
+          chmod +x dist/rat_quickdns
           ls -lh dist/
-          
+
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-final
+          name: rat_quickdns-arm64-rustls
           path: dist/
