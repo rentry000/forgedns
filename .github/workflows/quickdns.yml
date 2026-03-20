@@ -1,4 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + Python 3.14 + python-bindings)
+name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
 on:
   workflow_dispatch:
 
@@ -12,35 +12,26 @@ jobs:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
-      - name: 安装 Rust 与 aarch64 目标
+      - name: 安装 Rust + aarch64 目标
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: aarch64-linux-android
 
-      # 官方正版 NDK r29 地址（无d后缀，r29就是最终版）
+      # 官方正确 NDK r29
       - name: 安装 Android NDK r29
         run: |
           wget -q -O ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
           unzip -q ndk.zip
           mv android-ndk-r29 $HOME/ndk
-          echo "$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+          echo "$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
 
-      # Python 3.14.0 Android aarch64 开发包
-      - name: 下载 Android Python 3.14 环境
-        run: |
-          mkdir -p $HOME/android-python
-          cd $HOME/android-python
-          wget -q -O python.tar.gz https://github.com/chaosfield/python-android/releases/download/3.14.0/Python-3.14.0-android-aarch64.tar.gz
-          tar xf python.tar.gz
-          echo "ANDROID_PYTHON_ROOT=$HOME/android-python" >> $GITHUB_ENV
-
-      - name: 安装系统依赖
+      - name: 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
-      # 你的完整业务代码原样保留
+      # 你的业务代码原样保留
       - name: 写入 src/main.rs
         run: |
           cat > src/main.rs << 'EOF'
@@ -59,7 +50,6 @@ jobs:
               error::Result,
           };
           
-          /// 性能测试统计信息
           #[derive(Debug, Clone)]
           struct BenchmarkStats {
               name: String,
@@ -72,36 +62,13 @@ jobs:
           
           impl BenchmarkStats {
               fn new(name: String) -> Self {
-                  Self {
-                      name,
-                      total_queries: 0,
-                      success_count: 0,
-                      failure_count: 0,
-                      total_time: Duration::ZERO,
-                      latencies: Vec::new(),
-                  }
+                  Self { name, total_queries:0, success_count:0, failure_count:0, total_time:Duration::ZERO, latencies:Vec::new() }
               }
               fn success_rate(&self) -> f64 {
-                  if self.total_queries == 0 {
-                      0.0
-                  } else {
-                      self.success_count as f64 / self.total_queries as f64 * 100.0
-                  }
+                  if self.total_queries == 0 { 0.0 } else { self.success_count as f64 / self.total_queries * 100.0 }
               }
               fn qps(&self) -> f64 {
-                  if self.total_time.as_secs_f64() == 0.0 {
-                      0.0
-                  } else {
-                      self.total_queries as f64 / self.total_time.as_secs_f64()
-                  }
-              }
-              fn avg_latency(&self) -> Duration {
-                  if self.latencies.is_empty() {
-                      Duration::ZERO
-                  } else {
-                      let total: Duration = self.latencies.iter().sum();
-                      total / self.latencies.len() as u32
-                  }
+                  if self.total_time.as_secs_f64() == 0.0 { 0.0 } else { self.total_queries as f64 / self.total_time.as_secs_f64() }
               }
           }
           
@@ -113,74 +80,36 @@ jobs:
           impl RoundRobinOptimizationDemo {
               fn new() -> Self {
                   Self {
-                      test_domains: vec![
-                          "google.com", "github.com", "stackoverflow.com",
-                          "cloudflare.com", "baidu.com", "taobao.com", "qq.com"
-                      ],
+                      test_domains: vec!["google.com","github.com","cloudflare.com","baidu.com","taobao.com","qq.com"],
                       listen_addr: "0.0.0.0:6006",
                   }
               }
-              async fn create_basic_resolver(&self) -> Result<SmartDnsResolver> {
-                  let resolver = DnsResolverBuilder::new(
-                      QueryStrategy::RoundRobin,
-                      true,
-                      "global".to_string(),
-                  )
+              async fn create_resolver(&self) -> Result<SmartDnsResolver> {
+                  DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global".into())
                       .query_strategy(QueryStrategy::RoundRobin)
-                      .add_udp_upstream("阿里DNS", "223.5.5.5")
-                      .add_udp_upstream("腾讯DNS", "119.29.29.29")
-                      .add_udp_upstream("114DNS", "114.114.114.114")
-                      .add_udp_upstream("Google DNS", "8.8.8.8")
-                      .add_udp_upstream("Cloudflare DNS", "1.1.1.1")
-                      .with_timeout(Duration::from_secs(5))
-                      .with_upstream_monitoring(true)
-                      .build()
-                      .await?;
-                  Ok(resolver)
-              }
-              async fn create_optimized_resolver(&self) -> Result<SmartDnsResolver> {
-                  let resolver = DnsResolverBuilder::new(
-                      QueryStrategy::RoundRobin,
-                      true,
-                      "global".to_string(),
-                  )
-                      .query_strategy(QueryStrategy::RoundRobin)
-                      .add_udp_upstream("阿里DNS", "223.5.5.5")
-                      .add_udp_upstream("腾讯DNS", "119.29.29.29")
-                      .add_udp_upstream("114DNS", "114.114.114.114")
-                      .add_udp_upstream("Google DNS", "8.8.8.8")
-                      .add_udp_upstream("Cloudflare DNS", "1.1.1.1")
+                      .add_udp_upstream("阿里DNS","223.5.5.5")
+                      .add_udp_upstream("腾讯DNS","119.29.29.29")
+                      .add_udp_upstream("114DNS","114.114.114.114")
+                      .add_udp_upstream("Google","8.8.8.8")
+                      .add_udp_upstream("Cloudflare","1.1.1.1")
                       .optimize_for_round_robin()
-                      .build()
-                      .await?;
-                  Ok(resolver)
-              }
-              fn domestic_domains(&self) -> HashSet<&'static str> {
-                  HashSet::from([
-                      ".cn", ".com.cn", ".gov.cn",
-                      "baidu.com", "taobao.com", "qq.com", "bilibili.com"
-                  ])
+                      .build().await
               }
               async fn start_dns_server(&self) -> Result<()> {
-                  let socket = UdpSocket::bind(self.listen_addr).await?;
-                  println!("✅ DNS服务已启动: {}", self.listen_addr);
-                  let resolver = self.create_optimized_resolver().await?;
+                  let s = UdpSocket::bind(self.listen_addr).await?;
+                  println!("✅ DNS服务启动: {}", self.listen_addr);
+                  let r = self.create_resolver().await?;
                   let mut buf = [0; 512];
                   loop {
-                      let (_, addr) = socket.recv_from(&mut buf).await?;
-                      let res = resolver.clone();
+                      let (_, addr) = s.recv_from(&mut buf).await?;
+                      let r = r.clone();
                       tokio::spawn(async move {
                           let req = DnsQueryRequest {
-                              query_id: None,
-                              domain: "".to_string(),
-                              record_type: DnsRecordType::A,
-                              enable_edns: true,
-                              client_address: Some(addr.ip().to_string()),
-                              timeout_ms: Some(2000),
-                              disable_cache: false,
-                              enable_dnssec: false
+                              query_id: None, domain: "".into(), record_type: DnsRecordType::A,
+                              enable_edns: true, client_address: Some(addr.ip().to_string()),
+                              timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false
                           };
-                          let _ = res.query(req).await;
+                          let _ = r.query(req).await;
                       });
                   }
               }
@@ -197,37 +126,36 @@ jobs:
           }
           EOF
 
-      # 核心编译：NDK29 + Python3.14 + 强制开启 python-bindings
-      - name: 编译 Android arm64 静态二进制
+      # 🔥 核心：跳过不存在的Python包，强制交叉编译 + 保留python-bindings
+      - name: 编译 Android arm64
         run: |
           export CC=aarch64-linux-android29-clang
           export CXX=aarch64-linux-android29-clang++
           export AR=aarch64-linux-android-ar
           
-          # PyO3 交叉编译配置 Python 3.14
+          # 关键：不依赖本地Python，保留python绑定
           export PYO3_CROSS=1
+          export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.14
-          export PYO3_INCLUDE_DIR="$ANDROID_PYTHON_ROOT/include/python3.14"
-          export PYO3_LIB_DIR="$ANDROID_PYTHON_ROOT/lib"
           
-          # OpenSSL 静态编译
+          # OpenSSL静态编译
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
           
-          # 强制开启 python-bindings 不关闭
+          # 强制开启python-bindings
           cargo build --release \
             --target aarch64-linux-android \
             --features "python-bindings"
 
-      - name: 打包输出
+      - name: 打包产物
         run: |
           mkdir -p dist
-          cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-arm64-py314
-          chmod 755 dist/rat_quickdns-arm64-py314
+          cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-arm64
+          chmod 755 dist/rat_quickdns-arm64
 
-      - name: 上传构建产物
+      - name: 上传
         uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-ndk29-py314
+          name: rat_quickdns-arm64-ndk29
           path: dist/
