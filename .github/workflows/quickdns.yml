@@ -1,4 +1,4 @@
-name: Build rat_quickdns Android arm64 (NDK r29 + rustls + python-bindings)
+name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
 on:
   workflow_dispatch:
 
@@ -26,13 +26,13 @@ jobs:
           unzip -q ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
+          # 写入NDK路径
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
-          echo "CARGO_NDK_PLATFORM=29" >> $GITHUB_ENV
 
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-dev build-essential pkg-config
+          sudo apt-get install -y libssl-dev pkg-config python3-dev build-essential
 
       - name: 写入主程序代码
         run: |
@@ -50,8 +50,8 @@ jobs:
           impl DnsServer {
               fn new() -> Self { Self { listen_addr: "0.0.0.0:6006" } }
               async fn create_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy.RoundRobin, true, "global".into())
-                      .query_strategy(QueryStrategy.RoundRobin)
+                  DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global".into())
+                      .query_strategy(QueryStrategy::RoundRobin)
                       .add_udp_upstream("阿里DNS","223.5.5.5")
                       .add_udp_upstream("腾讯DNS","119.29.29.29")
                       .add_udp_upstream("114DNS","114.114.114.114")
@@ -70,7 +70,7 @@ jobs:
                       let r = res.clone();
                       tokio::spawn(async move {
                           let req = DnsQueryRequest {
-                              query_id: None, domain: "".into(), record_type: DnsRecordType.A,
+                              query_id: None, domain: "".into(), record_type: DnsRecordType::A,
                               enable_edns: true, client_address: Some(addr.ip().to_string()),
                               timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false
                           };
@@ -87,22 +87,27 @@ jobs:
           }
           EOF
 
-      - name: 编译 Android arm64（rustls 替代 openssl）
+      - name: 编译 Android arm64
         run: |
-          unset ANDROID_SDK_ROOT ANDROID_NDK ANDROID_HOME
+          # 🔥 核心：强制屏蔽系统自带NDK，只用我们的NDK r29
+          unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
           
-          # PyO3 交叉编译，跳过Python检测
+          # 静态编译OpenSSL，彻底解决openssl-sys找不到报错
+          export OPENSSL_VENDORED=1
+          export OPENSSL_STATIC=1
+          export PKG_CONFIG_ALLOW_CROSS=1
+          
+          # PyO3交叉编译配置，保留python绑定
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.14
           
-          # 🔥 核心：关闭默认openssl，启用rustls + python-bindings
+          # 正确编译：只开项目存在的python-bindings，无rustls
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
             build --release \
-            --no-default-features \
-            --features "rustls,python-bindings"
+            --features "python-bindings"
 
       - name: 打包并上传产物
         run: |
@@ -113,5 +118,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-rustls
+          name: rat_quickdns-arm64-final
           path: dist/
