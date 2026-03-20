@@ -27,11 +27,11 @@ jobs:
           unzip -q ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          # 提前把NDK工具链加入系统PATH，确保编译OpenSSL能找到正确编译器
+          # 提前把NDK工具链加入系统PATH，确保编译能找到正确的编译器
           echo "PATH=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
-      - name: 安装系统全量依赖（编译OpenSSL必须）
+      - name: 安装系统全量依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -42,13 +42,13 @@ jobs:
             make \
             m4
 
-      # 安全修复Cargo.toml，无无效feature，强制开启openssl静态编译+pyo3交叉编译配置
+      # 🔥 核心修复：pyo3交叉编译配置，确保不链接Python库
       - name: 修复 Cargo.toml 配置
         run: |
-          # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
+          # 1. 强制给pyo3添加交叉编译必须的feature：extension-module（核心！告诉pyo3不链接libpython）+ abi3-py311
           sed -i.bak '/pyo3 =/ {
             s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
-            /"abi3-py311"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
+            /"extension-module"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
           }' Cargo.toml
 
           # 2. 强制给openssl-sys开启vendored，100%从源码编译适配Android的静态库
@@ -67,8 +67,14 @@ jobs:
           grep -q '^tokio-rustls =' Cargo.toml || echo "tokio-rustls = []" >> Cargo.toml
           grep -q '^reqwest =' Cargo.toml || echo "reqwest = []" >> Cargo.toml
 
-      # 🔥 核心修复：彻底修正main.rs日志代码，零语法错误
-      - name: 写入修正后的主程序代码
+          # 输出配置确认生效
+          echo "=== 修复后的pyo3配置 ==="
+          cat Cargo.toml | grep -B 2 -A 2 "pyo3 ="
+          echo "=== 修复后的openssl-sys配置 ==="
+          cat Cargo.toml | grep -A 4 -B 1 "openssl-sys"
+
+      # 正确无错误的main.rs
+      - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
           use tokio::net::UdpSocket;
@@ -118,25 +124,25 @@ jobs:
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              // 🔥 修正：用项目原生支持的最简日志初始化，无API错误
-              // 已屏蔽deprecated警告，无需担心弃用提示
+              // 项目原生支持的日志初始化，无API错误
               rat_logger::init();
               DnsServer::new().start().await
           }
           EOF
 
-      # 🔥 核心编译：全量屏蔽所有警告，强制开启python-bindings，静态OpenSSL
+      # 🔥 核心编译：彻底解决Python库链接错误，强制开启python-bindings
       - name: 编译 Android arm64 二进制
         run: |
           # 清空系统NDK/SDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
 
-          # pyo3交叉编译配置（适配Android无Python解释器场景）
+          # 🔥 核心：pyo3交叉编译全量配置，彻底禁止链接Python库
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
+          export PYO3_DONT_LINK_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
 
-          # 强制openssl从源码编译，彻底禁用系统库，避免头文件找不到
+          # 强制openssl从源码编译，彻底禁用系统库
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export OPENSSL_NO_VENDOR=0
@@ -145,7 +151,7 @@ jobs:
           export PKG_CONFIG_LIBDIR=""
           export PKG_CONFIG_SYSROOT_DIR=""
 
-          # 🔥 全量屏蔽所有非致命lint，彻底避免警告转编译错误
+          # 全量屏蔽所有非致命lint，彻底避免警告转编译错误
           export RUSTFLAGS="\
           -A unused \
           -A unexpected_cfgs \
