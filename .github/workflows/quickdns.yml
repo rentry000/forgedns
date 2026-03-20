@@ -46,43 +46,74 @@ jobs:
             make \
             m4
 
-      # 🔥 核心修复：安全重写Cargo.toml，100%正确语法，无嵌套错误
+      # 🔥 核心修复：安全修复Cargo.toml，彻底解决feature依赖错误，不破坏原有结构
       - name: 安全修复 Cargo.toml 配置
         run: |
-          # 先备份原始Cargo.toml，防止改坏
-          cp Cargo.toml Cargo.toml.bak
+          # 第一步：先备份原始Cargo.toml，防止改坏
+          cp Cargo.toml Cargo.toml.original
           
-          # 1. 删除原来的pyo3配置行，彻底避免语法冲突
-          sed -i '/^pyo3 =/d' Cargo.toml
-          
-          # 2. 写入完全正确的pyo3配置，无嵌套大括号，适配交叉编译
-          echo "" >> Cargo.toml
-          echo "# 修复pyo3交叉编译配置" >> Cargo.toml
-          echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"] }" >> Cargo.toml
-          
-          # 3. 写入正确的openssl-sys配置，强制静态编译
+          # 第二步：修复pyo3依赖，确保和python-bindings feature正确绑定
+          # 1. 如果已有pyo3依赖，修改它：添加交叉编译必须的feature，确保optional=true
+          if grep -q '^pyo3 =' Cargo.toml; then
+            sed -i '/^pyo3 =/ {
+              s/optional *= *false/optional = true/
+              /optional =/! s/}/, optional = true }/
+              s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/
+              /"extension-module"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/
+              s/default-features *= *true/default-features = false/
+              /default-features =/! s/}/, default-features = false }/
+            }' Cargo.toml
+          # 2. 如果没有pyo3依赖，新增正确的可选依赖配置
+          else
+            echo "" >> Cargo.toml
+            echo "# Python绑定依赖" >> Cargo.toml
+            echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"], optional = true }" >> Cargo.toml
+          fi
+
+          # 第三步：确保python-bindings feature正确包含pyo3
+          # 1. 如果已有features段，修复python-bindings
+          if grep -q '^\[features\]' Cargo.toml; then
+            # 如果已有python-bindings，确保包含pyo3
+            if grep -q '^python-bindings =' Cargo.toml; then
+              sed -i '/^python-bindings =/ {
+                /"pyo3"/! s/= *\[/= ["pyo3", /
+              }' Cargo.toml
+            # 如果没有python-bindings，新增
+            else
+              echo "python-bindings = [\"pyo3\"]" >> Cargo.toml
+            fi
+          # 2. 如果没有features段，新增完整配置
+          else
+            echo "" >> Cargo.toml
+            echo "[features]" >> Cargo.toml
+            echo "default = []" >> Cargo.toml
+            echo "python-bindings = [\"pyo3\"]" >> Cargo.toml
+          fi
+
+          # 第四步：强制openssl-sys开启vendored，静态编译适配Android
           echo "" >> Cargo.toml
           echo "# 强制交叉编译内置OpenSSL，解决Android编译报错" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
           echo "version = \"^0.9.112\"" >> Cargo.toml
           echo "features = [\"vendored\"]" >> Cargo.toml
           echo "default-features = false" >> Cargo.toml
-          
-          # 4. 补充空feature定义，解决unexpected_cfgs警告
-          if ! grep -q '^\[features\]' Cargo.toml; then
-            echo "" >> Cargo.toml
-            echo "[features]" >> Cargo.toml
-          fi
+
+          # 第五步：补充空feature定义，解决unexpected_cfgs警告
           grep -q '^tokio-rustls =' Cargo.toml || echo "tokio-rustls = []" >> Cargo.toml
           grep -q '^reqwest =' Cargo.toml || echo "reqwest = []" >> Cargo.toml
-          
-          # 输出修复后的配置，确认语法正确
-          echo "=== 修复后的pyo3配置 ==="
+
+          # 输出修复后的配置，确认无错误
+          echo "=== 修复后的pyo3依赖配置 ==="
           cat Cargo.toml | grep -B 1 -A 1 "pyo3 ="
+          echo "=== 修复后的python-bindings feature ==="
+          cat Cargo.toml | grep -B 2 -A 2 "python-bindings ="
           echo "=== 修复后的openssl-sys配置 ==="
           cat Cargo.toml | grep -A 4 -B 1 "openssl-sys"
-          echo "=== 修复后的features ==="
-          cat Cargo.toml | grep -A 10 "\[features\]"
+
+          # 验证Cargo.toml语法是否正确
+          echo "=== 验证Cargo.toml语法 ==="
+          cargo check --manifest-path Cargo.toml --features python-bindings --quiet 2>&1 || (echo "❌ Cargo.toml语法错误，还原原始文件" && cp Cargo.toml.original Cargo.toml && exit 1)
+          echo "✅ Cargo.toml语法验证通过"
 
       # 完全保留你原有的main.rs，无任何改动
       - name: 写入主程序代码
