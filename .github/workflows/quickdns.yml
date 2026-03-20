@@ -1,4 +1,5 @@
 name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
+
 on:
   workflow_dispatch:
 
@@ -12,27 +13,29 @@ jobs:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
-      - name: 安装 Rust 交叉编译目标
+      - name: 安装 Rust + 交叉目标
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: 安装 cargo-ndk
-        run: cargo install cargo-ndk
+      - name: 安装 cargo-ndk（最新稳定版）
+        run: cargo install cargo-ndk --locked
 
       - name: 安装 Android NDK r29
         run: |
-          wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          unzip -q android-ndk-r29-linux.zip
-          mv android-ndk-r29 ~/ndk
-          # 清除 GitHub 默认的旧 NDK 变量，强制指向新版
+          wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip
+          unzip -q ndk.zip
+          mv android-ndk-r29 \~/ndk
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$HOME/ndk" >> $GITHUB_ENV
+          echo "CARGO_NDK_PLATFORM=29" >> $GITHUB_ENV   # 🔥 关键：cargo-ndk 官方推荐
 
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config python3-dev
+          sudo apt-get install -y \
+            libssl-dev pkg-config python3-dev \
+            build-essential clang libclang-dev
 
       - name: 写入主程序代码
         run: |
@@ -87,28 +90,43 @@ jobs:
           }
           EOF
 
-      - name: 编译 Android arm64 二进制
+      - name: 编译 Android arm64（完整修复版）
         run: |
-          # 核心修复：清理可能干扰交叉编译的环境变量
+          # 🔥 彻底清理干扰变量
           unset ANDROID_SDK_ROOT
           unset ANDROID_NDK
+          unset ANDROID_HOME
           
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
-          export PYO3_CROSS_PYTHON_VERSION=3.14
+          export PYO3_CROSS_PYTHON_VERSION=3.12     # ← 改为真实可用版本
           
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
+          export CARGO_NDK_PLATFORM=29               # ← cargo-ndk 必须的平台设置
           
-          # 🔥 修正命令格式：将参数放在 build 之前，并显式指定 --target
-          cargo ndk --target aarch64-linux-android --android-platform 29 --build-as-lib build --release --features "python-bindings"
+          echo "=== 当前 NDK 路径 ==="
+          ls -l $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/ | head -5
+          
+          # ✅ 最终正确命令（已删除所有无效 flag）
+          cargo ndk \
+            -t aarch64-linux-android \
+            build --release --features python-bindings
+
+          echo "=== 编译产物列表 ==="
+          ls -lh target/aarch64-linux-android/release/
 
       - name: 打包并上传产物
         run: |
           mkdir -p dist
-          cp target/aarch64-linux-android/release/rat_quickdns dist/ || cp target/aarch64-linux-android/release/librat_quickdns.so dist/ 2>/dev/null || true
-          chmod 755 dist/*
+          # 同时兼容二进制和 .so（你原来的逻辑）
+          cp target/aarch64-linux-android/release/rat_quickdns dist/ 2>/dev/null || true
+          cp target/aarch64-linux-android/release/librat_quickdns.so dist/ 2>/dev/null || true
+          cp target/aarch64-linux-android/release/*.so dist/ 2>/dev/null || true
+          
+          chmod +x dist/* 2>/dev/null || true
+          ls -lh dist/
           
       - uses: actions/upload-artifact@v4
         with:
