@@ -111,59 +111,255 @@ jobs:
       # 完全保留你原有的main.rs，无任何改动
       - name: 写入主程序代码
         run: |
+          # 写入主程序代码
           cat > src/main.rs << 'EOF'
           use tokio::net::UdpSocket;
+          use std::sync::Arc;
+          use std::time::Duration;
           use rat_quickdns::{
-              builder::{DnsResolverBuilder, strategy::QueryStrategy, types::{DnsQueryRequest, DnsRecordType}, resolver::SmartDnsResolver},
+              builder::{
+                  DnsResolverBuilder, strategy::QueryStrategy,
+                  types::{DnsQueryRequest, DnsRecordType},
+                  resolver::SmartDnsResolver
+              },
               error::Result,
+              types::{
+                  Request, Response, Record, RData,
+                  QClass, Opcode, ResponseCode, RecordType
+              },
           };
           
-          struct DnsServer { listen_addr: &'static str }
+          struct DnsServer {
+              listen_addr: &'static str,
+          }
+          
           impl DnsServer {
-              fn new() -> Self { Self { listen_addr: "0.0.0.0:6006" } }
-              async fn create_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global".into())
-                      .query_strategy(QueryStrategy::RoundRobin)
-                      .add_udp_upstream("阿里DNS","223.5.5.5")
-                      .add_udp_upstream("腾讯DNS","119.29.29.29")
-                      .add_udp_upstream("114DNS","114.114.114.114")
-                      .add_udp_upstream("Google DNS","8.8.8.8")
-                      .add_udp_upstream("Cloudflare DNS","1.1.1.1")
-                      .optimize_for_round_robin()
-                      .build().await
+              fn new() -> Self {
+                  Self {
+                      listen_addr: "0.0.0.0:6006",
+                  }
               }
+          
+              /// 创建国内DNS解析器（用于国内域名分流）
+              async fn create_cn_resolver(&self) -> Result<SmartDnsResolver> {
+                  DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "cn_dns".into())
+                      .query_strategy(QueryStrategy::RoundRobin)
+                      // 国内主流UDP上游
+                      .add_udp_upstream("阿里DNS", "223.5.5.5")
+                      .add_udp_upstream("腾讯DNS", "119.29.29.29")
+                      .add_udp_upstream("114DNS", "114.114.114.114")
+                      // 可按需添加DoT/DoH上游
+                      // .add_dot_upstream("腾讯DoT", "dot.pub")
+                      // .add_doh_upstream("阿里DoH", "https://223.5.5.5/dns-query")
+                      .optimize_for_round_robin()
+                      .with_cache(true)
+                      .with_timeout(Duration::from_millis(2000))
+                      .with_retry_count(2)
+                      .build()
+                      .await
+              }
+          
+              /// 创建海外DNS解析器（用于海外域名分流）
+              async fn create_global_resolver(&self) -> Result<SmartDnsResolver> {
+                  DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global_dns".into())
+                      .query_strategy(QueryStrategy::RoundRobin)
+                      // 海外主流UDP上游
+                      .add_udp_upstream("Google DNS", "8.8.8.8")
+                      .add_udp_upstream("Cloudflare DNS", "1.1.1.1")
+                      // 可按需添加DoT/DoH上游
+                      // .add_dot_upstream("Cloudflare DoT", "1.1.1.1:853")
+                      // .add_doh_upstream("Cloudflare DoH", "https://1.1.1.1/dns-query")
+                      .optimize_for_round_robin()
+                      .with_cache(true)
+                      .with_timeout(Duration::from_millis(2000))
+                      .with_retry_count(2)
+                      .build()
+                      .await
+              }
+          
+              /// 域名分流规则：判断是否为国内域名（可自行扩展）
+              fn is_cn_domain(&self, domain: &str) -> bool {
+                  let domain_lower = domain.to_lowercase();
+                  // 国内域名后缀列表，可按需添加更多规则
+                  const CN_SUFFIXES: &[&str] = &[
+                      ".cn", ".com.cn", ".net.cn", ".org.cn", ".gov.cn", ".edu.cn",
+                      ".中国", ".公司.cn", ".网络.cn", ".政务.cn", ".公益.cn"
+                  ];
+                  CN_SUFFIXES.iter().any(|suffix| domain_lower.ends_with(suffix))
+              }
+          
+              /// 启动DNS服务核心逻辑
               async fn start(&self) -> Result<()> {
-                  let sock = UdpSocket::bind(self.listen_addr).await?;
-                  println!("✅ DNS服务启动: 0.0.0.0:6006");
-                  let res = self.create_resolver().await?;
-                  let mut buf = [0;512];
+                  // 绑定UDP监听端口
+                  let sock = Arc::new(UdpSocket::bind(self.listen_addr).await?);
+                  println!("✅ DNS服务启动成功，监听地址: {}", self.listen_addr);
+          
+                  // 初始化分流解析器，Arc包装实现多任务安全共享
+                  let cn_resolver = Arc::new(self.create_cn_resolver().await?);
+                  let global_resolver = Arc::new(self.create_global_resolver().await?);
+                  println!("✅ 域名分流解析器初始化完成");
+          
+                  // 4096字节缓冲区，兼容EDNS大报文
+                  let mut buf = [0; 4096];
+          
+                  // 持续接收DNS请求
                   loop {
-                      let (_, addr) = sock.recv_from(&mut buf).await?;
-                      let r = res.clone();
-                      tokio::spawn(async move {
-                          let req = DnsQueryRequest {
-                              query_id: None,
-                              domain: "".into(),
-                              record_type: DnsRecordType::A,
-                              enable_edns: true,
-                              client_address: Some(addr.ip().to_string()),
-                              timeout_ms: Some(2000),
-                              disable_cache: false,
-                              enable_dnssec: false
-                          };
-                          let _ = r.query(req).await;
-                      });
+                      match sock.recv_from(&mut buf).await {
+                          Ok((n, client_addr)) => {
+                              // 复制请求报文，避免缓冲区覆盖
+                              let req_packet = buf[..n].to_vec();
+                              let sock = sock.clone();
+                              let cn_resolver = cn_resolver.clone();
+                              let global_resolver = global_resolver.clone();
+                              let is_cn_domain = self.is_cn_domain;
+          
+                              // 异步处理单条请求，不阻塞主循环
+                              tokio::spawn(async move {
+                                  // 1. 解析DNS请求报文
+                                  let request = match Request::from_bytes(&req_packet) {
+                                      Ok(req) => req,
+                                      Err(e) => {
+                                          eprintln!("❌ 解析DNS请求失败: {}", e);
+                                          return;
+                                      }
+                                  };
+          
+                                  // 2. 提取查询核心信息
+                                  let query = match request.queries.first() {
+                                      Some(q) => q,
+                                      None => {
+                                          eprintln!("❌ 无效DNS请求：无查询内容");
+                                          return;
+                                      }
+                                  };
+          
+                                  // 3. 标准化域名（去除结尾的根点）
+                                  let domain = query.name.to_string().trim_end_matches('.').to_string();
+                                  // 转换记录类型
+                                  let record_type = match query.qtype {
+                                      RecordType::A => DnsRecordType::A,
+                                      RecordType::AAAA => DnsRecordType::AAAA,
+                                      RecordType::CNAME => DnsRecordType::CNAME,
+                                      RecordType::MX => DnsRecordType::MX,
+                                      RecordType::TXT => DnsRecordType::TXT,
+                                      RecordType::NS => DnsRecordType::NS,
+                                      RecordType::SOA => DnsRecordType::SOA,
+                                      RecordType::PTR => DnsRecordType::PTR,
+                                      RecordType::SRV => DnsRecordType::SRV,
+                                      _ => {
+                                          eprintln!("⚠️ 不支持的记录类型: {:?} 域名: {}", query.qtype, domain);
+                                          return;
+                                      }
+                                  };
+          
+                                  println!("📥 收到查询 | 客户端: {} | 域名: {} | 类型: {:?}", client_addr, domain, record_type);
+          
+                                  // 4. 域名分流：选择对应解析器
+                                  let resolver = if is_cn_domain(&domain) {
+                                      cn_resolver
+                                  } else {
+                                      global_resolver
+                                  };
+          
+                                  // 5. 构建标准化DNS查询请求
+                                  let dns_req = DnsQueryRequest {
+                                      query_id: Some(request.header.id), // 必须保留原请求ID，否则客户端不认
+                                      domain: domain.clone(),
+                                      record_type,
+                                      enable_edns: true,
+                                      client_address: Some(client_addr.ip().to_string()),
+                                      timeout_ms: Some(2000),
+                                      disable_cache: false,
+                                      enable_dnssec: false,
+                                  };
+          
+                                  // 6. 执行DNS上游查询
+                                  let query_result = resolver.query(dns_req).await;
+          
+                                  // 7. 构建DNS响应报文
+                                  let mut response = Response::new();
+                                  response.header.id = request.header.id; // 响应ID必须与请求完全一致
+                                  response.header.is_response = true;
+                                  response.header.opcode = Opcode::StandardQuery;
+                                  response.header.recursion_desired = request.header.recursion_desired;
+                                  response.header.recursion_available = true;
+                                  response.queries = request.queries.clone(); // 响应必须包含原查询内容
+          
+                                  match query_result {
+                                      Ok(dns_resp) => {
+                                          // 处理查询成功结果
+                                          response.header.response_code = if dns_resp.success {
+                                              ResponseCode::NoError
+                                          } else {
+                                              ResponseCode::NXDomain
+                                          };
+          
+                                          // 转换解析记录到响应报文
+                                          for record in dns_resp.records {
+                                              let rdata = match record.record_type {
+                                                  DnsRecordType::A => record.ipv4().map(RData::A),
+                                                  DnsRecordType::AAAA => record.ipv6().map(RData::AAAA),
+                                                  DnsRecordType::CNAME => record.domain().map(|n| RData::CNAME(n.clone())),
+                                                  DnsRecordType::MX => record.mx().map(|(p, e)| RData::MX { preference: p, exchange: e.clone() }),
+                                                  DnsRecordType::TXT => record.text().map(|t| RData::TXT(t.clone().into_bytes())),
+                                                  DnsRecordType::NS => record.domain().map(|n| RData::NS(n.clone())),
+                                                  DnsRecordType::SOA => record.soa().map(RData::SOA),
+                                                  DnsRecordType::PTR => record.domain().map(|n| RData::PTR(n.clone())),
+                                                  DnsRecordType::SRV => record.srv().map(RData::SRV),
+                                                  _ => None,
+                                              };
+          
+                                              if let Some(rdata) = rdata {
+                                                  response.answers.push(Record {
+                                                      name: record.name.clone(),
+                                                      rtype: record.record_type.into(),
+                                                      class: QClass::IN,
+                                                      ttl: record.ttl,
+                                                      rdata,
+                                                  });
+                                              }
+                                          }
+          
+                                          println!("✅ 查询完成 | 域名: {} | 记录数: {}", domain, response.answers.len());
+                                      }
+                                      Err(e) => {
+                                          // 处理查询失败
+                                          eprintln!("❌ 查询失败 | 域名: {} | 错误: {}", domain, e);
+                                          response.header.response_code = ResponseCode::ServFail;
+                                      }
+                                  }
+          
+                                  // 8. 序列化响应并发送给客户端
+                                  match response.to_bytes() {
+                                      Ok(resp_bytes) => {
+                                          if let Err(e) = sock.send_to(&resp_bytes, client_addr).await {
+                                              eprintln!("❌ 发送响应失败 | 客户端: {} | 错误: {}", client_addr, e);
+                                          }
+                                      }
+                                      Err(e) => {
+                                          eprintln!("❌ 序列化响应失败 | 域名: {} | 错误: {}", domain, e);
+                                      }
+                                  }
+                              });
+                          }
+                          Err(e) => {
+                              eprintln!("❌ 接收UDP报文失败: {}", e);
+                              continue;
+                          }
+                      }
                   }
               }
           }
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              // 项目原生支持的日志初始化
+              // 保留项目原生日志系统初始化
               rat_logger::init();
+              // 启动DNS服务
               DnsServer::new().start().await
           }
           EOF
+
 
       # 🔥 第一步：编译可执行DNS程序，不开启python-bindings，彻底避开libpython依赖
       - name: 编译 Android arm64 可执行DNS程序
@@ -247,17 +443,38 @@ jobs:
             cp $BIN_PATH dist/
             chmod +x dist/rat_quickdns
             echo "✅ 可执行DNS程序编译成功"
+          else
+            echo "⚠️  未找到可执行DNS程序"
           fi
-          # 复制Python绑定库
-          LIB_PATH=target/aarch64-linux-android/release/librat_quickdns.so
-          if [ -f "$LIB_PATH" ]; then
-            cp $LIB_PATH dist/rat_quickdns.so
-            echo "✅ Python绑定库编译成功"
+      
+          # 保留原有Python绑定库的复制+重命名逻辑
+          PY_LIB_PATH=target/aarch64-linux-android/release/librat_quickdns.so
+          if [ -f "$PY_LIB_PATH" ]; then
+            cp $PY_LIB_PATH dist/rat_quickdns.so
+            echo "✅ Python绑定库复制成功"
+          else
+            echo "⚠️  未找到Python绑定库"
           fi
+      
+          # 新增：打包目标目录下所有.so库文件（含依赖库）
+          # 基础匹配：仅release根目录的.so文件
+          SO_GLOB="target/aarch64-linux-android/release/*.so"
+          # 如需包含deps子目录的所有.so，注释上面一行，取消下面一行的注释即可
+          # SO_GLOB="target/aarch64-linux-android/release/**/*.so"
+      
+          # 匹配并复制所有.so文件（自动跳过已处理的Python绑定库，不会重复复制）
+          if ls $SO_GLOB 1> /dev/null 2>&1; then
+            cp $SO_GLOB dist/
+            echo "✅ 全量.so库文件打包完成"
+          else
+            echo "⚠️  未找到额外的.so库文件"
+          fi
+      
           # 输出最终产物信息
           echo "=== 最终产物列表 ==="
           ls -lh dist/
           file dist/*
+
 
       - uses: actions/upload-artifact@v4
         with:
