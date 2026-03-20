@@ -1,4 +1,5 @@
 name: Build rat_quickdns Android arm64 (NDK r29 + python-bindings)
+
 on:
   workflow_dispatch:
 
@@ -20,7 +21,7 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: 安装 Android NDK r29（这次绝对稳）
+      - name: 安装 Android NDK r29
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip
           unzip -q ndk.zip
@@ -29,7 +30,6 @@ jobs:
           ls -la | grep -E 'android-ndk|ndk'
           echo "当前 HOME: $HOME"
           
-          # 最简单最可靠写法
           rm -rf $HOME/ndk 2>/dev/null || true
           mkdir -p $HOME
           mv android-ndk-r29 $HOME/ndk
@@ -102,6 +102,12 @@ jobs:
       - name: 编译 Android arm64
         run: |
           unset ANDROID_SDK_ROOT ANDROID_NDK ANDROID_HOME
+          
+          # 临时注入 abi3-py312 feature 到 Cargo.toml（仅本次构建有效）
+          sed -i '/pyo3 =/s/features = \[/features = ["abi3-py312", "extension-module", /' Cargo.toml || echo "注入 abi3 feature 失败，继续尝试构建"
+          sed -i '/pyo3 =/s/\]/, "abi3-py312", "extension-module"\]/' Cargo.toml || true  # 防已有 features
+          
+          cat Cargo.toml | grep pyo3   # 调试：显示修改后样子
           
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
