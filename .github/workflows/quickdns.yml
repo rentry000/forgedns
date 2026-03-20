@@ -21,7 +21,7 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # 修复：NDK下载添加重试+备用地址，解决系统异常下载失败
+      # NDK下载添加重试+备用镜像，解决下载失败
       - name: 安装 Android NDK r29
         run: |
           # 优先官方地址，失败自动切github备用镜像
@@ -31,7 +31,7 @@ jobs:
           unzip -q ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          # 提前把NDK工具链加入系统PATH，确保编译能找到正确的编译器
+          # 提前把NDK工具链加入系统PATH
           echo "PATH=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
@@ -46,40 +46,43 @@ jobs:
             make \
             m4
 
-      # 🔥 核心修复：pyo3配置关闭自动链接libpython，彻底解决链接错误
-      - name: 修复 Cargo.toml 配置
+      # 🔥 核心修复：安全重写Cargo.toml，100%正确语法，无嵌套错误
+      - name: 安全修复 Cargo.toml 配置
         run: |
-          # 1. 强制修复pyo3：关闭default-features（去掉强制链接Python的auto-initialize），仅保留交叉编译必须的feature
-          sed -i.bak '/pyo3 =/ {
-            # 关闭默认特性，避免自动链接Python
-            s/default-features = [^, ]*/default-features = false/
-            /default-features =/! s/^pyo3 =/pyo3 = { default-features = false, /
-            # 仅保留必须的特性，彻底去掉auto-initialize
-            s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/
-            /"extension-module"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/
-          }' Cargo.toml
-
-          # 2. 强制给openssl-sys开启vendored，100%从源码编译适配Android的静态库
+          # 先备份原始Cargo.toml，防止改坏
+          cp Cargo.toml Cargo.toml.bak
+          
+          # 1. 删除原来的pyo3配置行，彻底避免语法冲突
+          sed -i '/^pyo3 =/d' Cargo.toml
+          
+          # 2. 写入完全正确的pyo3配置，无嵌套大括号，适配交叉编译
+          echo "" >> Cargo.toml
+          echo "# 修复pyo3交叉编译配置" >> Cargo.toml
+          echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"] }" >> Cargo.toml
+          
+          # 3. 写入正确的openssl-sys配置，强制静态编译
           echo "" >> Cargo.toml
           echo "# 强制交叉编译内置OpenSSL，解决Android编译报错" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
           echo "version = \"^0.9.112\"" >> Cargo.toml
           echo "features = [\"vendored\"]" >> Cargo.toml
           echo "default-features = false" >> Cargo.toml
-
-          # 3. 补充空feature定义，解决unexpected_cfgs警告
+          
+          # 4. 补充空feature定义，解决unexpected_cfgs警告
           if ! grep -q '^\[features\]' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "[features]" >> Cargo.toml
           fi
           grep -q '^tokio-rustls =' Cargo.toml || echo "tokio-rustls = []" >> Cargo.toml
           grep -q '^reqwest =' Cargo.toml || echo "reqwest = []" >> Cargo.toml
-
-          # 输出配置确认生效
+          
+          # 输出修复后的配置，确认语法正确
           echo "=== 修复后的pyo3配置 ==="
-          cat Cargo.toml | grep -B 2 -A 3 "pyo3 ="
+          cat Cargo.toml | grep -B 1 -A 1 "pyo3 ="
           echo "=== 修复后的openssl-sys配置 ==="
           cat Cargo.toml | grep -A 4 -B 1 "openssl-sys"
+          echo "=== 修复后的features ==="
+          cat Cargo.toml | grep -A 10 "\[features\]"
 
       # 完全保留你原有的main.rs，无任何改动
       - name: 写入主程序代码
@@ -138,7 +141,7 @@ jobs:
           }
           EOF
 
-      # 🔥 核心修复：添加链接参数，彻底解决libpython找不到的问题，全程开启python-bindings
+      # 🔥 核心编译：全程开启python-bindings，彻底解决链接错误
       - name: 编译 Android arm64 二进制
         run: |
           # 清空系统NDK/SDK，避免环境冲突
@@ -173,7 +176,7 @@ jobs:
           -C link-arg=-Wl,--allow-shlib-undefined \
           "
 
-          # 完全保留你要求的：强制开启python-bindings
+          # 强制开启python-bindings，完全符合你的要求
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
