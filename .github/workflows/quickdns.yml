@@ -29,8 +29,7 @@ jobs:
           mv android-ndk-r29 $HOME/ndk
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
-      # 安装编译OpenSSL必须的全量依赖
-      - name: 安装系统依赖
+      - name: 安装系统全量依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -42,6 +41,7 @@ jobs:
             make \
             m4
 
+      # 🔥 核心修复：把env_logger改成项目自带的rat_logger，解决编译错误
       - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
@@ -76,9 +76,7 @@ jobs:
                       let r = res.clone();
                       tokio::spawn(async move {
                           let req = DnsQueryRequest {
-                              query_id: None, domain: "".into(), record_type: DnsRecordType::A,
-                              enable_edns: true, client_address: Some(addr.ip().to_string()),
-                              timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false
+                              query_id: None, domain: "".into(), record_type: Dns Some(2000), disable_cache: false, enable_dnssec: false
                           };
                           let _ = r.query(req).await;
                       });
@@ -88,48 +86,41 @@ jobs:
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              env_logger::init();
+              // 修复：用项目自带的rat_logger，不是env_logger
+              rat_logger::init();
               DnsServer::new().start().await
           }
           EOF
 
-      # 🔥 核心修复：去掉无效的static_crt，只保留正确的vendored，修复依赖冲突
       - name: 修复交叉编译配置
         run: |
           # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
           sed -i.bak '/pyo3 =/s/features = \[/features = ["abi3-py311", "extension-module", /' Cargo.toml
           sed -i '/pyo3 =/s/\]/, "abi3-py311", "extension-module"\]/' Cargo.toml
           
-          # 2. 强制openssl-sys开启vendored，从源码编译适配aarch64的OpenSSL（去掉无效的static_crt）
+          # 2. 强制openssl-sys开启vendored，从源码编译适配aarch64的OpenSSL
           echo "" >> Cargo.toml
           echo "# 强制交叉编译用内置OpenSSL" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
           echo "version = \"^0.9.112\"" >> Cargo.toml
           echo "features = [\"vendored\"]" >> Cargo.toml
-          
-          # 输出配置确认生效
-          echo "=== 修复后的pyo3配置 ==="
-          cat Cargo.toml | grep -A 2 -B 2 "pyo3 ="
-          echo "=== 修复后的openssl-sys配置 ==="
-          cat Cargo.toml | grep -A 3 -B 1 "openssl-sys"
 
-      # 🔥 全量正确环境变量，确保交叉编译一次成功
-      - name: 编译 Android arm64 二进制
+      - name: 编译 Android arm64 二进制（保留python-bindings）
         run: |
           # 清空系统NDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
           
-          # pyo3交叉编译配置（和abi3-py311完全匹配）
+          # pyo3交叉编译配置
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
           
-          # 强制openssl静态编译，从源码构建，不找系统库
+          # 强制openssl静态编译
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
           
-          # 强制开启python-bindings，无任何删减
+          # 强制开启python-bindings
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
@@ -141,7 +132,7 @@ jobs:
           mkdir -p dist
           cp target/aarch64-linux-android/release/rat_quickdns dist/
           chmod +x dist/rat_quickdns
-          echo "=== 编译产物信息 ==="
+          echo "=== 编译成功，产物信息 ==="
           ls -lh dist/
           file dist/rat_quickdns
 
