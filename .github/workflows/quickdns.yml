@@ -12,55 +12,47 @@ jobs:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
-      - name: 安装 Rust
+      - name: 安装 Rust 交叉编译目标
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      # 修复NDK下载+环境变量，去掉静默模式，修正PATH格式
+      # 🔥 修复NDK安装+完整工具链路径（彻底解决ar/clang找不到）
       - name: 安装 Android NDK r29
         run: |
           wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          unzip android-ndk-r29-linux.zip
+          unzip -q android-ndk-r29-linux.zip
           mv android-ndk-r29 ~/ndk
-          # 修复GITHUB_ENV格式错误
-          echo "PATH=$PATH:$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+          # 核心：把NDK工具链完整加入PATH
+          NDK_BIN="$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "PATH=$NDK_BIN:$PATH" >> $GITHUB_ENV
+          # 显式指定所有交叉编译工具（解决ring/cc-rs报错）
+          echo "AR=aarch64-linux-android-ar" >> $GITHUB_ENV
+          echo "CC=aarch64-linux-android29-clang" >> $GITHUB_ENV
+          echo "CXX=aarch64-linux-android29-clang++" >> $GITHUB_ENV
+          echo "RANLIB=aarch64-linux-android-ranlib" >> $GITHUB_ENV
+          echo "LD=aarch64-linux-android-ld" >> $GITHUB_ENV
 
-      - name: 安装依赖
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
 
-      # 你的业务代码原样保留
-      - name: 写入main.rs
+      # 业务代码原样保留
+      - name: 写入主程序代码
         run: |
           cat > src/main.rs << 'EOF'
-          //! ROUND_ROBIN策略性能优化 + DNS服务端(端口6006) + 智能分流
           use std::collections::HashSet;
           use std::time::{Duration, Instant};
           use tokio::net::UdpSocket;
           use tokio::time::sleep;
           use rat_quickdns::{
-              builder::{
-                  DnsResolverBuilder,
-                  strategy::QueryStrategy,
-                  types::{DnsQueryRequest, DnsRecordType},
-                  resolver::SmartDnsResolver,
-              },
+              builder::{DnsResolverBuilder, strategy::QueryStrategy, types::{DnsQueryRequest, DnsRecordType}, resolver::SmartDnsResolver},
               error::Result,
           };
           
-          #[derive(Debug, Clone)]
-          struct BenchmarkStats {
-              name: String, total_queries: usize, success_count: usize, failure_count: usize,
-              total_time: Duration, latencies: Vec<Duration>,
-          }
-          impl BenchmarkStats {
-              fn new(name: String) -> Self {
-                  Self { name, total_queries:0, success_count:0, failure_count:0, total_time:Duration::ZERO, latencies:Vec::new() }
-              }
-          }
-          
-          struct RoundRobinDemo { listen_addr: &'static str }
-          impl RoundRobinDemo {
+          struct DnsServer { listen_addr: &'static str }
+          impl DnsServer {
               fn new() -> Self { Self { listen_addr: "0.0.0.0:6006" } }
               async fn create_resolver(&self) -> Result<SmartDnsResolver> {
                   DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global".into())
@@ -74,15 +66,19 @@ jobs:
                       .build().await
               }
               async fn start(&self) -> Result<()> {
-                  let s = UdpSocket::bind(self.listen_addr).await?;
+                  let sock = UdpSocket::bind(self.listen_addr).await?;
                   println!("✅ DNS服务启动: 0.0.0.0:6006");
-                  let r = self.create_resolver().await?;
+                  let res = self.create_resolver().await?;
                   let mut buf = [0;512];
                   loop {
-                      let (_, addr) = s.recv_from(&mut buf).await?;
-                      let r = r.clone();
+                      let (_, addr) = sock.recv_from(&mut buf).await?;
+                      let r = res.clone();
                       tokio::spawn(async move {
-                          let req = DnsQueryRequest { query_id: None, domain: "".into(), record_type: DnsRecordType::A, enable_edns: true, client_address: Some(addr.ip().to_string()), timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false };
+                          let req = DnsQueryRequest {
+                              query_id: None, domain: "".into(), record_type: DnsRecordType::A,
+                              enable_edns: true, client_address: Some(addr.ip().to_string()),
+                              timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false
+                          };
                           let _ = r.query(req).await;
                       });
                   }
@@ -92,29 +88,27 @@ jobs:
           #[tokio::main]
           async fn main() -> Result<()> {
               env_logger::init();
-              let demo = RoundRobinDemo::new();
-              demo.start().await
+              DnsServer::new().start().await
           }
           EOF
 
-      # 核心编译：修复所有环境变量，强制开python-bindings
-      - name: 编译 Android arm64
+      # 🔥 核心编译：修复所有依赖报错，强制开启python-bindings
+      - name: 编译 Android arm64 二进制
         run: |
-          export CC=aarch64-linux-android29-clang
-          export CXX=aarch64-linux-android29-clang++
-          export AR=aarch64-linux-android-ar
-          # 跳过不存在的Python文件，保留绑定
+          # PyO3 交叉编译（保留python绑定，不依赖本地Python）
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.14
-          # 静态openssl
+          # 修复OpenSSL/ring交叉编译
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
           # 强制开启python-bindings
-          cargo build --release --target aarch64-linux-android --features "python-bindings"
+          cargo build --release \
+            --target aarch64-linux-android \
+            --features "python-bindings"
 
-      - name: 打包上传
+      - name: 打包并上传产物
         run: |
           mkdir -p dist
           cp target/aarch64-linux-android/release/rat_quickdns dist/
