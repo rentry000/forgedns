@@ -12,27 +12,25 @@ jobs:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
-      - name: 安装 Rust + aarch64 目标
+      - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           targets: aarch64-linux-android
 
-      # 官方正确 NDK r29
+      # 修复NDK下载+环境变量，去掉静默模式，修正PATH格式
       - name: 安装 Android NDK r29
         run: |
-          wget -q -O ndk.zip https://dl.google.com/android/repository/android-ndk-r29-linux.zip
-          unzip -q ndk.zip
-          mv android-ndk-r29 $HOME/ndk
-          echo "$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+          wget https://dl.google.com/android/repository/android-ndk-r29-linux.zip
+          unzip android-ndk-r29-linux.zip
+          mv android-ndk-r29 ~/ndk
+          # 修复GITHUB_ENV格式错误
+          echo "PATH=$PATH:$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
 
       - name: 安装依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
       # 你的业务代码原样保留
-      - name: 写入 src/main.rs
+      - name: 写入main.rs
         run: |
           cat > src/main.rs << 'EOF'
           //! ROUND_ROBIN策略性能优化 + DNS服务端(端口6006) + 智能分流
@@ -52,38 +50,18 @@ jobs:
           
           #[derive(Debug, Clone)]
           struct BenchmarkStats {
-              name: String,
-              total_queries: usize,
-              success_count: usize,
-              failure_count: usize,
-              total_time: Duration,
-              latencies: Vec<Duration>,
+              name: String, total_queries: usize, success_count: usize, failure_count: usize,
+              total_time: Duration, latencies: Vec<Duration>,
           }
-          
           impl BenchmarkStats {
               fn new(name: String) -> Self {
                   Self { name, total_queries:0, success_count:0, failure_count:0, total_time:Duration::ZERO, latencies:Vec::new() }
               }
-              fn success_rate(&self) -> f64 {
-                  if self.total_queries == 0 { 0.0 } else { self.success_count as f64 / self.total_queries * 100.0 }
-              }
-              fn qps(&self) -> f64 {
-                  if self.total_time.as_secs_f64() == 0.0 { 0.0 } else { self.total_queries as f64 / self.total_time.as_secs_f64() }
-              }
           }
           
-          struct RoundRobinOptimizationDemo {
-              test_domains: Vec<&'static str>,
-              listen_addr: &'static str,
-          }
-          
-          impl RoundRobinOptimizationDemo {
-              fn new() -> Self {
-                  Self {
-                      test_domains: vec!["google.com","github.com","cloudflare.com","baidu.com","taobao.com","qq.com"],
-                      listen_addr: "0.0.0.0:6006",
-                  }
-              }
+          struct RoundRobinDemo { listen_addr: &'static str }
+          impl RoundRobinDemo {
+              fn new() -> Self { Self { listen_addr: "0.0.0.0:6006" } }
               async fn create_resolver(&self) -> Result<SmartDnsResolver> {
                   DnsResolverBuilder::new(QueryStrategy::RoundRobin, true, "global".into())
                       .query_strategy(QueryStrategy::RoundRobin)
@@ -95,67 +73,53 @@ jobs:
                       .optimize_for_round_robin()
                       .build().await
               }
-              async fn start_dns_server(&self) -> Result<()> {
+              async fn start(&self) -> Result<()> {
                   let s = UdpSocket::bind(self.listen_addr).await?;
-                  println!("✅ DNS服务启动: {}", self.listen_addr);
+                  println!("✅ DNS服务启动: 0.0.0.0:6006");
                   let r = self.create_resolver().await?;
-                  let mut buf = [0; 512];
+                  let mut buf = [0;512];
                   loop {
                       let (_, addr) = s.recv_from(&mut buf).await?;
                       let r = r.clone();
                       tokio::spawn(async move {
-                          let req = DnsQueryRequest {
-                              query_id: None, domain: "".into(), record_type: DnsRecordType::A,
-                              enable_edns: true, client_address: Some(addr.ip().to_string()),
-                              timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false
-                          };
+                          let req = DnsQueryRequest { query_id: None, domain: "".into(), record_type: DnsRecordType::A, enable_edns: true, client_address: Some(addr.ip().to_string()), timeout_ms: Some(2000), disable_cache: false, enable_dnssec: false };
                           let _ = r.query(req).await;
                       });
                   }
-              }
-              async fn run(&self) -> Result<()> {
-                  env_logger::init();
-                  self.start_dns_server().await
               }
           }
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              let demo = RoundRobinOptimizationDemo::new();
-              demo.run().await
+              env_logger::init();
+              let demo = RoundRobinDemo::new();
+              demo.start().await
           }
           EOF
 
-      # 🔥 核心：跳过不存在的Python包，强制交叉编译 + 保留python-bindings
+      # 核心编译：修复所有环境变量，强制开python-bindings
       - name: 编译 Android arm64
         run: |
           export CC=aarch64-linux-android29-clang
           export CXX=aarch64-linux-android29-clang++
           export AR=aarch64-linux-android-ar
-          
-          # 关键：不依赖本地Python，保留python绑定
+          # 跳过不存在的Python文件，保留绑定
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.14
-          
-          # OpenSSL静态编译
+          # 静态openssl
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export PKG_CONFIG_ALLOW_CROSS=1
-          
           # 强制开启python-bindings
-          cargo build --release \
-            --target aarch64-linux-android \
-            --features "python-bindings"
+          cargo build --release --target aarch64-linux-android --features "python-bindings"
 
-      - name: 打包产物
+      - name: 打包上传
         run: |
           mkdir -p dist
-          cp target/aarch64-linux-android/release/rat_quickdns dist/rat_quickdns-arm64
-          chmod 755 dist/rat_quickdns-arm64
-
-      - name: 上传
-        uses: actions/upload-artifact@v4
+          cp target/aarch64-linux-android/release/rat_quickdns dist/
+          chmod 755 dist/rat_quickdns
+      - uses: actions/upload-artifact@v4
         with:
           name: rat_quickdns-arm64-ndk29
           path: dist/
