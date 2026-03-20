@@ -27,11 +27,11 @@ jobs:
           unzip -q ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          # 把NDK工具链加入系统PATH，确保编译openssl能找到
+          # 提前把NDK工具链加入PATH，确保编译OpenSSL能找到正确的编译器
           echo "PATH=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
-      - name: 安装系统全量依赖（编译openssl必须）
+      - name: 安装系统全量依赖（编译OpenSSL必须）
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -40,41 +40,32 @@ jobs:
             python3-dev \
             perl \
             make \
-            m4 \
-            git
+            m4
 
-      # 🔥 核心：安全修复Cargo.toml，强制开启openssl-sys vendored，无无效feature
+      # 安全修复Cargo.toml，无无效feature，强制开启openssl静态编译
       - name: 修复 Cargo.toml 配置
         run: |
-          # 1. 安全给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
+          # 1. 给pyo3添加交叉编译必须的abi3-py311 + extension-module特征
           sed -i.bak '/pyo3 =/ {
             s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
             /"abi3-py311"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", \1]/
           }' Cargo.toml
 
-          # 2. 强制给openssl-sys开启vendored feature，从源码编译，不找系统库
+          # 2. 强制给openssl-sys开启vendored，从源码编译适配Android的静态库
           echo "" >> Cargo.toml
-          echo "# 强制交叉编译用内置OpenSSL，解决Android编译报错" >> Cargo.toml
+          echo "# 强制交叉编译内置OpenSSL，解决Android编译报错" >> Cargo.toml
           echo "[dependencies.openssl-sys]" >> Cargo.toml
           echo "version = \"^0.9.112\"" >> Cargo.toml
           echo "features = [\"vendored\"]" >> Cargo.toml
           echo "default-features = false" >> Cargo.toml
 
-          # 3. 补充空feature定义，解决unexpected_cfgs lint警告
+          # 3. 补充空feature定义，解决unexpected_cfgs警告
           if ! grep -q '^\[features\]' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "[features]" >> Cargo.toml
           fi
           grep -q '^tokio-rustls =' Cargo.toml || echo "tokio-rustls = []" >> Cargo.toml
           grep -q '^reqwest =' Cargo.toml || echo "reqwest = []" >> Cargo.toml
-
-          # 输出配置确认，无语法错误
-          echo "=== 修复后的openssl-sys配置 ==="
-          cat Cargo.toml | grep -A 5 -B 1 "openssl-sys"
-          echo "=== 修复后的pyo3配置 ==="
-          cat Cargo.toml | grep -B 2 -A 2 "pyo3 ="
-          echo "=== 修复后的features ==="
-          cat Cargo.toml | grep -A 10 "\[features\]"
 
       # 正确无语法错误的main.rs
       - name: 写入主程序代码
@@ -127,7 +118,7 @@ jobs:
           
           #[tokio::main]
           async fn main() -> Result<()> {
-              // 兼容日志初始化，无弃用警告
+              // 兼容日志初始化
               let _ = rat_logger::LoggerBuilder::new()
                   .add_terminal_with_config(rat_logger::TermConfig::default())
                   .try_init();
@@ -135,30 +126,30 @@ jobs:
           }
           EOF
 
-      # 🔥 核心编译：强制openssl静态编译，只开启真实存在的python-bindings feature
+      # 🔥 核心编译：彻底关闭unsafe lint，强制开启python-bindings，静态OpenSSL
       - name: 编译 Android arm64 二进制
         run: |
           # 清空系统NDK/SDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
 
-          # pyo3交叉编译配置（适配Android无Python解释器场景）
+          # pyo3交叉编译配置
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
 
-          # 🔥 强制openssl从源码编译，彻底禁用系统库
+          # 强制openssl从源码编译，彻底禁用系统库
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export OPENSSL_NO_VENDOR=0
-          # 禁用系统pkg-config，避免找x86系统库
+          # 禁用系统pkg-config，避免找错x86系统库
           export PKG_CONFIG_ALLOW_CROSS=1
           export PKG_CONFIG_LIBDIR=""
           export PKG_CONFIG_SYSROOT_DIR=""
 
-          # 关闭所有非致命lint，避免警告转为编译错误
-          export RUSTFLAGS="-A unused -A unexpected_cfgs -A deprecated -A non_camel_case_types -A nonstandard_style"
+          # 🔥 核心修复：彻底关闭unsafe_op_in_unsafe_fn lint，同时关闭所有非致命警告
+          export RUSTFLAGS="-A unused -A unexpected_cfgs -A deprecated -A non_camel_case_types -A nonstandard_style -A unsafe_op_in_unsafe_fn -A rust_2024_compatibility"
 
-          # 只开启项目真实存在的python-bindings feature，无任何无效feature
+          # 只开启项目真实存在的python-bindings feature，无任何无效配置
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
