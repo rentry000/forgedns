@@ -123,13 +123,13 @@ jobs:
             collections::HashMap,
             net::IpAddr,
             sync::Arc,
+            sync::OnceLock, // 修复：用标准库OnceLock，替代once_cell
             time::Duration,
             time::Instant,
           };
-          use once_cell::sync::OnceLock;
           use tokio::net::UdpSocket;
           
-          // rat_quickdns 核心导入
+          // rat_quickdns 核心导入（保持和你库版本兼容）
           use rat_quickdns::{
               builder::{
                   DnsResolverBuilder,
@@ -156,6 +156,7 @@ jobs:
               fn insert(&mut self, domain: &str) {
                   let mut node = &mut self.root;
                   let domain = domain.to_lowercase();
+                  // 按 . 分割逆序插入，实现后缀匹配
                   for part in domain.rsplit('.') {
                       node = node.children.entry(part.to_string()).or_default();
                   }
@@ -168,6 +169,7 @@ jobs:
                   for part in domain.rsplit('.') {
                       match node.children.get(part) {
                           Some(child) => {
+                              // 匹配到后缀规则，直接返回true
                               if child.is_end {
                                   return true;
                               }
@@ -180,17 +182,20 @@ jobs:
               }
           }
           
+          // 全局单例，懒加载（标准库OnceLock，无依赖）
           static DOMESTIC_TRIE: OnceLock<DomainTrie> = OnceLock::new();
           
           fn get_trie() -> &'static DomainTrie {
               DOMESTIC_TRIE.get_or_init(|| {
                   println!("⏳ 正在加载国内分流规则并编译Trie树...");
                   let mut trie = DomainTrie::default();
+                  // 编译期嵌入规则文件，确保打包后正常使用
                   let rules = include_str!("cn_rules.txt"); 
                   let mut valid_count = 0;
                   
                   for line in rules.lines() {
                       let rule = line.trim();
+                      // 跳过空行和注释
                       if !rule.is_empty() && !rule.starts_with('#') {
                           trie.insert(rule);
                           valid_count += 1;
@@ -207,11 +212,12 @@ jobs:
           }
           
           // ==================== 修复后的DNS报文解析与构建（100%符合DNS协议） ====================
-          // DNS报文最大长度（UDP）
+          // DNS报文最大长度（UDP标准）
           const DNS_MAX_UDP_SIZE: usize = 512;
-          // 默认TTL（5分钟）
+          // 默认TTL（5分钟，合理值）
           const DEFAULT_TTL: u32 = 300;
           
+          // 解析DNS请求中的域名和查询类型
           fn parse_dns_domain(req_buf: &[u8]) -> Option<(String, u16)> {
               if req_buf.len() < 12 { return None; }
               let mut offset = 12;
@@ -219,13 +225,17 @@ jobs:
               
               while offset < req_buf.len() {
                   let len = req_buf[offset] as usize;
+                  // 域名结束标记
                   if len == 0 {
                       offset += 1;
                       break;
                   }
+                  // 防止越界
                   if offset + 1 + len > req_buf.len() { return None; }
+                  // 拼接域名
                   if !domain.is_empty() { domain.push('.'); }
                   offset += 1;
+                  // 兼容非UTF8域名，避免解析失败
                   if let Ok(s) = std::str::from_utf8(&req_buf[offset..offset+len]) {
                       domain.push_str(&s.to_lowercase());
                   } else {
@@ -234,12 +244,13 @@ jobs:
                   offset += len;
               }
               
+              // 读取查询类型
               if offset + 4 > req_buf.len() { return None; }
               let qtype = u16::from_be_bytes([req_buf[offset], req_buf[offset+1]]);
               Some((domain, qtype))
           }
           
-          // 修复后的响应构建：确保解析结果正确返回给客户端
+          // 构建标准DNS响应，确保客户端能正常接收解析结果
           fn build_dns_response(
               req_buf: &[u8], 
               record_type: DnsRecordType,
@@ -252,11 +263,10 @@ jobs:
               // 1. 复制事务ID（必须和请求完全一致，否则客户端不认）
               res.extend_from_slice(&req_buf[0..2]);
               
-              // 2. 修复Flags字段，严格符合DNS递归解析规范
-              // 高8位：QR=1(响应) + 原Opcode + TC=0 + RD=原请求的RD（递归请求标记）
+              // 2. 标准Flags字段，严格符合DNS递归解析规范
+              // 高8位：QR=1(响应) + 原Opcode + TC=0 + RD=原请求的RD
               let flags_high = (req_buf[2] & 0x7F) | 0x80;
-              // 低8位：RA=1(支持递归) + 原AD/CD位 + RCODE（响应码）
-              // 注意：AA位（权威应答）绝对不能设，我们是递归服务，不是权威服务器
+              // 低8位：RA=1(支持递归) + 原AD/CD位 + RCODE
               let flags_low = (req_buf[3] & 0x70) | 0x80 | (rcode & 0x0F);
               res.push(flags_high);
               res.push(flags_low);
@@ -274,7 +284,7 @@ jobs:
               while question_end_offset < req_buf.len() {
                   let len = req_buf[question_end_offset] as usize;
                   if len == 0 {
-                      question_end_offset += 5; // 结束标记(1) + QTYPE(2) + QCLASS(2)
+                      question_end_offset += 5; // 结束标记 + QTYPE + QCLASS
                       break;
                   }
                   question_end_offset += len + 1;
@@ -282,22 +292,22 @@ jobs:
               if question_end_offset > req_buf.len() { return None; }
               res.extend_from_slice(&req_buf[12..question_end_offset]);
               
-              // 7. 构建回答段：把解析到的IP正确写入响应
+              // 7. 构建回答段，把解析到的IP写入响应
               if rcode == 0 && !ips.is_empty() {
                   for ip in ips {
-                      // 域名压缩指针：指向问题段的域名（固定偏移12字节，0xC00C是DNS标准压缩格式）
+                      // DNS标准域名压缩指针，指向问题段的域名（偏移12字节）
                       res.extend_from_slice(&[0xC0, 0x0C]);
                       
                       match (ip, record_type) {
                           (IpAddr::V4(ipv4), DnsRecordType::A) => {
-                              // TYPE=A(1)、CLASS=IN(1)、TTL、RDLENGTH=4
+                              // TYPE=A、CLASS=IN、TTL、RDLENGTH=4
                               res.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
                               res.extend_from_slice(&DEFAULT_TTL.to_be_bytes());
                               res.extend_from_slice(&[0x00, 0x04]);
                               res.extend_from_slice(&ipv4.octets());
                           }
                           (IpAddr::V6(ipv6), DnsRecordType::AAAA) => {
-                              // TYPE=AAAA(28)、CLASS=IN(1)、TTL、RDLENGTH=16
+                              // TYPE=AAAA、CLASS=IN、TTL、RDLENGTH=16
                               res.extend_from_slice(&[0x00, 0x1C, 0x00, 0x01]);
                               res.extend_from_slice(&DEFAULT_TTL.to_be_bytes());
                               res.extend_from_slice(&[0x00, 0x10]);
@@ -311,14 +321,13 @@ jobs:
               // 8. 处理UDP大包截断：超过512字节设置TC位，通知客户端用TCP重查
               if res.len() > DNS_MAX_UDP_SIZE {
                   res.truncate(DNS_MAX_UDP_SIZE);
-                  // 设置TC位（flags高8位的第2位，0x02）
-                  res[2] |= 0x02;
+                  res[2] |= 0x02; // 设置TC截断位
               }
               
               Some(res)
           }
           
-          // ==================== 核心DNS服务（带完整解析结果返回） ====================
+          // ==================== 核心DNS服务（监听6006端口） ====================
           struct DnsServer { 
               listen_addr: &'static str 
           }
@@ -328,9 +337,9 @@ jobs:
                   Self { listen_addr } 
               }
               
-              // 国内上游解析器
+              // 国内上游解析器（修复：用Smart策略，替代不存在的Fastest）
               async fn create_domestic_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy::Fastest, true, "domestic".into())
+                  DnsResolverBuilder::new(QueryStrategy::Smart, true, "domestic".into())
                       .add_udp_upstream("阿里DNS", "223.5.5.5:53")
                       .add_udp_upstream("腾讯DNS", "119.29.29.29:53")
                       .add_udp_upstream("114DNS", "114.114.114.114:53")
@@ -339,9 +348,9 @@ jobs:
                       .build().await
               }
           
-              // 国外上游解析器（替换为国内可访问的DoH，避免超时）
+              // 国外上游解析器（修复：用Smart策略，替换为国内可稳定访问的DoH）
               async fn create_foreign_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy::Fastest, true, "foreign".into())
+                  DnsResolverBuilder::new(QueryStrategy::Smart, true, "foreign".into())
                       .add_doh_upstream("阿里DoH", "https://dns.alidns.com/dns-query")
                       .add_doh_upstream("360DoH", "https://doh.360.cn/dns-query")
                       .with_timeout(Duration::from_secs(5))
@@ -349,18 +358,19 @@ jobs:
               }
           
               async fn start(&self) -> Result<()> {
+                  // 绑定6006端口
                   let sock = Arc::new(UdpSocket::bind(self.listen_addr).await?);
                   println!("✅ 智能分流DNS服务启动，监听地址: {}", self.listen_addr);
                   
-                  // 预热Trie树
+                  // 预热Trie树，避免首次请求卡顿
                   let _ = get_trie();
                   
-                  // 初始化解析器
+                  // 初始化上下游解析器
                   let domestic_res = self.create_domestic_resolver().await?;
                   let foreign_res = self.create_foreign_resolver().await?;
                   println!("✅ 上下游DNS解析器初始化完成，开始接收请求\n");
                   
-                  let mut buf = [0; 4096];
+                  let mut buf = [0; 4096]; // 扩大缓冲区，兼容EDNS0大报文
                   
                   loop {
                       let (len, client_addr) = match sock.recv_from(&mut buf).await {
@@ -377,6 +387,7 @@ jobs:
                       let for_res = foreign_res.clone();
                       let sock_clone = sock.clone();
                       
+                      // 异步处理请求，不阻塞主循环
                       tokio::spawn(async move {
                           // 1. 解析DNS请求
                           let (domain, qtype) = match parse_dns_domain(&req_data) {
@@ -387,13 +398,12 @@ jobs:
                               }
                           };
           
-                          // 2. 过滤记录类型，只处理A/AAAA
+                          // 2. 只处理A/AAAA记录，其他类型直接返回
                           let record_type = match qtype {
                               1 => DnsRecordType::A,
                               28 => DnsRecordType::AAAA,
                               _ => {
                                   println!("⚠️ [{}] 跳过非A/AAAA记录请求: {} 类型: {}", client_addr, domain, qtype);
-                                  // 返回不支持的记录类型
                                   if let Some(res_bytes) = build_dns_response(&req_data, DnsRecordType::A, vec![], 4) {
                                       let _ = sock_clone.send_to(&res_bytes, client_addr).await;
                                   }
@@ -401,12 +411,12 @@ jobs:
                               }
                           };
           
-                          // 3. 分流判断
+                          // 3. 分流判断，选择对应解析器
                           let is_domestic = is_domestic_domain(&domain);
                           let resolver = if is_domestic { dom_res } else { for_res };
                           let upstream_type = if is_domestic { "国内" } else { "国外" };
           
-                          // 4. 打印请求入口日志
+                          // 4. 打印请求日志
                           println!("========================================");
                           println!("📥 新请求 | 客户端: {} | 域名: {} | 类型: {:?} | 分流: {}", 
                               client_addr, domain, record_type, upstream_type);
@@ -430,17 +440,16 @@ jobs:
                           // 7. 处理解析结果，返回给客户端
                           match query_result {
                               Ok(response) => {
-                                  // 核心：提取解析到的IP，打印完整结果
+                                  // 提取解析到的IP，打印完整结果
                                   let resolved_ips = response.ip_addresses();
                                   let rcode = if response.success && !resolved_ips.is_empty() { 0 } else { 3 };
           
-                                  // 打印解析结果（你要的解析结果输出）
+                                  // 核心：打印解析结果，可直接查看
                                   println!("✅ 解析成功 | 域名: {} | 解析到IP: {:?} | 上游: {} | 耗时: {:?}",
                                       domain, resolved_ips, upstream_type, cost_time);
           
-                                  // 构建响应报文，把解析结果封装进去
+                                  // 构建响应报文，返回给客户端
                                   if let Some(res_bytes) = build_dns_response(&req_data, record_type, resolved_ips, rcode) {
-                                      // 把解析结果返回给客户端
                                       match sock_clone.send_to(&res_bytes, client_addr).await {
                                           Ok(send_len) => {
                                               println!("📤 响应已发送 | 客户端: {} | 报文长度: {} 字节", client_addr, send_len);
@@ -472,9 +481,10 @@ jobs:
           #[tokio::main]
           async fn main() -> Result<()> {
               rat_logger::init();
-              // 标准DNS端口53，非root用户可用5353端口
-              DnsServer::new("0.0.0.0:53").start().await
+              // 修复：监听你指定的6006端口，不是53
+              DnsServer::new("0.0.0.0:6006").start().await
           }
+
 
           EOF
 
