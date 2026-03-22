@@ -1,0 +1,124 @@
+name: Build dnscache-go Android arm64 Static Binary
+# 触发规则：1. 推送v开头的标签自动构建发布；2. 支持手动触发构建
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    permissions:
+      contents: write
+
+# 全局权限配置：允许写入仓库内容（用于发布Release）
+permissions:
+  contents: write
+
+jobs:
+  build-android-arm64:
+    name: Build Android arm64 Static Binary
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤1：拉取项目源码
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 步骤2：配置Go编译环境（固定稳定版，兼容绝大多数Go项目）
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          check-latest: true
+          cache: true # 开启Go模块缓存，加速重复构建
+
+      # 步骤3：构建前准备（创建输出目录、清理旧产物）
+      - name: Build Preparation
+        run: |
+          mkdir -p build_output
+          rm -rf build_output/*
+          echo "BUILD_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(date +%Y-%m-%d_%H-%M-%S)" >> $GITHUB_ENV
+
+      # 步骤4：核心交叉编译（安卓arm64 纯静态无依赖）
+      - name: Cross Compile Static Binary
+        run: |
+          CGO_ENABLED=0 \
+          GOOS=android \
+          GOARCH=arm64 \
+          go build \
+          -ldflags "-w -s -extldflags '-static' -X main.version=${{ env.BUILD_VERSION }} -X main.buildTime=${{ env.BUILD_TIME }}" \
+          -o build_output/dnscache-go-android-arm64
+        # 关键说明：
+        # 1. CGO_ENABLED=0 禁用CGO，彻底消除动态库依赖，是静态编译的核心
+        # 2. GOOS=android 目标系统为安卓，兼容安卓内核；若遇兼容性问题可改为 linux
+        # 3. GOARCH=arm64 仅编译arm64架构，适配99%的现代安卓设备
+        # 4. -w -s 剥离调试符号，大幅减小二进制体积
+        # 5. -extldflags '-static' 强制静态链接，确保无任何系统库依赖
+        # 6. 自动注入版本号和构建时间，便于版本管理
+
+      # 步骤5：二进制合法性校验（必须通过才会继续，避免无效产物）
+      - name: Validate Static Binary
+        run: |
+          echo "===== 二进制文件信息校验 ====="
+          file build_output/dnscache-go-android-arm64
+          
+          echo "===== 静态链接校验 ====="
+          if file build_output/dnscache-go-android-arm64 | grep -q "statically linked"; then
+            echo "✅ 校验通过：已编译为完全静态二进制，无外部依赖"
+          else
+            echo "❌ 校验失败：二进制非静态链接，存在运行依赖"
+            exit 1
+          fi
+          
+          echo "===== 架构校验 ====="
+          if file build_output/dnscache-go-android-arm64 | grep -q "ARM aarch64"; then
+            echo "✅ 校验通过：目标架构为arm64(aarch64)，适配安卓设备"
+          else
+            echo "❌ 校验失败：架构不匹配，非arm64架构"
+            exit 1
+          fi
+
+      # 步骤6：打包产物 + 生成SHA256校验和
+      - name: Package & Generate Checksum
+        run: |
+          # 复制项目核心文档到打包目录
+          cp LICENSE README.md build_output/ 2>/dev/null || true
+          
+          # 进入构建目录打包
+          cd build_output
+          zip -9 dnscache-go-android-arm64.zip dnscache-go-android-arm64 LICENSE README.md
+          
+          # 生成SHA256校验和文件
+          sha256sum dnscache-go-android-arm64.zip > dnscache-go-android-arm64.zip.sha256
+          sha256sum dnscache-go-android-arm64 > dnscache-go-android-arm64.sha256
+          
+          echo "===== 构建产物列表 ====="
+          ls -lh
+          
+          echo "===== SHA256校验和 ====="
+          cat *.sha256
+
+      # 步骤7：上传构建产物到Action（永久保留，无需发布Release也可下载）
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnscache-go-android-arm64
+          path: build_output/*
+          retention-days: 90 # 保留90天
+
+      # 步骤8：推送标签时，自动发布到GitHub Release
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ env.BUILD_VERSION }}
+          files: |
+            build_output/dnscache-go-android-arm64.zip
+            build_output/dnscache-go-android-arm64.zip.sha256
+            build_output/dnscache-go-android-arm64
+            build_output/dnscache-go-android-arm64.sha256
+          generate_release_notes: true # 自动生成更新日志
+          draft: false # 直接发布，无需手动确认
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
