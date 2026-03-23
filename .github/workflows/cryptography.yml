@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (Maturin Final)
+name: Build Cryptography for Py2droid (The Final Solution)
 
 on:
   workflow_dispatch:
@@ -52,9 +52,8 @@ jobs:
           
           # 核心交叉编译配置
           CARGO_BUILD_TARGET: aarch64-linux-android
-          PYO3_CROSS_PYTHON_VERSION: "3.11"
           
-          # OpenSSL 路径
+          # OpenSSL 配置
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
           AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
@@ -62,16 +61,26 @@ jobs:
         run: |
           pip install -U pip maturin
           
+          # 1. 生成伪造的 PyO3 配置文件 (关键步骤)
+          # 这会告诉 maturin：目标环境是 Python 3.11，且支持 abi3
+          cat <<EOF > pyo3-config.ini
+          implementation=CPython
+          version=3.11
+          shared=true
+          abi3=true
+          lib_name=python3.11
+          EOF
+          
+          # 2. 设置环境变量指向该文件
+          export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
+          
+          # 3. 下载并编译
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
-          cd cryptography-46.0.5/src/rust
+          cd cryptography-46.0.5
           
-          # 关键修改：
-          # 1. -i python3: 告诉 maturin 使用当前的 Python 3.11 作为 ABI 参考
-          # 2. --target: 指定目标为 Android ARM64
-          # 3. 在 cryptography-46.0.5 根目录下运行（如果报错，请尝试在 src/rust 目录下运行）
-          cd ../..
-          maturin build --release --target aarch64-linux-android -i python3 --out ../dist
+          # 4. 执行编译 (不再使用 -i 参数，而是依赖 PYO3_CONFIG_FILE)
+          maturin build --release --target aarch64-linux-android --out ../dist
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
