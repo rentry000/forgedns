@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (3.14 Force Fix)
+name: Build Cryptography for Py2droid (3.14 Final Fix)
 
 on:
   workflow_dispatch:
@@ -38,6 +38,7 @@ jobs:
           export CC=aarch64-linux-android24-clang
           ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
+          # 将路径导出到 GITHUB_ENV 供后续步骤使用
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=$(pwd)" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=$(pwd)/include" >> $GITHUB_ENV
@@ -45,10 +46,15 @@ jobs:
       - name: Build Cryptography Wheel with Maturin
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          CC_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          # 关键：将编译器路径定义为标准环境变量
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          
+          # Rust/Cargo 专用的编译器变量 (注意下划线)
+          CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # 核心：允许未定义符号，并强制指定库搜索路径
+          # 之前的空壳库链接修复
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
           CARGO_BUILD_TARGET: aarch64-linux-android
@@ -60,14 +66,12 @@ jobs:
           # 1. 安装构建依赖
           pip install -U pip maturin cffi setuptools
           
-          # 2. 制造“空壳” libpython3.14.so (关键步骤)
-          # 我们需要为 aarch64 制造这个库，否则链接器会报架构不匹配
+          # 2. 制造 AArch64 “空壳” libpython3.14.so
           mkdir -p $(pwd)/dummy_libs
-          $CC_PATH -shared -o $(pwd)/dummy_libs/libpython3.14.so -x c /dev/null
+          $CC -shared -o $(pwd)/dummy_libs/libpython3.14.so -x c /dev/null
           
-          # 3. 环境变量：让链接器能找到这个空壳库
+          # 3. 环境变量
           export LIBRARY_PATH=$(pwd)/dummy_libs:$LIBRARY_PATH
-          export LDFLAGS="-L$(pwd)/dummy_libs"
           
           # 4. 配置 PyO3
           cat <<EOF > pyo3-config.ini
@@ -79,16 +83,15 @@ jobs:
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 5. 下载源码并编译
+          # 5. 下载并编译
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
-          # 运行 maturin
           maturin build --release --target aarch64-linux-android --out ../dist
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-py314-android-final
+          name: cryptography-py314-android-fixed
           path: "dist/*.whl"
