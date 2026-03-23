@@ -1,7 +1,7 @@
-name: Build Cryptography for Py2droid
+name: Build Cryptography for Py2droid (OpenSSL 1.1.1w)
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -13,9 +13,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # 建议与 Py2droid 中的 Python 版本一致
+          python-version: '3.11'
 
-      - name: Install Rust & Android Target
+      - name: Set up Rust for Android
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -24,35 +24,45 @@ jobs:
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
-          ndk-version: r26b
+          ndk-version: r25c # r25c 对 OpenSSL 1.1.1w 兼容性较好
 
-      - name: Build Android OpenSSL
-        # Cryptography 必须链接到 Android 版的 OpenSSL 库
+      - name: Build Android OpenSSL 1.1.1w
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          wget https://www.openssl.org/source/openssl-3.1.4.tar.gz
-          tar -xf openssl-3.1.4.tar.gz
-          cd openssl-3.1.4
-          ./Configure android-arm64 -D__ANDROID_API__=24 shared
+          # 1. 准备工具链路径 (将 NDK llvm 目录加入 PATH)
+          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          export PATH=$TOOLCHAIN/bin:$PATH
+          
+          # 2. 下载并解压 OpenSSL 1.1.1w
+          wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
+          tar -xf openssl-1.1.1w.tar.gz
+          cd openssl-1.1.1w
+          
+          # 3. 关键：设置环境变量强制 OpenSSL 使用 Clang
+          # 对于 1.1.1w，必须手动指定 CC 为 clang
+          export CC=aarch64-linux-android24-clang
+          export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
+          
+          ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
+          
+          # 导出绝对路径给下一步
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
 
-      - name: Build Wheel
+      - name: Build Cryptography Wheel
         env:
-          # 关键：强制工具链指向 NDK 的 Clang
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          # 告诉 cryptography 哪里找刚才编译的 OpenSSL
-          CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1 
+          CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
         run: |
           pip install -U pip wheel setuptools-rust
-          # 限制平台标签为 android，方便 Py2droid 识别
-          pip wheel cryptography==46.0.5 --no-deps
+          # 这里的 OPENSSL_DIR 会自动使用上一步导出的路径
+          pip wheel https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
 
-      - name: Upload Result
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-py2droid-whl
+          name: cryptography-android-arm64
           path: "*.whl"
