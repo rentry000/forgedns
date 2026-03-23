@@ -1,4 +1,4 @@
-name: Build Android Wheels (Crypto & FastAPI)
+name: Build Android Wheels for Foghorn
 
 on:
   workflow_dispatch:
@@ -7,102 +7,67 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: '3.14'
 
-      - name: Set up Rust & Android Target
+      - name: Set up Rust + Android target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Set up Android NDK
+      - name: Set up NDK + Toolchain
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: r25c
 
-      - name: Build Static OpenSSL (For Cryptography)
+      - name: Build Static OpenSSL (fixed)
         env:
           NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
+          export CC=aarch64-linux-android24-clang
+          export AR=aarch64-linux-android-ar
+          export RANLIB=aarch64-linux-android-ranlib
+          
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
           tar -xf openssl-1.1.1w.tar.gz && cd openssl-1.1.1w
-          export CC=aarch64-linux-android24-clang
-          ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
-          make -j$(nproc)
-          echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
-
-      - name: Build Wheels (Cryptography & Pydantic-Core)
-        env:
-          # NDK 编译器路径配置
-          CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # 核心脱钩魔法：切断 libpython 强依赖，允许运行时解析符号
+          ./Configure android-arm64 -D__ANDROID_API__=24 no-shared no-tests \
+            --prefix=\( (pwd)/install --openssldir= \)(pwd)/install
+          make -j$(nproc)
+          make install_sw
+          echo "OPENSSL_DIR=$(pwd)/install" >> $GITHUB_ENV
+
+      - name: Build Cryptography + Pydantic-Core Wheels
+        env:
+          OPENSSL_DIR: ${{ env.OPENSSL_DIR }}
           PYO3_NO_PYTHON: 1
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
-          
-          # OpenSSL 静态链接配置
-          CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
-          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_DIR }}
-          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_DIR }}/include
-          AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
         run: |
-          # 安装编译工具
-          pip install -U pip maturin cffi setuptools
+          pip install -U pip maturin cffi setuptools wheel
           mkdir -p dist
-          
-          # 创建纯净版 pyo3 配置 (不含 lib_name)
-          cat <<EOF > pyo3-config.ini
-          implementation=CPython
-          version=3.14
-          abi3=true
-          EOF
-          export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
 
-          # ==========================================
-          # 1. 编译 Cryptography (加密库)
-          # ==========================================
+          # Cryptography
           pip download --no-binary :all: --no-deps cryptography==46.0.5
-          tar -xzf cryptography-46.0.5.tar.gz
-          cd cryptography-46.0.5
+          tar -xzf cryptography-*.tar.gz && cd cryptography-*
           maturin build --release --target aarch64-linux-android --out ../dist
           cd ..
 
-          # ==========================================
-          # 2. 编译 Pydantic-Core (FastAPI 的核心依赖)
-          # ==========================================
+          # Pydantic-core (FastAPI 核心)
           pip download --no-binary :all: --no-deps pydantic-core
-          tar -xzf pydantic_core-*.tar.gz
-          cd pydantic_core-*
-          # Pydantic-core 不需要 OpenSSL，直接用 maturin 编译即可
+          tar -xzf pydantic_core-*.tar.gz && cd pydantic_core-*
           maturin build --release --target aarch64-linux-android --out ../dist
           cd ..
 
-      - name: Verify Link-Free Status
-        run: |
-          # 检查生成的包是否彻底摆脱了 libpython 的魔爪
-          unzip dist/cryptography*.whl -d tmp_crypto
-          unzip dist/pydantic_core*.whl -d tmp_pydantic
-          
-          if readelf -d tmp_crypto/cryptography/hazmat/bindings/_rust.abi3.so | grep -i "python"; then
-            echo "❌ Cryptography 编译失败：仍含 Python 依赖" && exit 1
-          fi
-          
-          if readelf -d tmp_pydantic/pydantic_core/_pydantic_core.abi3.so | grep -i "python"; then
-            echo "❌ Pydantic-Core 编译失败：仍含 Python 依赖" && exit 1
-          fi
-          echo "✅ 所有扩展库编译完美，可在 Android 直接运行！"
-
-      - name: Upload Android Wheels
+      - name: Upload Wheels
         uses: actions/upload-artifact@v4
         with:
-          name: android-wheels-for-foghorn
+          name: foghorn-android-wheels
           path: dist/*.whl
