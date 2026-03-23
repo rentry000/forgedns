@@ -1,10 +1,10 @@
-name: Build Cryptography for Py2droid (Link-Free Fix)
+name: Build Cryptography (Ultimate Link-Free Fix)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build_android:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Set up Rust
+      - name: Set up Rust & Android Target
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -28,48 +28,40 @@ jobs:
 
       - name: Build Android OpenSSL (Static)
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          # 1. 配置交叉编译工具链
-          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
-          
-          # 2. 下载并编译 OpenSSL 1.1.1w (这是 cryptography 46.x 最稳的版本)
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-          tar -xf openssl-1.1.1w.tar.gz
-          cd openssl-1.1.1w
+          tar -xf openssl-1.1.1w.tar.gz && cd openssl-1.1.1w
           export CC=aarch64-linux-android24-clang
           ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
-          
-          # 3. 导出路径给后续步骤
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$(pwd)/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$(pwd)" >> $GITHUB_ENV
 
-      - name: Build Cryptography Wheel (Link-Free)
+      - name: Build Cryptography Wheel
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          # 关键：手动指定编译器，解决 openssl-sys 探测失败问题
+          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # 修复编译器探测问题
           CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # --- 核心黑科技 1：禁止 PyO3 寻找并链接 Python 库 ---
+          # --- 核心黑科技：彻底切断 Python 库依赖 ---
           PYO3_NO_PYTHON: 1
-          
-          # --- 核心黑科技 2：允许链接时符号未定义（运行时从 Py2droid 获取） ---
+          # 允许符号未定义（运行时从主进程 Python 抓取 PyExc_ValueError 等符号）
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
           # OpenSSL 配置
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
-          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
-          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
+          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_DIR }}
+          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_DIR }}/include
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          # 1. 安装构建工具
           pip install -U pip maturin cffi setuptools
           
-          # 2. 创建极简 PyO3 配置文件 (不含 lib_name，彻底断绝链接需求)
+          # 关键：创建一个“干净”的 PyO3 配置文件
+          # 注意：这里千万不要写 lib_name 或 lib_dir！
+          # 只要不写，maturin 编译时就不会在命令行末尾添加 -lpython3.14
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
@@ -77,23 +69,23 @@ jobs:
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 3. 下载源码并编译
+          # 下载源码并开始构建
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
-          tar -xzf cryptography-46.0.5.tar.gz
-          cd cryptography-46.0.5
+          tar -xzf cryptography-46.0.5.tar.gz && cd cryptography-46.0.5
           
           maturin build --release --target aarch64-linux-android --out ../dist
 
-      - name: Verify Linkage (Post-Check)
+      - name: Verify dependencies (Final Check)
         run: |
-          # 自动校验步骤：确保生成的 so 文件没有残留 libpython 依赖
-          unzip dist/*.whl -d verify_dir
-          SO_FILE=$(find verify_dir -name "_rust.abi3.so")
+          # 自动校验：如果生成的 so 还有 python 依赖，直接报错中止
+          unzip dist/*.whl -d verify_tmp
+          SO_FILE=$(find verify_tmp -name "_rust.abi3.so")
+          echo "Checking $SO_FILE dependencies..."
           if readelf -d "$SO_FILE" | grep -i "python"; then
-            echo "错误：生成的库依然包含 Python 强依赖，手机运行会报错！"
+            echo "❌ 失败：依然包含 libpython 依赖！"
             exit 1
           else
-            echo "成功：生成的库是 Link-Free 的，可以在 Android 上完美运行！"
+            echo "✅ 成功：库文件已完全脱离 Python 依赖！"
           fi
 
       - name: Upload Artifact
