@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (Python 3.14 Fixed)
+name: Build Cryptography for Py2droid (Link-free Fix)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,6 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # 使用最新的 Python 3.14
           python-version: '3.14'
 
       - name: Set up Rust for Android
@@ -50,40 +49,38 @@ jobs:
           AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
+          # --- 核心改动 1：告诉 Rust 编译器允许未定义符号 ---
+          # 这会防止生成的 .so 文件去寻找特定的 libpythonXXX.so
+          RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
+          
           CARGO_BUILD_TARGET: aarch64-linux-android
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
           AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          # 1. 关键：增加 setuptools 依赖
+          # 安装编译依赖
           pip install -U pip maturin cffi setuptools
           
-          # 2. 生成对应 3.14 的“空库”
-          mkdir -p dummy_lib
-          $CC -shared -o dummy_lib/libpython3.14.so -x c /dev/null
-          export LIBRARY_PATH=$(pwd)/dummy_lib:$LIBRARY_PATH
-          
-          # 3. 准备 3.14 版 PyO3 配置文件
+          # --- 核心改动 2：极简 PyO3 配置 ---
+          # 删掉 lib_name 和 lib_dir，不要让它去寻找任何 python 库文件
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
-          shared=true
           abi3=true
-          lib_name=python3.14
-          lib_dir=$(pwd)/dummy_lib
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 4. 下载源码并编译
+          # 下载源码并编译
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
+          # 注意：去掉之前所有关于 dummy_lib 的逻辑
           maturin build --release --target aarch64-linux-android --out ../dist
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-py314-android-arm64
+          name: cryptography-py314-android-fixed
           path: "dist/*.whl"
