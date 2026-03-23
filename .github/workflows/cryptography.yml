@@ -1,47 +1,3 @@
-name: Build Cryptography for Py2droid (Link-free Fix)
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: Set up Rust for Android
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c
-
-      - name: Build Android OpenSSL 1.1.1w
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
-          wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-          tar -xf openssl-1.1.1w.tar.gz
-          cd openssl-1.1.1w
-          export CC=aarch64-linux-android24-clang
-          ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
-          make -j$(nproc)
-          echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$(pwd)" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$(pwd)/include" >> $GITHUB_ENV
-
       - name: Build Cryptography Wheel with Maturin
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -49,8 +5,10 @@ jobs:
           AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # --- 核心改动 1：告诉 Rust 编译器允许未定义符号 ---
-          # 这会防止生成的 .so 文件去寻找特定的 libpythonXXX.so
+          # 1. 强制禁止链接 Python 库 (关键)
+          PYO3_NO_PYTHON: 1
+          
+          # 2. 增强链接器参数，允许未定义符号，并忽略缺失的库
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
           CARGO_BUILD_TARGET: aarch64-linux-android
@@ -59,11 +17,9 @@ jobs:
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          # 安装编译依赖
           pip install -U pip maturin cffi setuptools
           
-          # --- 核心改动 2：极简 PyO3 配置 ---
-          # 删掉 lib_name 和 lib_dir，不要让它去寻找任何 python 库文件
+          # 3. 极简 PyO3 配置，不给任何库路径信息
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
@@ -71,16 +27,11 @@ jobs:
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 下载源码并编译
+          # 4. 下载并解压
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
-          # 注意：去掉之前所有关于 dummy_lib 的逻辑
+          # 5. 执行编译
+          # 使用 --extension-module 标志，这在 maturin 中通常会自动处理无链接需求
           maturin build --release --target aarch64-linux-android --out ../dist
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cryptography-py314-android-fixed
-          path: "dist/*.whl"
