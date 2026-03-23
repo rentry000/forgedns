@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (3.14 Final Solution)
+name: Build Cryptography for Py2droid (Link-free Fix)
 
 on:
   workflow_dispatch:
@@ -15,22 +15,22 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Set up Rust for Android
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Set up Android NDK
+      - name: Set up NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: r25c
 
-      - name: Build Android OpenSSL 1.1.1w
+      - name: Build Android OpenSSL
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
           tar -xf openssl-1.1.1w.tar.gz
@@ -42,21 +42,23 @@ jobs:
           echo "OPENSSL_LIB_DIR=$(pwd)" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=$(pwd)/include" >> $GITHUB_ENV
 
-      - name: Build Cryptography Wheel with Maturin
+      - name: Final Build with Maturin
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          # 关键 1: 修复 openssl-sys 找不到编译器的报错 (使用下划线变量)
-          CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # 修复编译器路径，确保环境变量格式正确
+          CLANG: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          
+          # 关键：Rust 和 C 构建脚本通用的编译器变量
+          CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # 关键 2: 禁止 PyO3 链接到 Python 库，防止生成 NEEDED libpython 指令
+          # 禁止 PyO3 主动链接 Python 库
           PYO3_NO_PYTHON: 1
-          
-          # 关键 3: 允许未定义符号 (运行时解析)
+          # 允许链接时存在未定义符号
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
-          CARGO_BUILD_TARGET: aarch64-linux-android
+          # OpenSSL 相关配置
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
           AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
@@ -64,12 +66,13 @@ jobs:
         run: |
           pip install -U pip maturin cffi setuptools
           
-          # 关键 4: 制造一个临时的伪造库，仅用于“骗过”某些顽固的构建脚本
+          # 1. 制造“空壳” libpython3.14.so
+          # 这是为了让链接器在看到 -lpython3.14 时能找到对应的文件而闭嘴
           mkdir -p dummy_libs
-          $CC_aarch64_linux_android -shared -o dummy_libs/libpython3.14.so -x c /dev/null
+          $CLANG -shared -o dummy_libs/libpython3.14.so -x c /dev/null
           export LIBRARY_PATH=$(pwd)/dummy_libs:$LIBRARY_PATH
           
-          # 配置 PyO3，注意不要写 lib_name，强制使用 abi3
+          # 2. 准备 PyO3 配置文件
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
@@ -77,15 +80,15 @@ jobs:
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
+          # 3. 构建 Cryptography
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
-          # 执行编译
           maturin build --release --target aarch64-linux-android --out ../dist
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-py314-fixed
+          name: cryptography-aarch64-android
           path: "dist/*.whl"
