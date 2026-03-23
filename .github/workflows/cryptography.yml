@@ -1,4 +1,4 @@
-name: Build Cryptography (Ultimate Link-Free Fix)
+name: Build Android Wheels (Crypto & FastAPI)
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Build Android OpenSSL (Static)
+      - name: Build Static OpenSSL (For Cryptography)
         env:
           NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
@@ -39,57 +39,70 @@ jobs:
           make -j$(nproc)
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
 
-      - name: Build Cryptography Wheel
+      - name: Build Wheels (Cryptography & Pydantic-Core)
         env:
-          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          # 修复编译器探测问题
+          # NDK 编译器路径配置
           CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # --- 核心黑科技：彻底切断 Python 库依赖 ---
+          # 核心脱钩魔法：切断 libpython 强依赖，允许运行时解析符号
           PYO3_NO_PYTHON: 1
-          # 允许符号未定义（运行时从主进程 Python 抓取 PyExc_ValueError 等符号）
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
-          # OpenSSL 配置
+          # OpenSSL 静态链接配置
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
           AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_DIR }}/include
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
+          # 安装编译工具
           pip install -U pip maturin cffi setuptools
+          mkdir -p dist
           
-          # 关键：创建一个“干净”的 PyO3 配置文件
-          # 注意：这里千万不要写 lib_name 或 lib_dir！
-          # 只要不写，maturin 编译时就不会在命令行末尾添加 -lpython3.14
+          # 创建纯净版 pyo3 配置 (不含 lib_name)
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
           abi3=true
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
-          
-          # 下载源码并开始构建
-          wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
-          tar -xzf cryptography-46.0.5.tar.gz && cd cryptography-46.0.5
-          
+
+          # ==========================================
+          # 1. 编译 Cryptography (加密库)
+          # ==========================================
+          pip download --no-binary :all: --no-deps cryptography==46.0.5
+          tar -xzf cryptography-46.0.5.tar.gz
+          cd cryptography-46.0.5
           maturin build --release --target aarch64-linux-android --out ../dist
+          cd ..
 
-      - name: Verify dependencies (Final Check)
+          # ==========================================
+          # 2. 编译 Pydantic-Core (FastAPI 的核心依赖)
+          # ==========================================
+          pip download --no-binary :all: --no-deps pydantic-core
+          tar -xzf pydantic_core-*.tar.gz
+          cd pydantic_core-*
+          # Pydantic-core 不需要 OpenSSL，直接用 maturin 编译即可
+          maturin build --release --target aarch64-linux-android --out ../dist
+          cd ..
+
+      - name: Verify Link-Free Status
         run: |
-          # 自动校验：如果生成的 so 还有 python 依赖，直接报错中止
-          unzip dist/*.whl -d verify_tmp
-          SO_FILE=$(find verify_tmp -name "_rust.abi3.so")
-          echo "Checking $SO_FILE dependencies..."
-          if readelf -d "$SO_FILE" | grep -i "python"; then
-            echo "❌ 失败：依然包含 libpython 依赖！"
-            exit 1
-          else
-            echo "✅ 成功：库文件已完全脱离 Python 依赖！"
+          # 检查生成的包是否彻底摆脱了 libpython 的魔爪
+          unzip dist/cryptography*.whl -d tmp_crypto
+          unzip dist/pydantic_core*.whl -d tmp_pydantic
+          
+          if readelf -d tmp_crypto/cryptography/hazmat/bindings/_rust.abi3.so | grep -i "python"; then
+            echo "❌ Cryptography 编译失败：仍含 Python 依赖" && exit 1
           fi
+          
+          if readelf -d tmp_pydantic/pydantic_core/_pydantic_core.abi3.so | grep -i "python"; then
+            echo "❌ Pydantic-Core 编译失败：仍含 Python 依赖" && exit 1
+          fi
+          echo "✅ 所有扩展库编译完美，可在 Android 直接运行！"
 
-      - name: Upload Artifact
+      - name: Upload Android Wheels
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-py314-android-fixed
-          path: "dist/*.whl"
+          name: android-wheels-for-foghorn
+          path: dist/*.whl
