@@ -1,0 +1,58 @@
+name: Build Cryptography for Py2droid
+
+on:
+  workflow_dispatch: # 手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # 建议与 Py2droid 中的 Python 版本一致
+
+      - name: Install Rust & Android Target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
+      - name: Build Android OpenSSL
+        # Cryptography 必须链接到 Android 版的 OpenSSL 库
+        run: |
+          export ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}
+          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          wget https://www.openssl.org/source/openssl-3.1.4.tar.gz
+          tar -xf openssl-3.1.4.tar.gz
+          cd openssl-3.1.4
+          ./Configure android-arm64 -D__ANDROID_API__=24 shared
+          make -j$(nproc)
+          echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
+
+      - name: Build Wheel
+        env:
+          # 关键：强制工具链指向 NDK 的 Clang
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          # 告诉 cryptography 哪里找刚才编译的 OpenSSL
+          CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1 
+        run: |
+          pip install -U pip wheel setuptools-rust
+          # 限制平台标签为 android，方便 Py2droid 识别
+          pip wheel cryptography==46.0.5 --no-deps
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: cryptography-py2droid-whl
+          path: "*.whl"
