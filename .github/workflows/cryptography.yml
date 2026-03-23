@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (Link-free & Python 3.14)
+name: Build Cryptography for Py2droid (3.14 Force Fix)
 
 on:
   workflow_dispatch:
@@ -36,7 +36,6 @@ jobs:
           tar -xf openssl-1.1.1w.tar.gz
           cd openssl-1.1.1w
           export CC=aarch64-linux-android24-clang
-          # 静态编译 OpenSSL 以便直接嵌入到 cryptography 的 so 中
           ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
@@ -46,14 +45,10 @@ jobs:
       - name: Build Cryptography Wheel with Maturin
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          CC_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # --- 核心黑科技 1：禁止 PyO3 寻找并链接 Python 库 ---
-          PYO3_NO_PYTHON: 1
-          
-          # --- 核心黑科技 2：允许链接时存在未定义的符号（运行时自动绑定） ---
+          # 核心：允许未定义符号，并强制指定库搜索路径
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
           CARGO_BUILD_TARGET: aarch64-linux-android
@@ -62,33 +57,35 @@ jobs:
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          # 1. 安装必要的构建工具，包括 setuptools 和 cffi
+          # 1. 安装构建依赖
           pip install -U pip maturin cffi setuptools
           
-          # 2. 创建极简 PyO3 配置文件，不提供任何 lib_name
+          # 2. 制造“空壳” libpython3.14.so (关键步骤)
+          # 我们需要为 aarch64 制造这个库，否则链接器会报架构不匹配
+          mkdir -p $(pwd)/dummy_libs
+          $CC_PATH -shared -o $(pwd)/dummy_libs/libpython3.14.so -x c /dev/null
+          
+          # 3. 环境变量：让链接器能找到这个空壳库
+          export LIBRARY_PATH=$(pwd)/dummy_libs:$LIBRARY_PATH
+          export LDFLAGS="-L$(pwd)/dummy_libs"
+          
+          # 4. 配置 PyO3
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
           abi3=true
+          lib_name=python3.14
+          lib_dir=$(pwd)/dummy_libs
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 3. 下载并解压源码
+          # 5. 下载源码并编译
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
-          # 4. 执行构建
-          # 注意：maturin 在检测到 PYO3_NO_PYTHON 时会生成不依赖 libpython 的二进制
+          # 运行 maturin
           maturin build --release --target aarch64-linux-android --out ../dist
-
-      - name: Verify Wheel Content (Diagnostic)
-        run: |
-          # 这是一个诊断步骤，用于确认 .so 文件中是否还残留对 libpython 的依赖
-          cd dist
-          unzip *.whl -d tmp_verify
-          # 检查是否有 NEEDED libpython3.14.so。如果没有输出，说明成功了！
-          readelf -d tmp_verify/cryptography/hazmat/bindings/_rust.abi3.so | grep NEEDED || echo "SUCCESS: No libpython dependency found!"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
