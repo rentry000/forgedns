@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (CFFI Fixed)
+name: Build Cryptography for Py2droid (Linker Final)
 
 on:
   workflow_dispatch:
@@ -36,7 +36,6 @@ jobs:
           tar -xf openssl-1.1.1w.tar.gz
           cd openssl-1.1.1w
           export CC=aarch64-linux-android24-clang
-          export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
           ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
@@ -50,35 +49,38 @@ jobs:
           AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # 核心交叉编译配置
           CARGO_BUILD_TARGET: aarch64-linux-android
-          
-          # OpenSSL 配置
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
           AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          # 1. 关键：同时安装 maturin 和 cffi
+          # 1. 安装编译依赖
           pip install -U pip maturin cffi
           
-          # 2. 生成伪造的 PyO3 配置文件
+          # 2. 生成“空库”骗过链接器 (关键！)
+          mkdir -p dummy_lib
+          # 使用 NDK 编译器生成一个目标架构 (AArch64) 的空动态库
+          $CC -shared -o dummy_lib/libpython3.11.so -x c /dev/null
+          # 告诉链接器去哪里找这个“库”
+          export LIBRARY_PATH=$(pwd)/dummy_lib:$LIBRARY_PATH
+          
+          # 3. 准备 PyO3 配置文件
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.11
           shared=true
           abi3=true
           lib_name=python3.11
+          lib_dir=$(pwd)/dummy_lib
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 3. 下载并编译
+          # 4. 下载源码并编译
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
-          # 4. 执行编译
-          # maturin build 会自动调用宿主机的 python 来运行 build_openssl.py
           maturin build --release --target aarch64-linux-android --out ../dist
 
       - name: Upload Artifact
