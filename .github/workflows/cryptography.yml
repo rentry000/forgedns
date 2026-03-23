@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (The Final Solution)
+name: Build Cryptography for Py2droid (CFFI Fixed)
 
 on:
   workflow_dispatch:
@@ -59,10 +59,10 @@ jobs:
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          pip install -U pip maturin
+          # 1. 关键：同时安装 maturin 和 cffi
+          pip install -U pip maturin cffi
           
-          # 1. 生成伪造的 PyO3 配置文件 (关键步骤)
-          # 这会告诉 maturin：目标环境是 Python 3.11，且支持 abi3
+          # 2. 生成伪造的 PyO3 配置文件
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.11
@@ -70,8 +70,6 @@ jobs:
           abi3=true
           lib_name=python3.11
           EOF
-          
-          # 2. 设置环境变量指向该文件
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
           # 3. 下载并编译
@@ -79,7 +77,8 @@ jobs:
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
           
-          # 4. 执行编译 (不再使用 -i 参数，而是依赖 PYO3_CONFIG_FILE)
+          # 4. 执行编译
+          # maturin build 会自动调用宿主机的 python 来运行 build_openssl.py
           maturin build --release --target aarch64-linux-android --out ../dist
 
       - name: Upload Artifact
