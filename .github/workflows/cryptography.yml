@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (Link-free Fix)
+name: Build Cryptography (Ultimate Link-Free Fix)
 
 on:
   workflow_dispatch:
@@ -10,12 +10,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
-      - name: Set up Rust
+      - name: Set up Rust & NDK
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -26,53 +21,38 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Build Android OpenSSL
+      - name: Build Android OpenSSL (Static)
         env:
           NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-          tar -xf openssl-1.1.1w.tar.gz
-          cd openssl-1.1.1w
+          tar -xf openssl-1.1.1w.tar.gz && cd openssl-1.1.1w
           export CC=aarch64-linux-android24-clang
           ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$(pwd)" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$(pwd)/include" >> $GITHUB_ENV
 
-      - name: Final Build with Maturin
+      - name: Build Link-Free Wheel
         env:
-          NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          # 修复编译器路径，确保环境变量格式正确
-          CLANG: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-          
-          # 关键：Rust 和 C 构建脚本通用的编译器变量
           CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # 禁止 PyO3 主动链接 Python 库
+          # 核心修复 1：禁止 PyO3 寻找或链接任何 Python 库文件
           PYO3_NO_PYTHON: 1
-          # 允许链接时存在未定义符号
+          # 核心修复 2：允许符号未定义（由 Android 运行时解析）
           RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
           
-          # OpenSSL 相关配置
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
-          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
-          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
+          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_DIR }}
+          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_DIR }}/include
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
-          pip install -U pip maturin cffi setuptools
+          pip install maturin cffi setuptools
           
-          # 1. 制造“空壳” libpython3.14.so
-          # 这是为了让链接器在看到 -lpython3.14 时能找到对应的文件而闭嘴
-          mkdir -p dummy_libs
-          $CLANG -shared -o dummy_libs/libpython3.14.so -x c /dev/null
-          export LIBRARY_PATH=$(pwd)/dummy_libs:$LIBRARY_PATH
-          
-          # 2. 准备 PyO3 配置文件
+          # 核心修复 3：创建一个没有 lib_name 的 PyO3 配置文件
+          # 只要这里不写 lib_name，生成的 .so 里的 NEEDED 列表就是干净的
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
@@ -80,15 +60,25 @@ jobs:
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
           
-          # 3. 构建 Cryptography
           wget https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz
-          tar -xzf cryptography-46.0.5.tar.gz
-          cd cryptography-46.0.5
+          tar -xzf cryptography-46.0.5.tar.gz && cd cryptography-46.0.5
           
           maturin build --release --target aarch64-linux-android --out ../dist
 
-      - name: Upload Artifact
+      - name: Verify Fix (IMPORTANT)
+        run: |
+          # 检查生成的 .so 是否还残留对 libpython 的依赖
+          unzip dist/*.whl -d tmp_check
+          SO_FILE=$(find tmp_check -name "_rust.abi3.so")
+          if readelf -d "$SO_FILE" | grep -i "python"; then
+            echo "❌ 修复失败：依赖依然存在！"
+            exit 1
+          else
+            echo "✅ 修复成功：没有任何 Python 库依赖！"
+          fi
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-aarch64-android
-          path: "dist/*.whl"
+          name: cryptography-clean-3.14
+          path: dist/*.whl
