@@ -1,4 +1,4 @@
-name: Build Cryptography for Py2droid (Fixed OpenSSL Path)
+name: Build Cryptography for Py2droid (Fixed PyO3)
 
 on:
   workflow_dispatch:
@@ -32,49 +32,43 @@ jobs:
         run: |
           TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
-          
           wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
           tar -xf openssl-1.1.1w.tar.gz
           cd openssl-1.1.1w
-          
           export CC=aarch64-linux-android24-clang
           export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
-          
-          # 编译为静态库，方便集成
           ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
           make -j$(nproc)
-          
-          # 关键点：将绝对路径写入环境变量文件
           echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=$(pwd)" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=$(pwd)/include" >> $GITHUB_ENV
-          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
 
       - name: Build Cryptography Wheel
         env:
-          # 基础 NDK 路径
+          # --- 基础交叉编译配置 ---
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          
-          # 告诉 Rust 编译器使用哪个链接器
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
           
-          # 强制指定目标架构（解决你日志中看到的 X86_64 混淆问题）
+          # --- 修复 PyO3 错误的核心变量 ---
+          PYO3_CROSS: 1
           PYO3_CROSS_LIB_DIR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/24
+          PYO3_CROSS_PYTHON_VERSION: "3.11"
+          # 关键：告诉 PyO3 不要去查 _sysconfigdata，直接开始构建
+          PYO3_NO_PYTHON: 1
           
-          # 告诉 cryptography 不要自己下载 OpenSSL，使用我们提供的
+          # --- OpenSSL 配置 ---
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
-          
-          # 明确告诉 openssl-sys 库的位置（对应你报错的地方）
           AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
         run: |
           pip install -U pip wheel setuptools-rust
-          # 强制指定平台标识，确保生成 aarch64 的 wheel
+          # 使用 --no-deps 避免 pip 尝试去构建不需要的依赖
           pip wheel https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz --no-deps
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-android-arm64
+          name: cryptography-46.0.5-android-arm64
           path: "*.whl"
