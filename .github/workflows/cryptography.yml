@@ -1,4 +1,4 @@
-name: Build Android Wheels (CIBW Fixed)
+name: Build Android Wheels (CIBW Robust Version)
 
 on:
   workflow_dispatch:
@@ -10,65 +10,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 必须步骤：安装 QEMU 以支持 ARM64 模拟
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-
       - name: Build with cibuildwheel
         env:
+          # 只构建 Python 3.14 的 ARM64 版本
           CIBW_BUILD: "cp314-manylinux_aarch64"
           CIBW_ARCHS: "aarch64"
           
-          # 1. 在容器启动后，编译开始前，自动下载 NDK
+          # --- 修正后的 Before All：安装必要工具和 Rust ---
           CIBW_BEFORE_ALL_LINUX: >
-            yum install -y wget tar &&
-            wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip &&
-            unzip -q android-ndk-r25c-linux.zip -d /opt &&
-            rm android-ndk-r25c-linux.zip &&
-            # 安装 Rust 环境（针对 pydantic-core 和 bcrypt）
+            dnf install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            source $HOME/.cargo/env &&
-            rustup target add aarch64-linux-android
+            echo "source $HOME/.cargo/env" >> $HOME/.bashrc
 
-          # 2. 设置交叉编译环境变量（注意：此时路径是容器内的 /opt/android-ndk-r25c）
+          # --- 核心环境变量：解决 PyExc_ValueError 报错 ---
           CIBW_ENVIRONMENT_LINUX: >
-            NDK_ROOT=/opt/android-ndk-r25c
-            CC=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-            CXX=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
-            AR=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-            STRIP=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
-            LDFLAGS="-Wl,--allow-shlib-undefined"
-            CFLAGS="-D__BIONIC_NO_PAGE_SIZE_MACRO"
-            PYO3_NO_PYTHON=1
-            CARGO_BUILD_TARGET=aarch64-linux-android
             PATH="$PATH:$HOME/.cargo/bin"
+            LDFLAGS="-Wl,--allow-shlib-undefined"
+            PYO3_NO_PYTHON=1
+            CARGO_NET_GIT_FETCH_WITH_CLI=true
 
-          # 禁止自动修复，防止链接到容器的 glibc
+          # 禁止自动修复依赖，确保生成的包保持“纯净”
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
 
         run: |
           pip install cibuildwheel
           mkdir -p dist
           
-          # 循环编译列表
+          # 待编译列表
           packages=("cffi" "pydantic-core" "bcrypt")
           
           for pkg in "${packages[@]}"; do
             echo "--------------------------------------------------"
-            echo "🚀 正在编译: $pkg"
+            echo "🚀 正在编译原生 ARM64 模块: $pkg"
+            echo "--------------------------------------------------"
             
             rm -rf build_source && mkdir build_source && cd build_source
+            # 下载源码
             pip download --no-binary :all: --no-deps $pkg
             tar -xzf *.tar.gz --strip-components=1
             
-            # 运行命令不再带有 --docker-options
+            # 执行编译
             cibuildwheel . --output-dir ../dist --platform linux
             
             cd ..
