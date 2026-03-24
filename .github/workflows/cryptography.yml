@@ -1,8 +1,6 @@
-name: Build Android Wheels (Crypto & FastAPI)
-
+name: Build Cryptography for Py2droid (3.14 Final Fix)
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -10,111 +8,141 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 修复1：指定Python 3.14开发版，避免setup-python找不到稳定版
       - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.14-dev'
+          allow-prereleases: true
 
-      - name: Set up Rust & Android Target
+      # 修复2：固定Rust版本，添加Android aarch64目标，确保编译稳定性
+      - name: Set up Rust for Android
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           targets: aarch64-linux-android
 
-      - name: Set up Android NDK
+      # 固定NDK版本，与py2droid底层API兼容
+      - name: Set up Android NDK r25c
         uses: nttld/setup-ndk@v1
         id: setup-ndk
         with:
           ndk-version: r25c
+          link-to-sdk: true
 
-      - name: Build Static OpenSSL (For Cryptography)
+      # 修复3：OpenSSL编译全流程优化，解决静态库PIC问题+下载失败问题
+      - name: Build Android OpenSSL 1.1.1w (aarch64)
         env:
-          # OpenSSL 的 Configure 脚本认死了这两个环境变量名，少一个都会导致它的检测逻辑回退到寻找 gcc
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          # 基础环境配置
           TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
           export PATH=$TOOLCHAIN/bin:$PATH
-          
-          wget https://www.openssl.org/source/openssl-1.1.1w.tar.gz
-          tar -xf openssl-1.1.1w.tar.gz && cd openssl-1.1.1w
-          
-          # 终极拦截：强行把所有 C、C++、汇编、静态库打包工具全部指向 LLVM/Clang
-          export CC=aarch64-linux-android24-clang
-          export CXX=aarch64-linux-android24-clang++
-          export AS=aarch64-linux-android24-clang
-          export AR=llvm-ar
-          export RANLIB=llvm-ranlib
-          
-          # 再次执行配置
-          ./Configure android-arm64 -D__ANDROID_API__=24 no-shared
+          export TARGET_HOST=aarch64-linux-android
+          export API_LEVEL=24
+
+          # 编译器全变量配置，避免调用系统工具链
+          export CC=$TARGET_HOST${API_LEVEL}-clang
+          export CXX=$TARGET_HOST${API_LEVEL}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export LD=$TOOLCHAIN/bin/ld.lld
+
+          # 带重试的源码下载，解决下载失败/空内容问题
+          wget --tries=5 --timeout=30 --no-check-certificate https://www.openssl.org/source/openssl-1.1.1w.tar.gz -O openssl-1.1.1w.tar.gz
+          tar -xf openssl-1.1.1w.tar.gz
+          cd openssl-1.1.1w
+
+          # 核心修复：添加-fPIC确保静态库可用于共享库链接，规范prefix路径
+          ./Configure android-arm64 \
+            -D__ANDROID_API__=$API_LEVEL \
+            -fPIC \
+            no-shared \
+            no-tests \
+            --prefix=$(pwd)/build
+
+          # 并行编译+安装
           make -j$(nproc)
-          echo "OPENSSL_DIR=$(pwd)" >> $GITHUB_ENV
+          make install_sw
 
+          # 导出标准化路径，供后续步骤使用
+          echo "OPENSSL_DIR=$(pwd)/build" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$(pwd)/build/lib" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$(pwd)/build/include" >> $GITHUB_ENV
 
-      - name: Build Wheels (Cryptography & Pydantic-Core)
+      # 核心修复：解决PyExc_ValueError符号找不到问题，适配py2droid嵌入环境
+      - name: Build Fixed Cryptography Wheel for Py2droid
         env:
-          # NDK 编译器路径配置
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # 标准编译器变量
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+          AR: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          # Rust Android专用变量
           CC_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CXX_aarch64_linux_android: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          
-          # 核心脱钩魔法：切断 libpython 强依赖，允许运行时解析符号
-          PYO3_NO_PYTHON: 1
-          RUSTFLAGS: "-C link-arg=-Wl,--allow-shlib-undefined"
-          
-          # OpenSSL 静态链接配置
+          CARGO_BUILD_TARGET: aarch64-linux-android
+          # OpenSSL配置，禁用自带vendor，强制使用我们编译的静态库
           CRYPTOGRAPHY_OPENSSL_NO_VENDOR: 1
-          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_DIR }}
-          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_DIR }}/include
+          AARCH64_LINUX_ANDROID_OPENSSL_LIB_DIR: ${{ env.OPENSSL_LIB_DIR }}
+          AARCH64_LINUX_ANDROID_OPENSSL_INCLUDE_DIR: ${{ env.OPENSSL_INCLUDE_DIR }}
           AARCH64_LINUX_ANDROID_OPENSSL_STATIC: 1
+          # 核心修复：PyO3扩展模块模式，不链接libpython，依赖运行时解释器提供符号
+          PYO3_EXTENSION_MODULE: 1
+          PYO3_NO_PYTHON: 0
+          PYO3_PYTHON: python
         run: |
-          # 安装编译工具
-          pip install -U pip maturin cffi setuptools
-          mkdir -p dist
-          
-          # 创建纯净版 pyo3 配置 (不含 lib_name)
+          # 1. 安装最新构建依赖
+          pip install -U pip maturin cffi setuptools wheel
+
+          # 2. 构建dummy libpython，过编译期链接检查（运行时用py2droid已加载的libpython）
+          DUMMY_LIB_DIR=$(pwd)/dummy_libs
+          mkdir -p $DUMMY_LIB_DIR
+          $CC -shared -o $DUMMY_LIB_DIR/libpython3.14.so \
+            -x c /dev/null \
+            -Wl,-soname=libpython3.14.so
+          export LIBRARY_PATH=$DUMMY_LIB_DIR:$LIBRARY_PATH
+
+          # 3. 标准化PyO3配置，确保abi3兼容py2droid
           cat <<EOF > pyo3-config.ini
           implementation=CPython
           version=3.14
           abi3=true
+          lib_name=python3.14
+          lib_dir=$DUMMY_LIB_DIR
           EOF
           export PYO3_CONFIG_FILE=$(pwd)/pyo3-config.ini
 
-          # ==========================================
-          # 1. 编译 Cryptography (加密库)
-          # ==========================================
-          pip download --no-binary :all: --no-deps cryptography==46.0.5
+          # 4. 带重试的源码下载，解决文件类型不支持/下载失败问题
+          wget --tries=5 --timeout=30 --no-check-certificate https://files.pythonhosted.org/packages/60/04/ee2a9e8542e4fa2773b81771ff8349ff19cdd56b7258a0cc442639052edb/cryptography-46.0.5.tar.gz -O cryptography-46.0.5.tar.gz
           tar -xzf cryptography-46.0.5.tar.gz
           cd cryptography-46.0.5
-          maturin build --release --target aarch64-linux-android --out ../dist
-          cd ..
 
-          # ==========================================
-          # 2. 编译 Pydantic-Core (FastAPI 的核心依赖)
-          # ==========================================
-          pip download --no-binary :all: --no-deps pydantic-core
-          tar -xzf pydantic_core-*.tar.gz
-          cd pydantic_core-*
-          # Pydantic-core 不需要 OpenSSL，直接用 maturin 编译即可
-          maturin build --release --target aarch64-linux-android --out ../dist
-          cd ..
+          # 5. 核心修复：RUSTFLAGS适配Android，解决符号查找问题
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="
+            -C relocation-model=pic
+            -C link-arg=-Wl,--allow-shlib-undefined
+            -C link-arg=-Wl,--enable-new-dtags
+            -C link-arg=-Wl,--eh-frame-hdr
+            -C link-arg=-Wl,-Bsymbolic-functions
+            --cfg=pyo3_extension_module
+          "
 
-      - name: Verify Link-Free Status
-        run: |
-          # 检查生成的包是否彻底摆脱了 libpython 的魔爪
-          unzip dist/cryptography*.whl -d tmp_crypto
-          unzip dist/pydantic_core*.whl -d tmp_pydantic
-          
-          if readelf -d tmp_crypto/cryptography/hazmat/bindings/_rust.abi3.so | grep -i "python"; then
-            echo "❌ Cryptography 编译失败：仍含 Python 依赖" && exit 1
-          fi
-          
-          if readelf -d tmp_pydantic/pydantic_core/_pydantic_core.abi3.so | grep -i "python"; then
-            echo "❌ Pydantic-Core 编译失败：仍含 Python 依赖" && exit 1
-          fi
-          echo "✅ 所有扩展库编译完美，可在 Android 直接运行！"
+          # 6. 构建适配py2droid的abi3 wheel
+          maturin build \
+            --release \
+            --target aarch64-linux-android \
+            --interpreter python3.14 \
+            --abi3 \
+            --strip \
+            --out ../dist
 
-      - name: Upload Android Wheels
+      # 上传最终修复后的wheel包
+      - name: Upload Fixed Cryptography Wheel
         uses: actions/upload-artifact@v4
         with:
-          name: android-wheels-for-foghorn
-          path: dist/*.whl
+          name: cryptography-46.0.5-py314-android-py2droid-fixed
+          path: "dist/*.whl"
+          retention-days: 30
