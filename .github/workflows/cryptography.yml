@@ -10,7 +10,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. 增加 Swap 空间，防止 Rust 编译 (pydantic-core) 内存溢出
+      # 1. 增加 Swap 空间，防止 Rust 编译内存溢出
       - name: Set up Swap Space
         uses: pierotofy/set-swap-space@master
         with:
@@ -34,8 +34,8 @@ jobs:
           CIBW_ARCHS: "aarch64"
           CIBW_BUILD_VERBOSITY: 3
           
-          # --- 容器初始化：安装 NDK 依赖、编译工具和 Rust ---
-          # 修复：manylinux镜像默认使用yum，替换dnf为yum
+          # --- 容器初始化：安装编译工具和 Rust ---
+          # 修复：manylinux镜像默认使用yum，兼容主流基础镜像
           CIBW_BEFORE_ALL_LINUX: >
             yum install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel pkgconfig &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
@@ -43,7 +43,7 @@ jobs:
             rustup target add aarch64-linux-android
 
           # --- 核心环境变量：修复 PyO3 ABI 报错 ---
-          # 修复：用|保留换行，避免折叠标量导致的变量解析问题
+          # 用|保留换行，避免变量解析异常
           CIBW_ENVIRONMENT_LINUX: |
             PATH="$PATH:$HOME/.cargo/bin"
             LDFLAGS="-Wl,--allow-shlib-undefined"
@@ -54,12 +54,21 @@ jobs:
             PKG_CONFIG_PATH=/usr/lib64/pkgconfig:/usr/share/pkgconfig
             PYO3_CONFIG_FILE="/project/pyo3-config.ini"
 
-          # 禁止修复，防止 Android 环境下出现 GLIBC 版本冲突
+          # 禁止wheel修复，避免Android环境GLIBC版本冲突
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
 
         run: |
           pip install cibuildwheel
           mkdir -p dist
+          
+          # ========== 彻底替换原来的EOF写法，提前一次性生成固定配置文件 ==========
+          # 先清空文件，再逐行写入，完全不用here-document，零语法风险
+          > pyo3-config.ini
+          echo "implementation=CPython" >> pyo3-config.ini
+          echo "version=3.14" >> pyo3-config.ini
+          echo "shared=true" >> pyo3-config.ini
+          echo "abi3=true" >> pyo3-config.ini
+          # ========================================================================
           
           # 定义需要编译的包
           declare -A pkgs
@@ -71,17 +80,9 @@ jobs:
             echo "🚀 正在编译: $pkg_spec"
             echo "--------------------------------------------------"
             
-            rm -rf build_source && mkdir build_source && cd build_source
+            rm -rf build_source && mkdir -p build_source && cd build_source
             
-            # --- 核心修复：EOF 必须完全顶格，不能有任何缩进 ---
-            cat <<EOF > ../pyo3-config.ini
-            implementation=CPython
-            version=3.14
-            shared=true
-            abi3=true
-            EOF
-            
-            # 下载源码并准备环境
+            # 下载源码并解压
             pip download --no-binary :all: --no-deps "$pkg_spec"
             tar -xzf *.tar.gz --strip-components=1
             
