@@ -1,4 +1,4 @@
-name: Build Android Wheels (Full Bundle)
+name: Build Android Wheels (CIBW Fixed)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- 核心修复：安装 QEMU 模拟器 ---
+      # 必须步骤：安装 QEMU 以支持 ARM64 模拟
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -21,64 +21,55 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c
-
       - name: Build with cibuildwheel
         env:
-          # cibuildwheel 核心参数
           CIBW_BUILD: "cp314-manylinux_aarch64"
           CIBW_ARCHS: "aarch64"
           
-          # 容器内交叉编译环境变量
+          # 1. 在容器启动后，编译开始前，自动下载 NDK
+          CIBW_BEFORE_ALL_LINUX: >
+            yum install -y wget tar &&
+            wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip &&
+            unzip -q android-ndk-r25c-linux.zip -d /opt &&
+            rm android-ndk-r25c-linux.zip &&
+            # 安装 Rust 环境（针对 pydantic-core 和 bcrypt）
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            source $HOME/.cargo/env &&
+            rustup target add aarch64-linux-android
+
+          # 2. 设置交叉编译环境变量（注意：此时路径是容器内的 /opt/android-ndk-r25c）
           CIBW_ENVIRONMENT_LINUX: >
-            NDK_ROOT=/host_ndk
-            CC=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-            CXX=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
-            AR=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-            STRIP=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+            NDK_ROOT=/opt/android-ndk-r25c
+            CC=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+            CXX=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+            AR=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+            STRIP=/opt/android-ndk-r25c/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
             LDFLAGS="-Wl,--allow-shlib-undefined"
             CFLAGS="-D__BIONIC_NO_PAGE_SIZE_MACRO"
             PYO3_NO_PYTHON=1
             CARGO_BUILD_TARGET=aarch64-linux-android
-          
-          # 编译前在 Docker 容器内安装 Rust 工具链
-          CIBW_BEFORE_ALL_LINUX: >
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            source $HOME/.cargo/env &&
-            rustup target add aarch64-linux-android
-            
-          # 重要：禁止 auditwheel 修复包，否则它会尝试链接 manylinux 的 glibc 导致安卓报错
+            PATH="$PATH:$HOME/.cargo/bin"
+
+          # 禁止自动修复，防止链接到容器的 glibc
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
 
         run: |
           pip install cibuildwheel
           mkdir -p dist
           
-          HOST_NDK_PATH="${{ steps.setup-ndk-outputs.ndk-path }}"
-          # 如果 steps 输出为空，手动补全 GitHub Runner 默认路径
-          if [ -z "$HOST_NDK_PATH" ]; then HOST_NDK_PATH="/usr/local/lib/android/sdk/ndk/25.2.9519653"; fi
-
           # 循环编译列表
           packages=("cffi" "pydantic-core" "bcrypt")
           
           for pkg in "${packages[@]}"; do
             echo "--------------------------------------------------"
-            echo "🚀 正在开始编译: $pkg"
-            echo "--------------------------------------------------"
+            echo "🚀 正在编译: $pkg"
             
-            # 清理并下载源码
             rm -rf build_source && mkdir build_source && cd build_source
             pip download --no-binary :all: --no-deps $pkg
             tar -xzf *.tar.gz --strip-components=1
             
-            # 执行 cibuildwheel
-            # -v 挂载宿主机 NDK 到容器内，使 CC 路径生效
-            cibuildwheel . --output-dir ../dist --platform linux \
-              --docker-options "-v $HOST_NDK_PATH:/host_ndk"
+            # 运行命令不再带有 --docker-options
+            cibuildwheel . --output-dir ../dist --platform linux
             
             cd ..
           done
