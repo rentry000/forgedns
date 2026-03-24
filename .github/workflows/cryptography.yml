@@ -1,38 +1,77 @@
-name: Build Android bcrypt Wheels
+name: Build Android Wheels (cffi, pydantic-core, bcrypt)
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
 
 jobs:
-  build-android:
-    runs-on: ubuntu-latest  # 必须使用Linux或macOS运行器[[__LINK_ICON]](https://cibuildwheel.readthedocs.org/?f_link_type=f_linkinlinenote&flow_extra=eyJkb2NfcG9zaXRpb24iOjAsImRvY19pZCI6IjQ0OGIyNjVhYzNmZTEyY2UtNjhhNDkxYTZhNjJiZTE4NyIsImlubGluZV9kaXNwbGF5X3Bvc2l0aW9uIjowfQ%3D%3D "[__LINK_ICON]")
-    
+  build_wheels:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Set up Python
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
-          
-      - name: Install cibuildwheel
-        run: pip install cibuildwheel>=3.4.0
-        
-      - name: Set up Android SDK and NDK
-        uses: android-actions/setup-android@v3
+          python-version: '3.14'
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
         with:
-          api-level: 33
-          ndk-version: 25.1.8937393
-          build-tools-version: 33.0.2
-          
-      - name: Build Android wheels
-        run: cibuildwheel --platform android
+          ndk-version: r25c # 建议使用 r25c，稳定性最好
+
+      - name: Build Wheels with cibuildwheel
         env:
-          CIBW_ARCHS: android:aarch64
-          CIBW_ANDROID_API_LEVEL: 24
-          CIBW_BEFORE_BUILD: cargo update
+          # --- cibuildwheel 基础配置 ---
+          CIBW_BUILD: "cp314-manylinux_aarch64"
+          CIBW_ARCHS: "aarch64"
           
-      - name: Upload artifacts
+          # --- 容器内部环境配置 ---
+          CIBW_ENVIRONMENT_LINUX: >
+            NDK_ROOT=/host_ndk
+            CC=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+            CXX=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+            AR=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+            STRIP=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+            LDFLAGS="-Wl,--allow-shlib-undefined"
+            CFLAGS="-D__BIONIC_NO_PAGE_SIZE_MACRO"
+            PYO3_NO_PYTHON=1
+            CARGO_BUILD_TARGET=aarch64-linux-android
+          
+          # --- 编译前的容器准备 (安装 Rust 目标) ---
+          CIBW_BEFORE_ALL_LINUX: >
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
+            source $HOME/.cargo/env &&
+            rustup target add aarch64-linux-android
+            
+        run: |
+          pip install cibuildwheel
+          mkdir -p dist
+          
+          # 把宿主机的 NDK 路径存入变量供 Docker 使用
+          HOST_NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          
+          # 定义待编译列表
+          packages=("cffi" "pydantic-core" "bcrypt")
+          
+          for pkg in "${packages[@]}"; do
+            echo "--- 正在编译: $pkg ---"
+            # 1. 下载源码
+            rm -rf build_dir && mkdir build_dir && cd build_dir
+            pip download --no-binary :all: --no-deps $pkg
+            tar -xzf *.tar.gz --strip-components=1
+            
+            # 2. 调用 cibuildwheel 进行跨平台构建
+            # 关键：通过 -v 将宿主机的 NDK 挂载到容器内的 /host_ndk
+            cibuildwheel . --output-dir ../dist --platform linux \
+              --docker-options "-v $HOST_NDK_PATH:/host_ndk"
+            
+            cd ..
+          done
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-wheels
-          path: ./wheelhouse/*.whl
+          name: android-314-wheels
+          path: dist/*.whl
