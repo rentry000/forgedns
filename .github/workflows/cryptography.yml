@@ -71,11 +71,11 @@ jobs:
           
           # 预先生成PyO3配置，彻底避免EOF语法坑
           cat > pyo3-config.ini << 'EOF'
-implementation=CPython
-version=3.14
-shared=true
-abi3=true
-EOF
+          implementation=CPython
+          version=3.14
+          shared=true
+          abi3=true
+          EOF
           
           # 定义需要编译的包
           declare -A pkgs
