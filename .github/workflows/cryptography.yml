@@ -1,60 +1,81 @@
-name: Build Android Wheels (CIBW Robust Version)
+name: Build Android 3.14 Wheels (Final Stable)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build_wheels:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 1. 关键：增加 Swap 空间。QEMU 模拟 ARM 编译 Rust 非常吃内存，没这个必崩。
+      - name: Set up Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+
+      # 2. 关键：安装 QEMU 模拟器，允许 x86 运行 aarch64 容器
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: Build with cibuildwheel
         env:
-          # 只构建 Python 3.14 的 ARM64 版本
+          # --- 基础配置 ---
           CIBW_BUILD: "cp314-manylinux_aarch64"
           CIBW_ARCHS: "aarch64"
+          CIBW_BUILD_VERBOSITY: 3
           
-          # --- 修正后的 Before All：安装必要工具和 Rust ---
+          # --- 容器启动逻辑：安装编译依赖和 Rust ---
           CIBW_BEFORE_ALL_LINUX: >
-            dnf install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel &&
+            dnf install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel pkgconfig &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
-            echo "source $HOME/.cargo/env" >> $HOME/.bashrc
+            source $HOME/.cargo/env &&
+            rustup target add aarch64-linux-android
 
-          # --- 核心环境变量：解决 PyExc_ValueError 报错 ---
+          # --- 交叉编译环境变量 ---
           CIBW_ENVIRONMENT_LINUX: >
             PATH="$PATH:$HOME/.cargo/bin"
             LDFLAGS="-Wl,--allow-shlib-undefined"
             PYO3_NO_PYTHON=1
             CARGO_NET_GIT_FETCH_WITH_CLI=true
+            CARGO_BUILD_JOBS=2
+            PKG_CONFIG_PATH=/usr/lib64/pkgconfig:/usr/share/pkgconfig
 
-          # 禁止自动修复依赖，确保生成的包保持“纯净”
+          # --- 关键：禁止修复。Android 不需要 manylinux 的审计修复，否则会报 libc 冲突 ---
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
 
         run: |
           pip install cibuildwheel
           mkdir -p dist
           
-          # 待编译列表
-          packages=("cffi" "pydantic-core" "bcrypt")
+          # 定义需要编译的包及其版本约束（确保兼容 Python 3.14）
+          # cffi 建议用最新的 1.17.0+
+          # bcrypt 建议用 4.0.0+ 引入 Rust 支持
+          declare -A pkgs
+          pkgs=( ["cffi"]="cffi>=1.17.0" ["pydantic-core"]="pydantic-core" ["bcrypt"]="bcrypt>=4.0.0" )
           
-          for pkg in "${packages[@]}"; do
+          for pkg_name in "${!pkgs[@]}"; do
+            pkg_spec=${pkgs[$pkg_name]}
             echo "--------------------------------------------------"
-            echo "🚀 正在编译原生 ARM64 模块: $pkg"
+            echo "🚀 正在编译: $pkg_spec"
             echo "--------------------------------------------------"
             
             rm -rf build_source && mkdir build_source && cd build_source
-            # 下载源码
-            pip download --no-binary :all: --no-deps $pkg
+            # 下载源码包
+            pip download --no-binary :all: --no-deps "$pkg_spec"
+            # 解压
             tar -xzf *.tar.gz --strip-components=1
             
-            # 执行编译
+            # 运行 cibuildwheel
             cibuildwheel . --output-dir ../dist --platform linux
             
             cd ..
@@ -63,5 +84,5 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-314-wheels-bundle
+          name: android-314-wheels-final
           path: dist/*.whl
