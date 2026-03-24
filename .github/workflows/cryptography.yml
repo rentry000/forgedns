@@ -73,11 +73,11 @@ jobs:
             
             # --- 修复：EOF 必须绝对顶格，不能有任何缩进空格 ---
             cat <<EOF > ../pyo3-config.ini
-implementation=CPython
-version=3.14
-shared=true
-abi3=true
-EOF
+            implementation=CPython
+            version=3.14
+            shared=true
+            abi3=true
+            EOF
             
             # 下载源码并准备环境
             pip download --no-binary :all: --no-deps "$pkg_spec"
