@@ -35,14 +35,16 @@ jobs:
           CIBW_BUILD_VERBOSITY: 3
           
           # --- 容器初始化：安装 NDK 依赖、编译工具和 Rust ---
+          # 修复：manylinux镜像默认使用yum，替换dnf为yum
           CIBW_BEFORE_ALL_LINUX: >
-            dnf install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel pkgconfig &&
+            yum install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel pkgconfig &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             source $HOME/.cargo/env &&
             rustup target add aarch64-linux-android
 
           # --- 核心环境变量：修复 PyO3 ABI 报错 ---
-          CIBW_ENVIRONMENT_LINUX: >
+          # 修复：用|保留换行，避免折叠标量导致的变量解析问题
+          CIBW_ENVIRONMENT_LINUX: |
             PATH="$PATH:$HOME/.cargo/bin"
             LDFLAGS="-Wl,--allow-shlib-undefined"
             PYO3_NO_PYTHON=1
@@ -71,7 +73,7 @@ jobs:
             
             rm -rf build_source && mkdir build_source && cd build_source
             
-            # --- 修复：EOF 必须绝对顶格，不能有任何缩进空格 ---
+            # --- 核心修复：EOF 必须完全顶格，不能有任何缩进 ---
             cat <<EOF > ../pyo3-config.ini
             implementation=CPython
             version=3.14
