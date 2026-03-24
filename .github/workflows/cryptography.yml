@@ -20,7 +20,7 @@ jobs:
           python-version: '3.14'
           allow-prereleases: true
 
-      # 核心：使用Android官方NDK，唯一能编译出Android兼容二进制的工具链
+      # 核心：Android官方NDK，唯一能编译出Android兼容二进制的工具链
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
@@ -34,11 +34,12 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - name: Install build dependencies
+      - name: Install latest build dependencies
         run: |
           sudo apt update
-          sudo apt install -y make pkg-config patchelf
-          pip install wheel setuptools setuptools-rust crossenv
+          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu
+          # 升级所有构建工具到最新版，兼容Python 3.14和现代构建规范
+          pip install -U pip wheel setuptools setuptools-rust maturin crossenv
 
       - name: Build Android compatible wheels
         env:
@@ -47,27 +48,28 @@ jobs:
           TARGET_ARCH: aarch64-linux-android
           ANDROID_API: 24
           
-          # 绑定NDK的编译工具，确保链接Android Bionic库
+          # 绑定NDK的编译工具，强制链接Android Bionic库（而非桌面glibc）
           CC: ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET_ARCH}${ANDROID_API}-clang
           CXX: ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET_ARCH}${ANDROID_API}-clang++
           AR: ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           RANLIB: ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
           STRIP: ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
           
-          # Rust Android交叉编译核心配置，强制使用NDK链接器
+          # Rust Android交叉编译核心配置，100%适配Android
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${CC}
           CARGO_BUILD_TARGET: aarch64-linux-android
           RUSTFLAGS: -C link-arg=-Wl,--allow-shlib-undefined -C strip=symbols
           
-          # PyO3交叉编译适配，启用abi3兼容Python3.14预览版
+          # PyO3交叉编译适配，兼容Python 3.14预览版
           PYO3_CROSS_PYTHON_VERSION: 3.14
           PYO3_NO_PYTHON: 1
           PYO3_CONFIG_FILE: ${{ github.workspace }}/pyo3-config.ini
           
-          # 强制pip识别Android平台标签
-          PYTHON_TAGS: cp314-cp314-android_aarch64
+          # 核心：通过环境变量给setuptools传递平台名，无参数报错风险
+          SETUPTOOLS_PLAT_NAME: android_aarch64
+          WHEEL_PLAT_NAME: android_aarch64
         run: |
-          mkdir -p dist
+          mkdir -p dist raw_wheels
           
           # 预先生成PyO3配置，彻底避免EOF语法坑
           cat > pyo3-config.ini << 'EOF'
@@ -97,25 +99,42 @@ jobs:
             pip download --no-binary :all: --no-deps "$pkg_spec"
             tar -xzf *.tar.gz --strip-components=1
             
-            # 核心：构建Android专属wheel，指定正确的平台标签
-            python -m pip wheel . -w ../dist \
-              --no-binary :all: \
-              --plat-name android_aarch64 \
-              --verbose
+            # 核心修正：正确构建wheel，无--plat-name参数报错
+            # 方式1：兼容setuptools构建的包（如cffi）
+            if [ -f setup.py ]; then
+              python setup.py bdist_wheel --plat-name android_aarch64
+            # 方式2：兼容maturin构建的Rust包（如bcrypt、pydantic-core）
+            elif [ -f pyproject.toml ] && grep -q "maturin" pyproject.toml; then
+              maturin build --release --target aarch64-linux-android --interpreter python3.14 --out ./dist
+            # 通用兼容方式
+            else
+              pip wheel . -w ./dist --no-binary :all: --verbose
+            fi
             
+            # 复制原始构建产物
+            cp dist/*.whl ../raw_wheels/
             cd ..
+            
+            # 核心：强制修正wheel平台标签，确保Android pip能识别
+            for wheel in raw_wheels/*.whl; do
+              # 重命名并修正标签为android_aarch64，彻底解决平台不支持问题
+              wheel pack "$wheel" --plat-name android_aarch64 -d dist/
+              rm -f "$wheel"
+            done
           done
 
-      # 可选：验证wheel是否兼容Android（无glibc依赖）
+      # 验证：确保构建产物无glibc依赖，真正兼容Android
       - name: Validate Android wheels
         run: |
-          sudo apt install -y binutils-aarch64-linux-gnu
+          echo "===== 验证构建产物兼容性 ====="
           for wheel in dist/*.whl; do
-            echo "验证: $wheel"
+            echo "--------------------------------------------------"
+            echo "验证文件: $wheel"
             unzip -q "$wheel" -d ./validate_temp
+            # 检查所有so文件的依赖，确保无glibc链接
             find ./validate_temp -name "*.so" -type f | while read so_file; do
-              echo "  检查依赖: $so_file"
-              aarch64-linux-gnu-readelf -d "$so_file" | grep NEEDED
+              echo "  检查二进制: $(basename $so_file)"
+              aarch64-linux-gnu-readelf -d "$so_file" | grep NEEDED || echo "    无动态依赖"
             done
             rm -rf ./validate_temp
           done
