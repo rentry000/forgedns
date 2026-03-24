@@ -1,112 +1,38 @@
-name: Build Cryptography 3.3.2 for Py2droid (Python 3.14 Android aarch64)
-on:
-  workflow_dispatch:
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+name: Build Android bcrypt Wheels
 
-      # 配置Python 3.14，和py2droid版本完全对齐
-      - name: Set up Python 3.14
+on: [push, pull_request]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest  # 必须使用Linux或macOS运行器[[__LINK_ICON]](https://cibuildwheel.readthedocs.org/?f_link_type=f_linkinlinenote&flow_extra=eyJkb2NfcG9zaXRpb24iOjAsImRvY19pZCI6IjQ0OGIyNjVhYzNmZTEyY2UtNjhhNDkxYTZhNjJiZTE4NyIsImlubGluZV9kaXNwbGF5X3Bvc2l0aW9uIjowfQ%3D%3D "[__LINK_ICON]")
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14-dev'
-          allow-prereleases: true
-
-      # 配置Android NDK r25c，和py2droid底层API兼容
-      - name: Set up Android NDK r25c
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
+          python-version: "3.14"
+          
+      - name: Install cibuildwheel
+        run: pip install cibuildwheel>=3.4.0
+        
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
         with:
-          ndk-version: r25c
-          link-to-sdk: true
-
-      # 构建Android aarch64专用的OpenSSL 1.1.1w静态库（cryptography依赖）
-      - name: Build Android OpenSSL 1.1.1w (aarch64)
+          api-level: 33
+          ndk-version: 25.1.8937393
+          build-tools-version: 33.0.2
+          
+      - name: Build Android wheels
+        run: cibuildwheel --platform android
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          # 基础工具链配置
-          TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-          export PATH=$TOOLCHAIN/bin:$PATH
-          export TARGET_HOST=aarch64-linux-android
-          export API_LEVEL=24
-
-          # 交叉编译器全变量配置，避免调用系统x86_64工具
-          export CC=$TARGET_HOST${API_LEVEL}-clang
-          export CXX=$TARGET_HOST${API_LEVEL}-clang++
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export LD=$TOOLCHAIN/bin/ld.lld
-          export SYSROOT=$TOOLCHAIN/sysroot
-
-          # 带重试的源码下载，解决网络波动导致的下载失败
-          wget --tries=5 --timeout=30 --no-check-certificate https://www.openssl.org/source/openssl-1.1.1w.tar.gz -O openssl-1.1.1w.tar.gz
-          tar -xf openssl-1.1.1w.tar.gz
-          cd openssl-1.1.1w
-
-          # 编译配置：生成位置无关的静态库，适配Android共享库链接
-          ./Configure android-arm64 \
-            -D__ANDROID_API__=$API_LEVEL \
-            -fPIC \
-            no-shared \
-            no-tests \
-            --prefix=$(pwd)/build
-
-          # 并行编译+安装
-          make -j$(nproc)
-          make install_sw
-
-          # 导出路径，供后续cryptography构建使用
-          echo "OPENSSL_BUILD_DIR=$(pwd)/build" >> $GITHUB_ENV
-          echo "TOOLCHAIN_PATH=$TOOLCHAIN" >> $GITHUB_ENV
-          echo "TARGET_HOST=$TARGET_HOST" >> $GITHUB_ENV
-          echo "API_LEVEL=$API_LEVEL" >> $GITHUB_ENV
-
-      # 核心：构建cryptography 3.3.2 适配whl包，无任何参数报错
-      - name: Build Cryptography 3.3.2 Wheel for Android
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          # 1. 基础环境配置
-          export TOOLCHAIN=${{ env.TOOLCHAIN_PATH }}
-          export PATH=$TOOLCHAIN/bin:$PATH
-          export TARGET_HOST=${{ env.TARGET_HOST }}
-          export API_LEVEL=${{ env.API_LEVEL }}
-          export SYSROOT=$TOOLCHAIN/sysroot
-
-          # 2. 交叉编译器全变量配置（核心，解决之前的--platform参数错误）
-          export CC=$TARGET_HOST${API_LEVEL}-clang
-          export CXX=$TARGET_HOST${API_LEVEL}-clang++
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export LD=$TOOLCHAIN/bin/ld.lld
-
-          # 3. 告诉cryptography去哪里找OpenSSL头文件和库文件
-          export CFLAGS="-I${{ env.OPENSSL_BUILD_DIR }}/include --sysroot=$SYSROOT"
-          export LDFLAGS="-L${{ env.OPENSSL_BUILD_DIR }}/lib -lssl -lcrypto --sysroot=$SYSROOT"
-
-          # 4. 告诉setup.py我们是交叉编译，目标平台是Android aarch64
-          export PYTHON_CROSS_HOST=$TARGET_HOST
-          export BUILD_EXT_ARGS="--host=$TARGET_HOST"
-
-          # 5. 安装构建依赖
-          pip install -U pip setuptools cffi wheel
-
-          # 6. 带重试下载cryptography 3.3.2源码
-          wget --tries=5 --timeout=30 --no-check-certificate https://files.pythonhosted.org/packages/cc/98/8a2585911233ec8815bc44e36f4fa4d9c5b3cc11697646d7d3503a0955e/cryptography-3.3.2.tar.gz -O cryptography-3.3.2.tar.gz
-          tar -xzf cryptography-3.3.2.tar.gz
-          cd cryptography-3.3.2
-
-          # 7. 构建whl包（核心：无任何报错参数，纯标准pip构建）
-          pip wheel . -w ../dist --no-deps
-
-      # 上传最终构建好的whl包
-      - name: Upload Cryptography 3.3.2 Android Wheel
+          CIBW_ARCHS: android:aarch64
+          CIBW_ANDROID_API_LEVEL: 24
+          CIBW_BEFORE_BUILD: cargo update
+          
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cryptography-3.3.2-py314-android-py2droid-fixed
-          path: "dist/*.whl"
-          retention-days: 30
+          name: android-wheels
+          path: ./wheelhouse/*.whl
