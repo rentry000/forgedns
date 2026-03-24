@@ -1,14 +1,20 @@
-name: Build Android Wheels (CIBW Version)
+name: Build Android Wheels (Full Bundle)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build_wheels:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # --- 核心修复：安装 QEMU 模拟器 ---
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Python 3.14
         uses: actions/setup-python@v5
@@ -21,64 +27,64 @@ jobs:
         with:
           ndk-version: r25c
 
-      - name: Prepare NDK and Source
-        run: |
-          # 创建编译输出目录
-          mkdir -p dist
-          
-          # 【黑科技】将 NDK 链接到当前目录，这样 cibuildwheel 启动容器时会带上它
-          # 容器内路径将变为 /project/android-ndk
-          ln -s ${{ steps.setup-ndk.outputs.ndk-path }} ./android-ndk
-
-      - name: Build Wheels with cibuildwheel
+      - name: Build with cibuildwheel
         env:
-          # --- 基础配置 ---
+          # cibuildwheel 核心参数
           CIBW_BUILD: "cp314-manylinux_aarch64"
           CIBW_ARCHS: "aarch64"
           
-          # --- 关键：容器内部的环境变量 ---
-          # 注意：在 cibuildwheel 容器内，当前目录被挂载在 /project
+          # 容器内交叉编译环境变量
           CIBW_ENVIRONMENT_LINUX: >
-            NDK_ROOT=/project/android-ndk
-            CC=/project/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-            CXX=/project/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
-            AR=/project/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+            NDK_ROOT=/host_ndk
+            CC=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+            CXX=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++
+            AR=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+            STRIP=/host_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
             LDFLAGS="-Wl,--allow-shlib-undefined"
             CFLAGS="-D__BIONIC_NO_PAGE_SIZE_MACRO"
             PYO3_NO_PYTHON=1
             CARGO_BUILD_TARGET=aarch64-linux-android
           
-          # --- 容器内安装 Rust 交叉编译目标 ---
+          # 编译前在 Docker 容器内安装 Rust 工具链
           CIBW_BEFORE_ALL_LINUX: >
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             source $HOME/.cargo/env &&
             rustup target add aarch64-linux-android
-
-          # 禁用 auditwheel，因为它会尝试修复 Android 不需要且不支持的 manylinux 标签
+            
+          # 重要：禁止 auditwheel 修复包，否则它会尝试链接 manylinux 的 glibc 导致安卓报错
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
 
         run: |
           pip install cibuildwheel
+          mkdir -p dist
           
+          HOST_NDK_PATH="${{ steps.setup-ndk-outputs.ndk-path }}"
+          # 如果 steps 输出为空，手动补全 GitHub Runner 默认路径
+          if [ -z "$HOST_NDK_PATH" ]; then HOST_NDK_PATH="/usr/local/lib/android/sdk/ndk/25.2.9519653"; fi
+
+          # 循环编译列表
           packages=("cffi" "pydantic-core" "bcrypt")
           
           for pkg in "${packages[@]}"; do
-            echo "🚀 正在构建: $pkg"
-            rm -rf build_pkg && mkdir build_pkg
-            # 下载源码到 build_pkg
+            echo "--------------------------------------------------"
+            echo "🚀 正在开始编译: $pkg"
+            echo "--------------------------------------------------"
+            
+            # 清理并下载源码
+            rm -rf build_source && mkdir build_source && cd build_source
             pip download --no-binary :all: --no-deps $pkg
-            tar -xzf *.tar.gz -C build_pkg --strip-components=1
+            tar -xzf *.tar.gz --strip-components=1
             
-            # 把 NDK 软链接也放进 build_pkg 目录，确保它被挂载进容器
-            ln -s $(pwd)/android-ndk build_pkg/android-ndk
+            # 执行 cibuildwheel
+            # -v 挂载宿主机 NDK 到容器内，使 CC 路径生效
+            cibuildwheel . --output-dir ../dist --platform linux \
+              --docker-options "-v $HOST_NDK_PATH:/host_ndk"
             
-            # 运行 cibuildwheel
-            # 删除了 --docker-options，直接针对源码目录构建
-            cibuildwheel build_pkg --output-dir dist
+            cd ..
           done
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-314-wheels-v2
+          name: android-314-wheels-bundle
           path: dist/*.whl
