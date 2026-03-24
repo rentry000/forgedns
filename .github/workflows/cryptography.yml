@@ -1,4 +1,4 @@
-name: Build Android 3.14 Wheels (Final Stable)
+name: Build Android 3.14 Wheels (PyO3 Fixed)
 
 on:
   workflow_dispatch:
@@ -10,13 +10,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. 关键：增加 Swap 空间。QEMU 模拟 ARM 编译 Rust 非常吃内存，没这个必崩。
+      # 1. 增加 Swap 空间，防止 Rust 编译内存溢出 (OOM)
       - name: Set up Swap Space
         uses: pierotofy/set-swap-space@master
         with:
-          swap-size-gb: 10
+          swap-size-gb: 12
 
-      # 2. 关键：安装 QEMU 模拟器，允许 x86 运行 aarch64 容器
+      # 2. 安装 QEMU 模拟器以支持 ARM64
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -29,37 +29,38 @@ jobs:
 
       - name: Build with cibuildwheel
         env:
-          # --- 基础配置 ---
+          # --- 基础选择器 ---
           CIBW_BUILD: "cp314-manylinux_aarch64"
           CIBW_ARCHS: "aarch64"
           CIBW_BUILD_VERBOSITY: 3
           
-          # --- 容器启动逻辑：安装编译依赖和 Rust ---
+          # --- 容器初始化：安装工具链 ---
           CIBW_BEFORE_ALL_LINUX: >
             dnf install -y wget tar unzip gcc gcc-c++ make libffi-devel openssl-devel pkgconfig &&
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y &&
             source $HOME/.cargo/env &&
             rustup target add aarch64-linux-android
 
-          # --- 交叉编译环境变量 ---
+          # --- 关键环境变量：修复 PyO3 ABI 报错 ---
           CIBW_ENVIRONMENT_LINUX: >
             PATH="$PATH:$HOME/.cargo/bin"
             LDFLAGS="-Wl,--allow-shlib-undefined"
             PYO3_NO_PYTHON=1
+            # 告诉 Rust 编译器使用稳定的 ABI 接口
+            RUSTFLAGS="--cfg pyo3_disable_inventory --cfg-feature=\"pyo3/abi3-py310\""
             CARGO_NET_GIT_FETCH_WITH_CLI=true
             CARGO_BUILD_JOBS=2
             PKG_CONFIG_PATH=/usr/lib64/pkgconfig:/usr/share/pkgconfig
+            # 传递我们在 run 阶段生成的配置文件路径
+            PYO3_CONFIG_FILE="/project/pyo3-config.ini"
 
-          # --- 关键：禁止修复。Android 不需要 manylinux 的审计修复，否则会报 libc 冲突 ---
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""
 
         run: |
           pip install cibuildwheel
           mkdir -p dist
           
-          # 定义需要编译的包及其版本约束（确保兼容 Python 3.14）
-          # cffi 建议用最新的 1.17.0+
-          # bcrypt 建议用 4.0.0+ 引入 Rust 支持
+          # 针对 Python 3.14 优化的包版本
           declare -A pkgs
           pkgs=( ["cffi"]="cffi>=1.17.0" ["pydantic-core"]="pydantic-core" ["bcrypt"]="bcrypt>=4.0.0" )
           
@@ -70,12 +71,21 @@ jobs:
             echo "--------------------------------------------------"
             
             rm -rf build_source && mkdir build_source && cd build_source
-            # 下载源码包
+            
+            # --- 核心修复：动态生成 PyO3 配置文件 ---
+            # 这会告诉编译器：我们要编的是 CPython 3.14，使用共享库和 abi3
+            cat <<EOF > ../pyo3-config.ini
+            implementation=CPython
+            version=3.14
+            shared=true
+            abi3=true
+            EOF
+
+            # 下载并解压源码
             pip download --no-binary :all: --no-deps "$pkg_spec"
-            # 解压
             tar -xzf *.tar.gz --strip-components=1
             
-            # 运行 cibuildwheel
+            # 运行编译 (注意：pyo3-config.ini 在项目根目录，会被映射到容器的 /project/pyo3-config.ini)
             cibuildwheel . --output-dir ../dist --platform linux
             
             cd ..
@@ -84,5 +94,5 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-314-wheels-final
+          name: android-314-wheels-fixed
           path: dist/*.whl
