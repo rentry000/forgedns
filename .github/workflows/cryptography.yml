@@ -339,8 +339,11 @@ jobs:
                     # ==============================================
           # 【终极修复】所有包统一标签：cp314-cp314-android_24_arm64_v8a
           # ==============================================
+                    # ==============================================
+          # 【终极修复】所有包统一标签：cp314-cp314-linux_aarch64
+          # ==============================================
           echo "--------------------------------------------------"
-          echo "📦 统一标签：cp314-cp314-android_24_arm64_v8a"
+          echo "📦 统一标签：cp314-cp314-linux_aarch64"
           echo "--------------------------------------------------"
           
           rm -rf dist/*
@@ -352,17 +355,22 @@ jobs:
             cp "$wheel" dist/
             target_wheel="dist/$wheel_name"
             
-            # 所有包都用和 pydantic-core 完全一样的标签
-            wheel tags \
-              --platform-tag android_24_arm64_v8a \
-              --python-tag py314 \
+            # 使用 linux_aarch64 欺骗 pip 让其放行
+            # 同时也修正了 python-tag，C 扩展必须用 cp314 而不是 py314
+            python -m wheel tags \
+              --platform-tag linux_aarch64 \
+              --python-tag cp314 \
               --abi-tag cp314 \
               "$target_wheel"
+              
+            # wheel tags 命令会生成一个新文件，我们需要把旧的删掉，保持 dist 目录干净
+            rm -f "$target_wheel"
             
             echo "✅ 标签修正完成"
           done
           
           echo "✅ 所有 Wheel 已对齐 py2droid 可安装格式"
+
 
 
 
