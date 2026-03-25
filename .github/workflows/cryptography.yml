@@ -38,8 +38,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu
-          # 升级所有构建工具到最新版，兼容Python 3.14和现代构建规范
-          pip install -U pip wheel setuptools setuptools-rust maturin
+          # 【新增】添加build包，支持PEP 517标准无setup.py的包构建
+          pip install -U pip wheel setuptools setuptools-rust maturin build
 
       - name: Build Android compatible wheels
         env:
@@ -113,16 +113,19 @@ jobs:
             tar -xzf *.tar.gz --strip-components=1
             
             # ==============================================
-            # 【构建逻辑优化】分场景适配不同构建系统
+            # 【核心修复】全场景兼容构建逻辑
+            # 彻底解决无setup.py的现代包构建失败问题
             # ==============================================
             # 1. 适配maturin构建的Rust包（如pydantic-core）
-            if [ -f pyproject.toml ] && grep -q "maturin" pyproject.toml; then
-              echo "使用maturin构建"
+            if [ -f pyproject.toml ] && grep -q "build-backend.*maturin" pyproject.toml; then
+              echo "使用maturin构建（Rust包）"
               maturin build --release --target ${TARGET_ARCH} --interpreter python${TARGET_PYTHON_VERSION} --out ./dist
-            # 2. 适配setuptools构建的包（含setuptools-rust，如bcrypt、cffi）
+            # 2. 适配所有PEP 517标准包（含setuptools，无论有没有setup.py，如bcrypt、cffi）
             else
-              echo "使用setuptools构建"
-              python setup.py bdist_wheel --plat-name android_aarch64
+              echo "使用PEP 517标准构建（setuptools兼容）"
+              # 标准PEP 517构建，自动识别pyproject.toml的build-backend
+              # 完美兼容仅pyproject.toml、有setup.py两种场景
+              python -m build --wheel --outdir ./dist --config-setting="--plat-name=android_aarch64"
             fi
             
             # 复制原始构建产物到临时目录
@@ -133,7 +136,6 @@ jobs:
           
           # ==============================================
           # 【Wheel标签修复】统一修正平台标签，确保Android pip能识别
-          # 原脚本wheel pack命令用法错误，改用正确的wheel tags命令
           # ==============================================
           echo "--------------------------------------------------"
           echo "📦 统一修正Wheel平台标签"
