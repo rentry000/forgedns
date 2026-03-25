@@ -341,9 +341,26 @@ jobs:
             
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
             
-            # 下载源码包
-            pip download --no-binary :all: --no-deps "$pkg_spec"
-            tar -xzf *.tar.gz --strip-components=1
+            # 【关键修复】手动下载 sdist，避免 pip download 触发 build isolation + cffi 编译
+            echo "📥 下载 $pkg_spec 源码包（绕过 build isolation）..."
+            pkg_base=$(echo "$pkg_spec" | cut -d'>' -f1 | tr -d ' =')
+            sdist_url=$(python -m pip index versions "$pkg_base" --format=json 2>/dev/null | python -c '
+            import sys, json
+            data = json.load(sys.stdin)
+            if data.get("versions"):
+                print(data["versions"][0]["urls"][0]["url"])
+            else:
+                print("")
+            ' | head -n 1)
+
+            if [ -z "$sdist_url" ]; then
+              echo "❌ 无法获取 $pkg_spec 的 sdist 下载链接"
+              exit 1
+            fi
+
+            wget -q --show-progress -O sdist.tar.gz "$sdist_url"
+            tar -xzf sdist.tar.gz --strip-components=1
+            echo "✅ 已获取最新 sdist"
             
             # 统一 PEP 517 标准构建
             python -m build \
