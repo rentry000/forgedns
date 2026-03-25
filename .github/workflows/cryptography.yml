@@ -11,7 +11,7 @@ env:
   ANDROID_TARGET_ARCH: "aarch64-linux-android"
   ANDROID_API_LEVEL: 24
   LIBFFI_VERSION: "3.4.6"
-  OPENSSL_VERSION: "3.4.0"
+  OPENSSL_VERSION: "1.1.1w"
 
 jobs:
   build_android_wheels:
@@ -182,9 +182,9 @@ jobs:
           echo "PKG_CONFIG_PATH=${LIBFFI_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤3：【新增】交叉编译OpenSSL，解决cryptography强依赖
+      # 步骤3：交叉编译OpenSSL 1.1.1w，适配Android aarch64
       # ==============================================
-      - name: Cross-compile OpenSSL for Android aarch64
+      - name: Cross-compile OpenSSL 1.1.1w for Android aarch64
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
@@ -196,7 +196,7 @@ jobs:
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
-          # OpenSSL需要配置ANDROID_NDK_ROOT环境变量
+          # OpenSSL 1.1.1w 必须配置ANDROID_NDK_ROOT
           export ANDROID_NDK_ROOT=${ANDROID_NDK_HOME}
           export PATH=${TOOLCHAIN}/bin:${PATH}
           
@@ -204,50 +204,54 @@ jobs:
           mkdir -p openssl_build openssl_install
           cd openssl_build
           
-          # 下载官方源码
+          # 下载OpenSSL 1.1.1w 官方源码
           echo "📥 下载OpenSSL ${{ env.OPENSSL_VERSION }} 源码..."
           wget -O openssl.tar.gz \
-            https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz \
+            https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz \
             --tries=5 --timeout=15
           tar -xzf openssl.tar.gz --strip-components=1
           
-          # 配置交叉编译（Android arm64专属目标）
-          echo "🔧 配置OpenSSL交叉编译..."
+          # 【适配1.1.1w】配置交叉编译参数，Android arm64专属配置
+          echo "🔧 配置OpenSSL 1.1.1w 交叉编译..."
           ./Configure \
             android-arm64 \
             -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }} \
             --prefix=$(pwd)/../openssl_install \
             --openssldir=$(pwd)/../openssl_install/ssl \
             no-shared \
+            no-asm \
             no-tests \
-            no-docs
+            no-docs \
+            no-comp \
+            no-ssl2 \
+            no-ssl3
           
           # 编译安装
-          echo "🚀 编译OpenSSL..."
+          echo "🚀 编译OpenSSL 1.1.1w..."
           make -j$(nproc)
           make install_sw
           
-          # 校验产物
+          # 【适配1.1.1w】校验产物（1.1.1w 库文件在lib目录，非3.x的lib64）
           OPENSSL_INSTALL_DIR=$(pwd)/../openssl_install
-          if [ ! -f "${OPENSSL_INSTALL_DIR}/include/openssl/ssl.h" ] || [ ! -f "${OPENSSL_INSTALL_DIR}/lib64/libcrypto.a" ]; then
-            echo "❌ 错误：OpenSSL编译失败"
+          if [ ! -f "${OPENSSL_INSTALL_DIR}/include/openssl/ssl.h" ] || [ ! -f "${OPENSSL_INSTALL_DIR}/lib/libcrypto.a" ]; then
+            echo "❌ 错误：OpenSSL 1.1.1w 编译失败，缺少核心头文件或静态库"
             exit 1
           fi
           
-          echo "✅ OpenSSL交叉编译完成"
+          echo "✅ OpenSSL 1.1.1w 交叉编译完成"
           echo "OpenSSL include目录: ${OPENSSL_INSTALL_DIR}/include"
-          echo "OpenSSL lib目录: ${OPENSSL_INSTALL_DIR}/lib64"
+          echo "OpenSSL lib目录: ${OPENSSL_INSTALL_DIR}/lib"
           
-          # 导出环境变量，供cryptography构建使用
+          # 导出环境变量，适配1.1.1w的lib目录
           echo "OPENSSL_INSTALL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=${OPENSSL_INSTALL_DIR}/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=${OPENSSL_INSTALL_DIR}/lib64" >> $GITHUB_ENV
-          # 告诉cryptography的构建系统OpenSSL的位置
+          echo "OPENSSL_LIB_DIR=${OPENSSL_INSTALL_DIR}/lib" >> $GITHUB_ENV
+          # 告诉cryptography构建系统OpenSSL的位置
           echo "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤4：构建Android aarch64 wheels，修复maturin参数错误
+      # 步骤4：构建Android aarch64 wheels
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
@@ -264,13 +268,13 @@ jobs:
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # 全量交叉编译CFLAGS/LDFLAGS，整合所有依赖的头文件和库
+          # 全量交叉编译CFLAGS/LDFLAGS，整合所有依赖
           export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} -I${OPENSSL_INCLUDE_DIR} --sysroot=${SYSROOT}"
           export CFLAGS="${CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
           export CXXFLAGS="${CFLAGS}"
           export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${OPENSSL_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
           
-          # Python交叉编译核心环境变量，强制setuptools/maturin识别交叉编译
+          # Python交叉编译核心环境变量
           export _PYTHON_HOST_PLATFORM="android-aarch64"
           export PYTHON_CROSSENV=1
           export PYTHONPATH="${PY2DROID_LIB_DIR}/python${{ env.PY_ABI_VERSION }}"
@@ -284,7 +288,7 @@ jobs:
           export PKG_CONFIG_ALLOW_CROSS=1
           export CARGO_NET_GIT_FETCH_WITH_CLI=true
           
-          # PyO3交叉编译配置，完美适配py2droid环境
+          # PyO3交叉编译配置
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION=${{ env.PY_ABI_VERSION }}
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
@@ -334,7 +338,6 @@ jobs:
             # 自动适配构建工具
             if [ -f pyproject.toml ] && grep -q "build-backend.*maturin" pyproject.toml; then
               echo "使用maturin构建（Rust扩展包）"
-              # 【核心修复】移除无效的--no-auto-link-python参数，保留正确配置
               maturin build \
                 --release \
                 --target ${{ env.ANDROID_TARGET_ARCH }} \
@@ -357,7 +360,7 @@ jobs:
             echo "✅ $pkg_name 构建完成"
           done
           
-          # 统一修正Wheel平台标签，确保py2droid的pip能正常识别安装
+          # 统一修正Wheel平台标签
           echo "--------------------------------------------------"
           echo "📦 修正Wheel平台标签适配py2droid"
           echo "--------------------------------------------------"
