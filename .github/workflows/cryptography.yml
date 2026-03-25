@@ -182,7 +182,7 @@ jobs:
           echo "PKG_CONFIG_PATH=${LIBFFI_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤3：交叉编译OpenSSL 1.1.1w，适配Android aarch64
+      # 步骤3：【修复完成】交叉编译OpenSSL 1.1.1w，移除所有不兼容参数
       # ==============================================
       - name: Cross-compile OpenSSL 1.1.1w for Android aarch64
         env:
@@ -196,9 +196,12 @@ jobs:
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
-          # OpenSSL 1.1.1w 必须配置ANDROID_NDK_ROOT
+          # OpenSSL 1.1.1w 必须的环境变量，确保正确识别Android环境
           export ANDROID_NDK_ROOT=${ANDROID_NDK_HOME}
           export PATH=${TOOLCHAIN}/bin:${PATH}
+          export MACHINE=aarch64
+          export RELEASE=2
+          export SYSTEM=android
           
           # 创建构建目录
           mkdir -p openssl_build openssl_install
@@ -211,7 +214,7 @@ jobs:
             --tries=5 --timeout=15
           tar -xzf openssl.tar.gz --strip-components=1
           
-          # 【适配1.1.1w】配置交叉编译参数，Android arm64专属配置
+          # 【核心修复】仅保留1.1.1w原生支持的参数，移除所有3.x专属不兼容参数
           echo "🔧 配置OpenSSL 1.1.1w 交叉编译..."
           ./Configure \
             android-arm64 \
@@ -220,18 +223,17 @@ jobs:
             --openssldir=$(pwd)/../openssl_install/ssl \
             no-shared \
             no-asm \
-            no-tests \
-            no-docs \
             no-comp \
             no-ssl2 \
-            no-ssl3
+            no-ssl3 \
+            no-weak-ssl-ciphers
           
-          # 编译安装
+          # 编译安装（install_sw仅安装二进制和库，自动跳过文档、测试程序，无需额外参数）
           echo "🚀 编译OpenSSL 1.1.1w..."
           make -j$(nproc)
           make install_sw
           
-          # 【适配1.1.1w】校验产物（1.1.1w 库文件在lib目录，非3.x的lib64）
+          # 校验产物（1.1.1w 库文件在lib目录）
           OPENSSL_INSTALL_DIR=$(pwd)/../openssl_install
           if [ ! -f "${OPENSSL_INSTALL_DIR}/include/openssl/ssl.h" ] || [ ! -f "${OPENSSL_INSTALL_DIR}/lib/libcrypto.a" ]; then
             echo "❌ 错误：OpenSSL 1.1.1w 编译失败，缺少核心头文件或静态库"
@@ -242,7 +244,7 @@ jobs:
           echo "OpenSSL include目录: ${OPENSSL_INSTALL_DIR}/include"
           echo "OpenSSL lib目录: ${OPENSSL_INSTALL_DIR}/lib"
           
-          # 导出环境变量，适配1.1.1w的lib目录
+          # 导出环境变量
           echo "OPENSSL_INSTALL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=${OPENSSL_INSTALL_DIR}/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=${OPENSSL_INSTALL_DIR}/lib" >> $GITHUB_ENV
