@@ -11,6 +11,7 @@ env:
   ANDROID_TARGET_ARCH: "aarch64-linux-android"
   ANDROID_API_LEVEL: 24
   LIBFFI_VERSION: "3.4.6"
+  OPENSSL_VERSION: "3.4.0"
 
 jobs:
   build_android_wheels:
@@ -47,7 +48,7 @@ jobs:
       - name: Install system build dependencies
         run: |
           sudo apt update
-          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils autoconf automake libtool
+          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils autoconf automake libtool perl
           # 安装Python构建工具
           python -m pip install -U pip wheel setuptools setuptools-rust maturin build auditwheel patchelf
 
@@ -123,7 +124,7 @@ jobs:
           echo "PY2DROID_INCLUDE_DIR=${FINAL_INCLUDE_DIR}" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤2：【核心修复】交叉编译Android aarch64版本libffi，解决ffi.h缺失问题
+      # 步骤2：交叉编译libffi，解决cffi依赖
       # ==============================================
       - name: Cross-compile libffi for Android aarch64
         env:
@@ -138,18 +139,18 @@ jobs:
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # 创建libffi构建目录
+          # 创建构建目录
           mkdir -p libffi_build libffi_install
           cd libffi_build
           
-          # 下载官方libffi源码
+          # 下载官方源码
           echo "📥 下载libffi ${{ env.LIBFFI_VERSION }} 源码..."
           wget -O libffi.tar.gz \
             https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz \
             --tries=5 --timeout=15
           tar -xzf libffi.tar.gz --strip-components=1
           
-          # 配置交叉编译参数
+          # 配置交叉编译
           echo "🔧 配置libffi交叉编译..."
           ./configure \
             --host=${{ env.ANDROID_TARGET_ARCH }} \
@@ -158,15 +159,15 @@ jobs:
             --enable-static \
             --with-sysroot=${SYSROOT}
           
-          # 编译并安装
+          # 编译安装
           echo "🚀 编译libffi..."
           make -j$(nproc)
           make install
           
-          # 校验编译产物
+          # 校验产物
           LIBFFI_INSTALL_DIR=$(pwd)/../libffi_install
           if [ ! -f "${LIBFFI_INSTALL_DIR}/include/ffi.h" ] || [ ! -f "${LIBFFI_INSTALL_DIR}/lib/libffi.so" ]; then
-            echo "❌ 错误：libffi编译失败，缺少头文件或库文件"
+            echo "❌ 错误：libffi编译失败"
             exit 1
           fi
           
@@ -174,15 +175,79 @@ jobs:
           echo "libffi include目录: ${LIBFFI_INSTALL_DIR}/include"
           echo "libffi lib目录: ${LIBFFI_INSTALL_DIR}/lib"
           
-          # 导出libffi路径到全局环境变量
+          # 导出环境变量
           echo "LIBFFI_INSTALL_DIR=${LIBFFI_INSTALL_DIR}" >> $GITHUB_ENV
           echo "LIBFFI_INCLUDE_DIR=${LIBFFI_INSTALL_DIR}/include" >> $GITHUB_ENV
           echo "LIBFFI_LIB_DIR=${LIBFFI_INSTALL_DIR}/lib" >> $GITHUB_ENV
-          # 配置pkg-config路径，让cffi等包能自动找到依赖
           echo "PKG_CONFIG_PATH=${LIBFFI_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤3：构建Android aarch64 wheels，完善交叉编译环境
+      # 步骤3：【新增】交叉编译OpenSSL，解决cryptography强依赖
+      # ==============================================
+      - name: Cross-compile OpenSSL for Android aarch64
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          # 配置工具链路径
+          export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
+          export SYSROOT=${TOOLCHAIN}/sysroot
+          export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
+          export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
+          export AR=${TOOLCHAIN}/bin/llvm-ar
+          export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
+          export STRIP=${TOOLCHAIN}/bin/llvm-strip
+          # OpenSSL需要配置ANDROID_NDK_ROOT环境变量
+          export ANDROID_NDK_ROOT=${ANDROID_NDK_HOME}
+          export PATH=${TOOLCHAIN}/bin:${PATH}
+          
+          # 创建构建目录
+          mkdir -p openssl_build openssl_install
+          cd openssl_build
+          
+          # 下载官方源码
+          echo "📥 下载OpenSSL ${{ env.OPENSSL_VERSION }} 源码..."
+          wget -O openssl.tar.gz \
+            https://github.com/openssl/openssl/releases/download/openssl-${{ env.OPENSSL_VERSION }}/openssl-${{ env.OPENSSL_VERSION }}.tar.gz \
+            --tries=5 --timeout=15
+          tar -xzf openssl.tar.gz --strip-components=1
+          
+          # 配置交叉编译（Android arm64专属目标）
+          echo "🔧 配置OpenSSL交叉编译..."
+          ./Configure \
+            android-arm64 \
+            -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }} \
+            --prefix=$(pwd)/../openssl_install \
+            --openssldir=$(pwd)/../openssl_install/ssl \
+            no-shared \
+            no-tests \
+            no-docs
+          
+          # 编译安装
+          echo "🚀 编译OpenSSL..."
+          make -j$(nproc)
+          make install_sw
+          
+          # 校验产物
+          OPENSSL_INSTALL_DIR=$(pwd)/../openssl_install
+          if [ ! -f "${OPENSSL_INSTALL_DIR}/include/openssl/ssl.h" ] || [ ! -f "${OPENSSL_INSTALL_DIR}/lib64/libcrypto.a" ]; then
+            echo "❌ 错误：OpenSSL编译失败"
+            exit 1
+          fi
+          
+          echo "✅ OpenSSL交叉编译完成"
+          echo "OpenSSL include目录: ${OPENSSL_INSTALL_DIR}/include"
+          echo "OpenSSL lib目录: ${OPENSSL_INSTALL_DIR}/lib64"
+          
+          # 导出环境变量，供cryptography构建使用
+          echo "OPENSSL_INSTALL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=${OPENSSL_INSTALL_DIR}/include" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=${OPENSSL_INSTALL_DIR}/lib64" >> $GITHUB_ENV
+          # 告诉cryptography的构建系统OpenSSL的位置
+          echo "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+
+      # ==============================================
+      # 步骤4：构建Android aarch64 wheels，修复maturin参数错误
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
@@ -199,13 +264,13 @@ jobs:
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # 【关键修复】全量交叉编译CFLAGS/LDFLAGS，优先使用Android版本头文件和依赖
-          export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} --sysroot=${SYSROOT}"
+          # 全量交叉编译CFLAGS/LDFLAGS，整合所有依赖的头文件和库
+          export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} -I${OPENSSL_INCLUDE_DIR} --sysroot=${SYSROOT}"
           export CFLAGS="${CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
           export CXXFLAGS="${CFLAGS}"
-          export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
+          export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${OPENSSL_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
           
-          # 【关键修复】Python交叉编译核心环境变量，强制setuptools识别交叉编译
+          # Python交叉编译核心环境变量，强制setuptools/maturin识别交叉编译
           export _PYTHON_HOST_PLATFORM="android-aarch64"
           export PYTHON_CROSSENV=1
           export PYTHONPATH="${PY2DROID_LIB_DIR}/python${{ env.PY_ABI_VERSION }}"
@@ -269,13 +334,14 @@ jobs:
             # 自动适配构建工具
             if [ -f pyproject.toml ] && grep -q "build-backend.*maturin" pyproject.toml; then
               echo "使用maturin构建（Rust扩展包）"
+              # 【核心修复】移除无效的--no-auto-link-python参数，保留正确配置
               maturin build \
                 --release \
                 --target ${{ env.ANDROID_TARGET_ARCH }} \
                 --interpreter python${{ env.PY_ABI_VERSION }} \
                 --out ./dist \
-                --no-auto-link-python \
-                --abi3
+                --abi3 \
+                --no-sdist
             else
               echo "使用标准PEP 517构建（setuptools兼容）"
               python -m build \
