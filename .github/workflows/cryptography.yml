@@ -97,7 +97,7 @@ jobs:
           
           # 查找并解压内层cpython压缩包
           echo "查找cpython-arm64.tar.xz..."
-          PYTHON_TAR=$(find . -name "cpython-arm64.tar.xz" -type f | head-n 1)
+          PYTHON_TAR=$(find . -name "cpython-arm64.tar.xz" -type f | head -n 1)
           if [ -z "$PYTHON_TAR" ]; then
             echo "❌ 错误：未找到cpython-arm64.tar.xz，py2droid包结构异常"
             exit 1
@@ -393,7 +393,7 @@ jobs:
             export SODIUM_INSTALL=system
             
             # ========================
-            # 【终极修复】彻底禁用 cryptography Rust 后端
+            # 彻底禁用 cryptography Rust 后端
             # ========================
             if [ "$pkg_name" = "cryptography" ]; then
               echo "🔥 彻底禁用 cryptography Rust，使用纯C扩展（永久解决abi3报错）"
