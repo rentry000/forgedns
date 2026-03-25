@@ -239,7 +239,7 @@ jobs:
           echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤4：【语法修复完成】差异化构建，适配pydantic-core
+      # 步骤4：【彻底修复语法错误】差异化构建，适配pydantic-core
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
@@ -295,39 +295,37 @@ jobs:
             echo "🚀 正在构建: $pkg_spec"
             echo "--------------------------------------------------"
             
-            # 清空临时构建目录
+            # 清空临时构建目录和旧配置文件
             rm -rf build_source pyo3-config.ini && mkdir -p build_source && cd build_source
             
             # 【核心差异化处理】针对pydantic-core关闭abi3，其他包开启abi3
             if [ "$pkg_name" = "pydantic-core" ]; then
               echo "⚠️  pydantic-core不支持abi3模式，临时关闭abi3配置"
               export PYO3_ABI3=0
-              # 【语法修复】EOF完全顶格，无任何前导空格
-              cat > ../pyo3-config.ini << EOF
-              implementation=CPython
-              version=${{ env.PY_ABI_VERSION }}
-              shared=true
-              abi3=false
-              lib_name=python${{ env.PY_ABI_VERSION }}
-              lib_dir=${PY2DROID_LIB_DIR}
-              include_dir=${PY2DROID_INCLUDE_DIR}
-              EOF
+              # 【彻底修复语法】用echo逐行写入配置，彻底杜绝here-document语法错误
+              CONFIG_FILE="../pyo3-config.ini"
+              echo "implementation=CPython" > $CONFIG_FILE
+              echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
+              echo "shared=true" >> $CONFIG_FILE
+              echo "abi3=false" >> $CONFIG_FILE
+              echo "lib_name=python${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
+              echo "lib_dir=${PY2DROID_LIB_DIR}" >> $CONFIG_FILE
+              echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
               # 定义wheel标签参数
               WHEEL_PY_TAG="py314"
               WHEEL_ABI_TAG="cp314"
             else
               echo "✅ 启用abi3兼容模式"
               export PYO3_ABI3=1
-              # 【语法修复】EOF完全顶格，无任何前导空格
-              cat > ../pyo3-config.ini << EOF
-              implementation=CPython
-              version=${{ env.PY_ABI_VERSION }}
-              shared=true
-              abi3=true
-              lib_name=python${{ env.PY_ABI_VERSION }}
-              lib_dir=${PY2DROID_LIB_DIR}
-              include_dir=${PY2DROID_INCLUDE_DIR}
-              EOF
+              # 【彻底修复语法】用echo逐行写入配置，彻底杜绝here-document语法错误
+              CONFIG_FILE="../pyo3-config.ini"
+              echo "implementation=CPython" > $CONFIG_FILE
+              echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
+              echo "shared=true" >> $CONFIG_FILE
+              echo "abi3=true" >> $CONFIG_FILE
+              echo "lib_name=python${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
+              echo "lib_dir=${PY2DROID_LIB_DIR}" >> $CONFIG_FILE
+              echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
               # 定义wheel标签参数
               WHEEL_PY_TAG="py314"
               WHEEL_ABI_TAG="abi3"
