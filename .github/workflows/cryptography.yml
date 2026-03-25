@@ -45,13 +45,13 @@ jobs:
         with:
           targets: ${{ env.ANDROID_TARGET_ARCH }}
 
-      # 提前安装主机全量构建依赖
+      # 【核心修复1】强制升级wheel到最新版，确保标签命令兼容
       - name: Install host build dependencies
         run: |
           sudo apt update
           sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils autoconf automake libtool perl
-          # 提前安装主机x86_64版本的所有构建依赖
-          python -m pip install -U pip wheel setuptools setuptools-rust cffi maturin build auditwheel patchelf
+          # 强制升级wheel到最新稳定版，确保标签命令全功能支持
+          python -m pip install -U --force-reinstall pip wheel setuptools setuptools-rust cffi maturin build auditwheel patchelf
 
       # ==============================================
       # 步骤1：准备py2droid Python 3.14交叉编译环境
@@ -239,7 +239,7 @@ jobs:
           echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤4：【彻底修复语法错误】差异化构建，适配pydantic-core
+      # 步骤4：差异化构建，适配pydantic-core
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
@@ -268,7 +268,7 @@ jobs:
           export PKG_CONFIG_ALLOW_CROSS=1
           export CARGO_NET_GIT_FETCH_WITH_CLI=true
           
-          # PyO3基础交叉编译配置（abi3差异化处理放到循环内）
+          # PyO3基础交叉编译配置
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION=${{ env.PY_ABI_VERSION }}
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
@@ -298,11 +298,11 @@ jobs:
             # 清空临时构建目录和旧配置文件
             rm -rf build_source pyo3-config.ini && mkdir -p build_source && cd build_source
             
-            # 【核心差异化处理】针对pydantic-core关闭abi3，其他包开启abi3
+            # 差异化处理abi3配置
             if [ "$pkg_name" = "pydantic-core" ]; then
               echo "⚠️  pydantic-core不支持abi3模式，临时关闭abi3配置"
               export PYO3_ABI3=0
-              # 【彻底修复语法】用echo逐行写入配置，彻底杜绝here-document语法错误
+              # 用echo逐行写入配置，彻底杜绝语法错误
               CONFIG_FILE="../pyo3-config.ini"
               echo "implementation=CPython" > $CONFIG_FILE
               echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
@@ -317,7 +317,7 @@ jobs:
             else
               echo "✅ 启用abi3兼容模式"
               export PYO3_ABI3=1
-              # 【彻底修复语法】用echo逐行写入配置，彻底杜绝here-document语法错误
+              # 用echo逐行写入配置
               CONFIG_FILE="../pyo3-config.ini"
               echo "implementation=CPython" > $CONFIG_FILE
               echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
@@ -351,37 +351,51 @@ jobs:
             echo "✅ $pkg_name 构建完成"
           done
           
-          # 统一修正Wheel平台标签，适配差异化abi配置
+          # ==============================================
+          # 【核心修复2】全版本兼容的Wheel标签修正逻辑
+          # ==============================================
           echo "--------------------------------------------------"
           echo "📦 修正Wheel平台标签适配py2droid"
           echo "--------------------------------------------------"
+          
+          # 先清空dist目录，避免旧文件干扰
+          rm -rf dist/*
+          
+          # 循环处理每个wheel文件
           for wheel in raw_wheels/*.whl; do
             wheel_name=$(basename "$wheel")
             echo "处理: $wheel_name"
             
-            # 自动识别是否为pydantic-core，使用对应标签
+            # 复制原始文件到dist目录，在目标目录原地修改
+            cp "$wheel" dist/
+            target_wheel="dist/$wheel_name"
+            
+            # 差异化设置标签，兼容pydantic-core
             if [[ "$wheel_name" == *"pydantic_core"* ]]; then
               echo "  适配pydantic-core，使用cp314 abi标签"
+              # 全版本兼容命令：移除所有原有标签，设置新标签
               wheel tags \
                 --platform-tag android_aarch64 \
                 --python-tag py314 \
                 --abi-tag cp314 \
-                --remove-existing \
-                --output-dir dist/ \
-                "$wheel"
+                --remove-all-tags \
+                "$target_wheel"
             else
               echo "  使用abi3兼容标签"
+              # 全版本兼容命令：移除所有原有标签，设置新标签
               wheel tags \
                 --platform-tag android_aarch64 \
                 --python-tag py314 \
                 --abi-tag abi3 \
-                --remove-existing \
-                --output-dir dist/ \
-                "$wheel"
+                --remove-all-tags \
+                "$target_wheel"
             fi
+            
+            # 删除原始未修改的文件，只保留修正后的文件
+            rm -f "$target_wheel"
           done
           
-          echo "✅ 所有包构建完成，产物已输出到dist目录"
+          echo "✅ 所有Wheel标签修正完成，最终产物已输出到dist目录"
 
       # 验证构建产物的Android兼容性
       - name: Validate py2droid compatible wheels
