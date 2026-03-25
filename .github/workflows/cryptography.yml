@@ -49,8 +49,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils autoconf automake libtool perl
-          # 安装Python构建工具，锁定maturin兼容版本，避免参数变动
-          python -m pip install -U pip wheel setuptools setuptools-rust "maturin>=1.7.0,<2.0.0" build auditwheel patchelf
+          # 安装全量Python构建工具，包含maturin满足cryptography等包的构建依赖
+          python -m pip install -U pip wheel setuptools setuptools-rust maturin build auditwheel patchelf
 
       # ==============================================
       # 步骤1：准备py2droid Python 3.14交叉编译环境
@@ -182,7 +182,7 @@ jobs:
           echo "PKG_CONFIG_PATH=${LIBFFI_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤3：交叉编译OpenSSL 1.1.1w
+      # 步骤3：交叉编译OpenSSL 1.1.1w，解决cryptography依赖
       # ==============================================
       - name: Cross-compile OpenSSL 1.1.1w for Android aarch64
         env:
@@ -213,7 +213,7 @@ jobs:
             --tries=5 --timeout=15
           tar -xzf openssl.tar.gz --strip-components=1
           
-          # 配置交叉编译，仅保留1.1.1w支持的参数
+          # 配置交叉编译，仅保留1.1.1w原生支持的参数
           echo "🔧 配置OpenSSL 1.1.1w 交叉编译..."
           ./Configure \
             android-arm64 \
@@ -247,11 +247,13 @@ jobs:
           echo "OPENSSL_INSTALL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=${OPENSSL_INSTALL_DIR}/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=${OPENSSL_INSTALL_DIR}/lib" >> $GITHUB_ENV
+          # cryptography专属配置，强制使用我们编译的OpenSSL
           echo "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+          echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤4：【核心修复】构建Android aarch64 wheels，解决maturin参数报错
+      # 步骤4：【核心修复】统一PEP 517标准构建，彻底解决maturin参数报错
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
@@ -274,7 +276,7 @@ jobs:
           export CXXFLAGS="${CFLAGS}"
           export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${OPENSSL_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
           
-          # Python交叉编译核心环境变量
+          # Python交叉编译核心环境变量，强制识别Android平台
           export _PYTHON_HOST_PLATFORM="android-aarch64"
           export PYTHON_CROSSENV=1
           export PYTHONPATH="${PY2DROID_LIB_DIR}/python${{ env.PY_ABI_VERSION }}"
@@ -288,16 +290,13 @@ jobs:
           export PKG_CONFIG_ALLOW_CROSS=1
           export CARGO_NET_GIT_FETCH_WITH_CLI=true
           
-          # PyO3交叉编译配置
+          # PyO3交叉编译配置，适配cryptography等Rust扩展包
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION=${{ env.PY_ABI_VERSION }}
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
           export PYO3_CROSS_INCLUDE_DIR=${PY2DROID_INCLUDE_DIR}
           export PYO3_NO_AUTO_LINK=1
           export PYO3_ABI3=1
-          
-          # 【cryptography专属适配】强制使用我们编译的OpenSSL，禁用自带的vendored版本
-          export OPENSSL_NO_VENDOR=1
           
           # 生成PyO3专属配置文件
           cat > pyo3-config.ini << EOF
@@ -338,25 +337,14 @@ jobs:
             pip download --no-binary :all: --no-deps "$pkg_spec"
             tar -xzf *.tar.gz --strip-components=1
             
-            # 自动适配构建工具
-            if [ -f pyproject.toml ] && grep -q "build-backend.*maturin" pyproject.toml; then
-              echo "使用maturin构建（Rust扩展包）"
-              # 【核心修复】移除无效的--abi3参数，改用正确的--abi3-pyversion，兼容所有maturin版本
-              maturin build \
-                --release \
-                --target ${{ env.ANDROID_TARGET_ARCH }} \
-                --interpreter python${{ env.PY_ABI_VERSION }} \
-                --out ./dist \
-                --abi3-pyversion ${{ env.PY_ABI_VERSION }} \
-                --no-sdist
-            else
-              echo "使用标准PEP 517构建（setuptools兼容）"
-              python -m build \
-                --wheel \
-                --outdir ./dist \
-                --config-setting="--plat-name=android_aarch64" \
-                --verbose
-            fi
+            # 【核心修复】统一使用PEP 517标准构建命令，自动适配所有构建后端
+            # 自动识别maturin/setuptools，无需手动判断，彻底避免参数错误
+            echo "使用PEP 517标准构建（自动适配setuptools/maturin）"
+            python -m build \
+              --wheel \
+              --outdir ./dist \
+              --config-setting="--plat-name=android_aarch64" \
+              --verbose
             
             # 复制构建产物
             cp dist/*.whl ../raw_wheels/
@@ -364,7 +352,7 @@ jobs:
             echo "✅ $pkg_name 构建完成"
           done
           
-          # 统一修正Wheel平台标签
+          # 统一修正Wheel平台标签，确保py2droid的pip能正常识别安装
           echo "--------------------------------------------------"
           echo "📦 修正Wheel平台标签适配py2droid"
           echo "--------------------------------------------------"
