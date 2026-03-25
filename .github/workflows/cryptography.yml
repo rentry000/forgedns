@@ -262,14 +262,9 @@ jobs:
           echo "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
           echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+
       # ==============================================
-      # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
-      # ==============================================
-      # ==============================================
-      # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
-      # ==============================================
-      # ==============================================
-      # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
+      # 步骤3.5：交叉编译 libsodium（修复 pynacl）
       # ==============================================
       - name: Cross-compile libsodium for Android aarch64
         env:
@@ -277,8 +272,8 @@ jobs:
         run: |
           export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
           export SYSROOT=${TOOLCHAIN}/sysroot
-          export CC=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
-          export CXX=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
+          export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
+          export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
@@ -306,7 +301,7 @@ jobs:
           make install
           
           LIBSODIUM_INSTALL_DIR=$(pwd)/../libsodium_install
-          if [ ! -f "\( {LIBSODIUM_INSTALL_DIR}/include/sodium.h" ] || [ ! -f " \){LIBSODIUM_INSTALL_DIR}/lib/libsodium.a" ]; then
+          if [ ! -f "${LIBSODIUM_INSTALL_DIR}/include/sodium.h" ] || [ ! -f "${LIBSODIUM_INSTALL_DIR}/lib/libsodium.a" ]; then
             echo "❌ 错误：libsodium 编译失败"
             exit 1
           fi
@@ -318,31 +313,31 @@ jobs:
           echo "LIBSODIUM_INSTALL_DIR=${LIBSODIUM_INSTALL_DIR}" >> $GITHUB_ENV
           echo "LIBSODIUM_INCLUDE_DIR=${LIBSODIUM_INSTALL_DIR}/include" >> $GITHUB_ENV
           echo "LIBSODIUM_LIB_DIR=${LIBSODIUM_INSTALL_DIR}/lib" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=\( {PKG_CONFIG_PATH}: \){LIBSODIUM_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=${PKG_CONFIG_PATH}:${LIBSODIUM_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
+
       # ==============================================
-      # 步骤4：差异化构建，适配pydantic-core
+      # 步骤4：构建 Android aarch64 wheels
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          # 基础工具链配置（不影响主机Python运行时）
+          # 基础工具链配置
           export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
           export SYSROOT=${TOOLCHAIN}/sysroot
-          export CC=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
-          export CXX=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
+          export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
+          export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # 编译链接参数（已包含 libsodium）
-          export CPPFLAGS="-I\( {PY2DROID_INCLUDE_DIR} -I \){LIBFFI_INCLUDE_DIR} -I\( {OPENSSL_INCLUDE_DIR} -I \){LIBSODIUM_INCLUDE_DIR} --sysroot=${SYSROOT}"
-          export CFLAGS="\( {CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__= \){{ env.ANDROID_API_LEVEL }}"
+          # 编译链接参数
+          export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} -I${OPENSSL_INCLUDE_DIR} -I${LIBSODIUM_INCLUDE_DIR} --sysroot=${SYSROOT}"
+          export CFLAGS="${CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
           export CXXFLAGS="${CFLAGS}"
-          export LDFLAGS="-L\( {PY2DROID_LIB_DIR} -L \){LIBFFI_LIB_DIR} -L\( {OPENSSL_LIB_DIR} -L \){LIBSODIUM_LIB_DIR} -L\( {SYSROOT}/usr/lib/ \){{ env.ANDROID_TARGET_ARCH }}/\( {{ env.ANDROID_API_LEVEL }} --sysroot= \){SYSROOT} -Wl,--allow-shlib-undefined"
+          export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${OPENSSL_LIB_DIR} -L${LIBSODIUM_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
           
-          # PKG_CONFIG 也加上 libsodium
-          export PKG_CONFIG_PATH="\( {PKG_CONFIG_PATH}: \){LIBSODIUM_LIB_DIR}/pkgconfig"
+          export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}:${LIBSODIUM_LIB_DIR}/pkgconfig"
           
           # Rust交叉编译配置
           export CARGO_BUILD_TARGET=${{ env.ANDROID_TARGET_ARCH }}
@@ -352,7 +347,7 @@ jobs:
           export PKG_CONFIG_ALLOW_CROSS=1
           export CARGO_NET_GIT_FETCH_WITH_CLI=true
           
-          # PyO3基础交叉编译配置
+          # PyO3交叉编译配置
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION=${{ env.PY_ABI_VERSION }}
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
@@ -363,7 +358,6 @@ jobs:
           mkdir -p dist raw_wheels
           
           # 定义需要编译的包
-                    # 定义需要编译的包（把 paramiko 的所有二进制依赖都加上）
           declare -A pkgs
           pkgs=( 
             ["cffi"]="cffi>=1.17.2" 
@@ -375,21 +369,17 @@ jobs:
             ["invoke"]="invoke>=2.0.0"
           )
 
-          
-                    # 循环构建每个包
+          # 循环构建每个包
           for pkg_name in "${!pkgs[@]}"; do
             pkg_spec=${pkgs[$pkg_name]}
             echo "--------------------------------------------------"
             echo "🚀 正在构建: $pkg_spec"
             echo "--------------------------------------------------"
             
-            # 清空临时构建目录和旧配置文件
             rm -rf build_source pyo3-config.ini && mkdir -p build_source && cd build_source
             
-            # 【终极修复：全部关闭 abi3，统一用 cp314 原生模式】
-            echo "✅ 统一关闭 abi3，强制使用 cp314 原生标签"
+            # 关闭 abi3，使用 cp314 原生标签
             export PYO3_ABI3=0
-            # 统一 pyo3 配置
             CONFIG_FILE="../pyo3-config.ini"
             echo "implementation=CPython" > $CONFIG_FILE
             echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
@@ -400,11 +390,11 @@ jobs:
             echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
             
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
-            export SODIUM_INSTALL=system     # ← 新增这一行！让 pynacl 使用我们预编译的 libsodium
-            echo "✅ 使用预编译的 libsodium（system 模式）"
+            export SODIUM_INSTALL=system
+            echo "✅ 使用预编译的系统 libsodium"
             
-           # 【终极修复】使用 PyPI JSON API 下载 sdist（彻底绕过 build isolation）
-            echo "📥 下载 $pkg_spec 源码包（使用 PyPI JSON API）..."
+            # 下载源码包
+            echo "📥 下载 $pkg_spec 源码包..."
             pkg_base=$(echo "$pkg_spec" | cut -d'>' -f1 | tr -d ' =')
             
             sdist_url=$(python -c '
@@ -426,7 +416,6 @@ jobs:
                 print("")
             ' "$pkg_base")
 
-
             if [ -z "$sdist_url" ]; then
               echo "❌ 无法获取 $pkg_spec 的 sdist 下载链接"
               exit 1
@@ -436,7 +425,7 @@ jobs:
             tar -xzf sdist.tar.gz --strip-components=1
             echo "✅ 已获取最新 sdist"
             
-            # 统一 PEP 517 标准构建
+            # 构建 wheel
             python -m build \
               --wheel \
               --outdir ./dist \
@@ -444,25 +433,12 @@ jobs:
               --no-isolation \
               --verbose
             
-            # 复制构建产物
             cp dist/*.whl ../raw_wheels/
             cd ..
             echo "✅ $pkg_name 构建完成"
           done
 
-          
-          
-                    # ==============================================
-          # 【最终修复】标签严格对齐 py2droid Android aarch64
-          # ==============================================
-                    # ==============================================
-          # 【终极修复】所有包统一标签：cp314-cp314-android_24_arm64_v8a
-          # ==============================================
-                    # ==============================================
-                    # ==============================================
-                    # ==============================================
-          # 【终极修复】所有包统一标签：cp314-cp314-android_24_arm64_v8a
-          # ==============================================
+          # 统一 wheel 标签
           echo "--------------------------------------------------"
           echo "📦 统一标签：cp314-cp314-android_24_arm64_v8a"
           echo "--------------------------------------------------"
@@ -476,26 +452,17 @@ jobs:
             cp "$wheel" dist/
             target_wheel="dist/$wheel_name"
             
-            # 严格使用手机端 pip debug 输出的标签格式！
             python -m wheel tags \
               --python-tag cp314 \
               --abi-tag cp314 \
               --platform-tag android_24_arm64_v8a \
               "$target_wheel"
               
-            # wheel tags 会在同目录生成一个新文件，我们需要把旧的删掉
             rm -f "$target_wheel"
-            
             echo "✅ 标签修正完成"
           done
           
           echo "✅ 所有 Wheel 已对齐 py2droid 可安装格式"
-
-
-
-
-
-
 
       # 验证构建产物的Android兼容性
       - name: Validate py2droid compatible wheels
