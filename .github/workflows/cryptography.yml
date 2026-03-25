@@ -97,7 +97,7 @@ jobs:
           
           # 查找并解压内层cpython压缩包
           echo "查找cpython-arm64.tar.xz..."
-          PYTHON_TAR=$(find . -name "cpython-arm64.tar.xz" -type f | head -n 1)
+          PYTHON_TAR=$(find . -name "cpython-arm64.tar.xz" -type f | head-n 1)
           if [ -z "$PYTHON_TAR" ]; then
             echo "❌ 错误：未找到cpython-arm64.tar.xz，py2droid包结构异常"
             exit 1
@@ -354,7 +354,6 @@ jobs:
           export PYO3_CROSS_INCLUDE_DIR=${PY2DROID_INCLUDE_DIR}
           export PYO3_NO_AUTO_LINK=1
           export PYO3_ABI3=0
-          export PYO3_FORCE_CPYTHON=1
           
           # 创建产物目录
           mkdir -p dist raw_wheels
@@ -380,7 +379,6 @@ jobs:
             
             rm -rf build_source pyo3-config.ini && mkdir -p build_source && cd build_source
             
-            # 关闭 abi3，使用 cp314 原生标签
             export PYO3_ABI3=0
             CONFIG_FILE="../pyo3-config.ini"
             echo "implementation=CPython" > $CONFIG_FILE
@@ -393,18 +391,15 @@ jobs:
             
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
             export SODIUM_INSTALL=system
-            echo "✅ 使用预编译的系统 libsodium"
             
             # ========================
-            # 【合并修复】cryptography 彻底关闭 abi3
+            # 【终极修复】彻底禁用 cryptography Rust 后端
             # ========================
             if [ "$pkg_name" = "cryptography" ]; then
-              echo "🔒 为 cryptography 禁用 abi3，使用系统 OpenSSL"
+              echo "🔥 彻底禁用 cryptography Rust，使用纯C扩展（永久解决abi3报错）"
+              export CRYPTOGRAPHY_DONT_BUILD_RUST=1
               export CRYPTOGRAPHY_USE_OPENSSL=system
               export OPENSSL_STATIC=1
-              export CRYPTOGRAPHY_SUPPRESS_LINK_FLAGS=1
-              export CRYPTOGRAPHY_NO_ABI3=1
-              export PYO3_ABI3=0
             fi
             
             # 下载源码包
@@ -437,7 +432,6 @@ jobs:
 
             wget -q --show-progress -O sdist.tar.gz "$sdist_url"
             tar -xzf sdist.tar.gz --strip-components=1
-            echo "✅ 已获取最新 sdist"
             
             # 构建 wheel
             python -m build \
@@ -475,8 +469,6 @@ jobs:
             rm -f "$target_wheel"
             echo "✅ 标签修正完成"
           done
-          
-          echo "✅ 所有 Wheel 已对齐 py2droid 可安装格式"
 
       # 验证构建产物的Android兼容性
       - name: Validate py2droid compatible wheels
