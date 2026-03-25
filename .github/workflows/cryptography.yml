@@ -304,14 +304,14 @@ jobs:
               export PYO3_ABI3=0
               # 【语法修复】EOF完全顶格，无任何前导空格
               cat > ../pyo3-config.ini << EOF
-implementation=CPython
-version=${{ env.PY_ABI_VERSION }}
-shared=true
-abi3=false
-lib_name=python${{ env.PY_ABI_VERSION }}
-lib_dir=${PY2DROID_LIB_DIR}
-include_dir=${PY2DROID_INCLUDE_DIR}
-EOF
+              implementation=CPython
+              version=${{ env.PY_ABI_VERSION }}
+              shared=true
+              abi3=false
+              lib_name=python${{ env.PY_ABI_VERSION }}
+              lib_dir=${PY2DROID_LIB_DIR}
+              include_dir=${PY2DROID_INCLUDE_DIR}
+              EOF
               # 定义wheel标签参数
               WHEEL_PY_TAG="py314"
               WHEEL_ABI_TAG="cp314"
@@ -320,14 +320,14 @@ EOF
               export PYO3_ABI3=1
               # 【语法修复】EOF完全顶格，无任何前导空格
               cat > ../pyo3-config.ini << EOF
-implementation=CPython
-version=${{ env.PY_ABI_VERSION }}
-shared=true
-abi3=true
-lib_name=python${{ env.PY_ABI_VERSION }}
-lib_dir=${PY2DROID_LIB_DIR}
-include_dir=${PY2DROID_INCLUDE_DIR}
-EOF
+              implementation=CPython
+              version=${{ env.PY_ABI_VERSION }}
+              shared=true
+              abi3=true
+              lib_name=python${{ env.PY_ABI_VERSION }}
+              lib_dir=${PY2DROID_LIB_DIR}
+              include_dir=${PY2DROID_INCLUDE_DIR}
+              EOF
               # 定义wheel标签参数
               WHEEL_PY_TAG="py314"
               WHEEL_ABI_TAG="abi3"
