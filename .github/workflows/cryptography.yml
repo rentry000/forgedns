@@ -288,7 +288,7 @@ jobs:
             ["paramiko"]="paramiko>=3.0.0"
           )
           
-          # 循环构建每个包
+                    # 循环构建每个包
           for pkg_name in "${!pkgs[@]}"; do
             pkg_spec=${pkgs[$pkg_name]}
             echo "--------------------------------------------------"
@@ -298,50 +298,30 @@ jobs:
             # 清空临时构建目录和旧配置文件
             rm -rf build_source pyo3-config.ini && mkdir -p build_source && cd build_source
             
-            # 差异化处理abi3配置
-            if [ "$pkg_name" = "pydantic-core" ]; then
-              echo "⚠️  pydantic-core不支持abi3模式，临时关闭abi3配置"
-              export PYO3_ABI3=0
-              # 用echo逐行写入配置，彻底杜绝语法错误
-              CONFIG_FILE="../pyo3-config.ini"
-              echo "implementation=CPython" > $CONFIG_FILE
-              echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
-              echo "shared=true" >> $CONFIG_FILE
-              echo "abi3=false" >> $CONFIG_FILE
-              echo "lib_name=python${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
-              echo "lib_dir=${PY2DROID_LIB_DIR}" >> $CONFIG_FILE
-              echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
-              # 定义wheel标签参数
-              WHEEL_PY_TAG="py314"
-              WHEEL_ABI_TAG="cp314"
-            else
-              echo "✅ 启用abi3兼容模式"
-              export PYO3_ABI3=1
-              # 用echo逐行写入配置
-              CONFIG_FILE="../pyo3-config.ini"
-              echo "implementation=CPython" > $CONFIG_FILE
-              echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
-              echo "shared=true" >> $CONFIG_FILE
-              echo "abi3=true" >> $CONFIG_FILE
-              echo "lib_name=python${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
-              echo "lib_dir=${PY2DROID_LIB_DIR}" >> $CONFIG_FILE
-              echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
-              # 定义wheel标签参数
-              WHEEL_PY_TAG="py314"
-              WHEEL_ABI_TAG="abi3"
-            fi
+            # 【终极修复：全部关闭 abi3，统一用 cp314 原生模式】
+            echo "✅ 统一关闭 abi3，强制使用 cp314 原生标签"
+            export PYO3_ABI3=0
+            # 统一 pyo3 配置
+            CONFIG_FILE="../pyo3-config.ini"
+            echo "implementation=CPython" > $CONFIG_FILE
+            echo "version=${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
+            echo "shared=true" >> $CONFIG_FILE
+            echo "abi3=false" >> $CONFIG_FILE
+            echo "lib_name=python${{ env.PY_ABI_VERSION }}" >> $CONFIG_FILE
+            echo "lib_dir=${PY2DROID_LIB_DIR}" >> $CONFIG_FILE
+            echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
+            
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
             
             # 下载源码包
             pip download --no-binary :all: --no-deps "$pkg_spec"
             tar -xzf *.tar.gz --strip-components=1
             
-            # 统一PEP 517标准构建
-            echo "使用PEP 517标准构建（自动适配setuptools/maturin）"
+            # 统一 PEP 517 标准构建
             python -m build \
               --wheel \
               --outdir ./dist \
-              --config-setting="--plat-name=android_aarch64" \
+              --config-setting="--plat-name=android_24_arm64_v8a" \
               --no-isolation \
               --verbose
             
@@ -350,13 +330,17 @@ jobs:
             cd ..
             echo "✅ $pkg_name 构建完成"
           done
+
           
           
                     # ==============================================
           # 【最终修复】标签严格对齐 py2droid Android aarch64
           # ==============================================
+                    # ==============================================
+          # 【终极修复】所有包统一标签：cp314-cp314-android_24_arm64_v8a
+          # ==============================================
           echo "--------------------------------------------------"
-          echo "📦 统一修正 Wheel 标签：android_24_arm64_v8a"
+          echo "📦 统一标签：cp314-cp314-android_24_arm64_v8a"
           echo "--------------------------------------------------"
           
           rm -rf dist/*
@@ -368,26 +352,18 @@ jobs:
             cp "$wheel" dist/
             target_wheel="dist/$wheel_name"
             
-            if [[ "$wheel_name" == *"pydantic_core"* ]]; then
-              # pydantic-core：cp314 专用
-              wheel tags \
-                --platform-tag android_24_arm64_v8a \
-                --python-tag py314 \
-                --abi-tag cp314 \
-                "$target_wheel"
-            else
-              # 其他所有包：abi3 通用（bcrypt/cryptography/cffi/paramiko）
-              wheel tags \
-                --platform-tag android_24_arm64_v8a \
-                --python-tag py314 \
-                --abi-tag abi3 \
-                "$target_wheel"
-            fi
+            # 所有包都用和 pydantic-core 完全一样的标签
+            wheel tags \
+              --platform-tag android_24_arm64_v8a \
+              --python-tag py314 \
+              --abi-tag cp314 \
+              "$target_wheel"
             
             echo "✅ 标签修正完成"
           done
           
-          echo "✅ 所有 Wheel 已对齐 py2droid 平台标签"
+          echo "✅ 所有 Wheel 已对齐 py2droid 可安装格式"
+
 
 
 
