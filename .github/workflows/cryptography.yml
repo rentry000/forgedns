@@ -50,13 +50,32 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils \
-            autoconf automake libtool perl \
-            build-essential libffi-dev
-          # 强制升级构建工具
-          python -m pip install -U --force-reinstall pip wheel setuptools setuptools-rust cffi maturin build auditwheel patchelf
-          sudo apt install -y ... libffi-dev python3-dev
-          python -m pip install --no-deps cffi "pynacl>=1.5.0" "bcrypt>=4.0.0" "cryptography>=43.0.0" pydantic-core
+            make \
+            pkg-config \
+            patchelf \
+            binutils-aarch64-linux-gnu \
+            wget \
+            unzip \
+            xz-utils \
+            autoconf \
+            automake \
+            libtool \
+            perl \
+            build-essential \
+            libffi-dev \
+            python3-dev
+          
+          # 强制升级构建工具（确保 cffi 等能正常编译）
+          python -m pip install -U --force-reinstall \
+            pip \
+            wheel \
+            setuptools \
+            setuptools-rust \
+            cffi \
+            maturin \
+            build \
+            auditwheel \
+            patchelf
 
       # ==============================================
       # 步骤1：准备py2droid Python 3.14交叉编译环境
