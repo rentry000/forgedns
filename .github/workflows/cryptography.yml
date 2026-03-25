@@ -45,12 +45,13 @@ jobs:
         with:
           targets: ${{ env.ANDROID_TARGET_ARCH }}
 
-      - name: Install system build dependencies
+      # 【核心修复1】提前安装主机全量构建依赖，避免隔离环境污染
+      - name: Install host build dependencies
         run: |
           sudo apt update
           sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils autoconf automake libtool perl
-          # 安装全量Python构建工具，包含maturin满足cryptography等包的构建依赖
-          python -m pip install -U pip wheel setuptools setuptools-rust maturin build auditwheel patchelf
+          # 提前安装主机x86_64版本的所有构建依赖，确保可正常运行
+          python -m pip install -U pip wheel setuptools setuptools-rust cffi maturin build auditwheel patchelf
 
       # ==============================================
       # 步骤1：准备py2droid Python 3.14交叉编译环境
@@ -118,13 +119,13 @@ jobs:
           
           echo "最终Python include目录: ${FINAL_INCLUDE_DIR}"
           
-          # 4. 导出核心路径到全局环境变量
+          # 4. 导出核心路径到全局环境变量（仅路径，无运行时污染）
           echo "PY2DROID_PREFIX=${PY2DROID_PREFIX}" >> $GITHUB_ENV
           echo "PY2DROID_LIB_DIR=${PY2DROID_LIB_DIR}" >> $GITHUB_ENV
           echo "PY2DROID_INCLUDE_DIR=${FINAL_INCLUDE_DIR}" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤2：交叉编译libffi，解决cffi依赖
+      # 步骤2：交叉编译libffi，解决cffi链接依赖
       # ==============================================
       - name: Cross-compile libffi for Android aarch64
         env:
@@ -213,7 +214,7 @@ jobs:
             --tries=5 --timeout=15
           tar -xzf openssl.tar.gz --strip-components=1
           
-          # 配置交叉编译，仅保留1.1.1w原生支持的参数
+          # 配置交叉编译
           echo "🔧 配置OpenSSL 1.1.1w 交叉编译..."
           ./Configure \
             android-arm64 \
@@ -243,46 +244,39 @@ jobs:
           echo "OpenSSL include目录: ${OPENSSL_INSTALL_DIR}/include"
           echo "OpenSSL lib目录: ${OPENSSL_INSTALL_DIR}/lib"
           
-          # 导出环境变量
+          # 导出环境变量，cryptography专属配置
           echo "OPENSSL_INSTALL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=${OPENSSL_INSTALL_DIR}/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=${OPENSSL_INSTALL_DIR}/lib" >> $GITHUB_ENV
-          # cryptography专属配置，强制使用我们编译的OpenSSL
           echo "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
           echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       # ==============================================
-      # 步骤4：【核心修复】统一PEP 517标准构建，彻底解决maturin参数报错
+      # 步骤4：【核心修复2】纯净交叉编译环境，无主机运行时污染
       # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          # 核心交叉编译工具链配置
+          # 仅配置编译器/链接器相关环境变量，绝不篡改主机Python平台识别
           export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
           export SYSROOT=${TOOLCHAIN}/sysroot
           
-          # 绑定NDK交叉编译工具
+          # 绑定NDK交叉编译工具（仅给编译器用，不影响Python运行时）
           export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
           export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # 全量交叉编译CFLAGS/LDFLAGS，整合所有依赖
+          # 编译链接参数，整合所有交叉编译依赖
           export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} -I${OPENSSL_INCLUDE_DIR} --sysroot=${SYSROOT}"
           export CFLAGS="${CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
           export CXXFLAGS="${CFLAGS}"
           export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${OPENSSL_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
           
-          # Python交叉编译核心环境变量，强制识别Android平台
-          export _PYTHON_HOST_PLATFORM="android-aarch64"
-          export PYTHON_CROSSENV=1
-          export PYTHONPATH="${PY2DROID_LIB_DIR}/python${{ env.PY_ABI_VERSION }}"
-          export PYTHONNOUSERSITE=1
-          
-          # Rust Android交叉编译核心配置
+          # Rust Android交叉编译配置
           export CARGO_BUILD_TARGET=${{ env.ANDROID_TARGET_ARCH }}
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CC}
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${AR}
@@ -290,7 +284,7 @@ jobs:
           export PKG_CONFIG_ALLOW_CROSS=1
           export CARGO_NET_GIT_FETCH_WITH_CLI=true
           
-          # PyO3交叉编译配置，适配cryptography等Rust扩展包
+          # PyO3交叉编译配置（仅给Rust扩展用，不影响主机Python）
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION=${{ env.PY_ABI_VERSION }}
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
@@ -298,7 +292,7 @@ jobs:
           export PYO3_NO_AUTO_LINK=1
           export PYO3_ABI3=1
           
-          # 生成PyO3专属配置文件
+          # 生成PyO3配置文件
           cat > pyo3-config.ini << EOF
           implementation=CPython
           version=${{ env.PY_ABI_VERSION }}
@@ -337,13 +331,13 @@ jobs:
             pip download --no-binary :all: --no-deps "$pkg_spec"
             tar -xzf *.tar.gz --strip-components=1
             
-            # 【核心修复】统一使用PEP 517标准构建命令，自动适配所有构建后端
-            # 自动识别maturin/setuptools，无需手动判断，彻底避免参数错误
+            # 【核心修复3】使用--no-isolation，用提前安装的主机依赖，避免隔离环境污染
             echo "使用PEP 517标准构建（自动适配setuptools/maturin）"
             python -m build \
               --wheel \
               --outdir ./dist \
               --config-setting="--plat-name=android_aarch64" \
+              --no-isolation \
               --verbose
             
             # 复制构建产物
@@ -352,7 +346,7 @@ jobs:
             echo "✅ $pkg_name 构建完成"
           done
           
-          # 统一修正Wheel平台标签，确保py2droid的pip能正常识别安装
+          # 统一修正Wheel平台标签，确保py2droid的pip能正常识别
           echo "--------------------------------------------------"
           echo "📦 修正Wheel平台标签适配py2droid"
           echo "--------------------------------------------------"
