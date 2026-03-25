@@ -341,17 +341,29 @@ jobs:
             
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
             
-            # 【关键修复】手动下载 sdist，避免 pip download 触发 build isolation + cffi 编译
-            echo "📥 下载 $pkg_spec 源码包（绕过 build isolation）..."
+           # 【终极修复】使用 PyPI JSON API 下载 sdist（彻底绕过 build isolation）
+            echo "📥 下载 $pkg_spec 源码包（使用 PyPI JSON API）..."
             pkg_base=$(echo "$pkg_spec" | cut -d'>' -f1 | tr -d ' =')
-            sdist_url=$(python -m pip index versions "$pkg_base" --format=json 2>/dev/null | python -c '
-            import sys, json
-            data = json.load(sys.stdin)
-            if data.get("versions"):
-                print(data["versions"][0]["urls"][0]["url"])
-            else:
+            
+            sdist_url=$(python -c '
+            import sys
+            import json
+            import urllib.request
+            pkg = sys.argv[1]
+            try:
+                with urllib.request.urlopen(f"https://pypi.org/pypi/{pkg}/json") as resp:
+                    data = json.load(resp)
+                latest = data["info"]["version"]
+                for file_info in data["releases"][latest]:
+                    if file_info["packagetype"] == "sdist" and file_info["filename"].endswith((".tar.gz", ".zip")):
+                        print(file_info["url"])
+                        break
+                else:
+                    print("")
+            except Exception:
                 print("")
-            ' | head -n 1)
+            ' "$pkg_base")
+
 
             if [ -z "$sdist_url" ]; then
               echo "❌ 无法获取 $pkg_spec 的 sdist 下载链接"
