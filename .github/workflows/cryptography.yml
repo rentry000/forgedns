@@ -353,6 +353,8 @@ jobs:
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
           export PYO3_CROSS_INCLUDE_DIR=${PY2DROID_INCLUDE_DIR}
           export PYO3_NO_AUTO_LINK=1
+          export PYO3_ABI3=0
+          export PYO3_FORCE_CPYTHON=1
           
           # 创建产物目录
           mkdir -p dist raw_wheels
@@ -392,6 +394,18 @@ jobs:
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
             export SODIUM_INSTALL=system
             echo "✅ 使用预编译的系统 libsodium"
+            
+            # ========================
+            # 【合并修复】cryptography 彻底关闭 abi3
+            # ========================
+            if [ "$pkg_name" = "cryptography" ]; then
+              echo "🔒 为 cryptography 禁用 abi3，使用系统 OpenSSL"
+              export CRYPTOGRAPHY_USE_OPENSSL=system
+              export OPENSSL_STATIC=1
+              export CRYPTOGRAPHY_SUPPRESS_LINK_FLAGS=1
+              export CRYPTOGRAPHY_NO_ABI3=1
+              export PYO3_ABI3=0
+            fi
             
             # 下载源码包
             echo "📥 下载 $pkg_spec 源码包..."
