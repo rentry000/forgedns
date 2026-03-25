@@ -351,49 +351,44 @@ jobs:
             echo "✅ $pkg_name 构建完成"
           done
           
-          # ==============================================
-          # 【核心修复2】全版本兼容的Wheel标签修正逻辑
-          # ==============================================
+          
                     # ==============================================
-          # 【核心修复2】全版本兼容的Wheel标签修正逻辑
+          # 【最终修复】标签严格对齐 py2droid Android aarch64
           # ==============================================
           echo "--------------------------------------------------"
-          echo "📦 修正Wheel平台标签适配py2droid"
+          echo "📦 统一修正 Wheel 标签：android_24_arm64_v8a"
           echo "--------------------------------------------------"
           
-          # 先清空dist目录，避免旧文件干扰
           rm -rf dist/*
           
-          # 循环处理每个wheel文件
           for wheel in raw_wheels/*.whl; do
             wheel_name=$(basename "$wheel")
-            echo "处理: $wheel_name"
+            echo "处理：$wheel_name"
             
-            # 复制到dist目录
             cp "$wheel" dist/
             target_wheel="dist/$wheel_name"
             
-            # 差异化设置标签，兼容pydantic-core
             if [[ "$wheel_name" == *"pydantic_core"* ]]; then
-              echo "  适配pydantic-core，使用cp314 abi标签"
+              # pydantic-core：cp314 专用
               wheel tags \
-                --platform-tag android_aarch64 \
+                --platform-tag android_24_arm64_v8a \
                 --python-tag py314 \
                 --abi-tag cp314 \
                 "$target_wheel"
             else
-              echo "  使用abi3兼容标签"
+              # 其他所有包：abi3 通用（bcrypt/cryptography/cffi/paramiko）
               wheel tags \
-                --platform-tag android_aarch64 \
+                --platform-tag android_24_arm64_v8a \
                 --python-tag py314 \
                 --abi-tag abi3 \
                 "$target_wheel"
             fi
             
-            echo "  ✅ 标签修正完成"
+            echo "✅ 标签修正完成"
           done
           
-          echo "✅ 所有Wheel标签修正完成，最终产物已输出到dist目录"
+          echo "✅ 所有 Wheel 已对齐 py2droid 平台标签"
+
 
 
       # 验证构建产物的Android兼容性
