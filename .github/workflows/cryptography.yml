@@ -20,7 +20,7 @@ jobs:
           python-version: '3.14'
           allow-prereleases: true
 
-      # Android NDK 核心工具链，和py2droid编译环境匹配
+      # Android NDK 核心工具链
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
@@ -38,68 +38,65 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils
-          # 安装全量构建工具，兼容所有Python包构建场景
+          # 安装全量构建工具
           pip install -U pip wheel setuptools setuptools-rust maturin build
 
       # ==============================================
-      # 【核心修复】适配py2droid嵌套压缩包结构
-      # 先解压外层zip，再解压内层cpython-arm64.tar.xz，精准定位Python环境
+      # 【核心修复】适配py2droid精简包，自动补充缺失的头文件
       # ==============================================
       - name: Prepare py2droid Python 3.14 environment
         run: |
-          mkdir -p py2droid_env
+          mkdir -p py2droid_env python_headers
           cd py2droid_env
           
-          # 下载你指定的py2droid官方包
+          # 1. 下载并解压py2droid官方包，获取原生libpython3.14.so
+          echo "📥 下载py2droid v0.3.1包..."
           wget -O py2droid-v0.3.1.zip https://github.com/Mrakorez/py2droid/releases/download/v0.3.1/py2droid-v0.3.1.zip
           
-          # 1. 解压外层zip包
           echo "解压外层zip包..."
           unzip -q py2droid-v0.3.1.zip
           
-          # 2. 查找并解压内层cpython-arm64.tar.xz压缩包
-          echo "查找内层cpython压缩包..."
+          echo "查找并解压内层cpython压缩包..."
           PYTHON_TAR=$(find . -name "cpython-arm64.tar.xz" -type f | head -n 1)
           if [ -z "$PYTHON_TAR" ]; then
-            echo "❌ 错误：未找到cpython-arm64.tar.xz，请检查py2droid包结构"
+            echo "❌ 错误：未找到cpython-arm64.tar.xz"
             exit 1
           fi
-          
-          echo "解压内层cpython压缩包..."
           tar -xJf "$PYTHON_TAR"
           
-          # 3. 精准定位prefix目录下的lib和include（和你手机里的结构完全一致）
-          if [ ! -d "./prefix/lib" ] || [ ! -d "./prefix/include/python3.14" ]; then
-            echo "❌ 错误：未找到prefix目录下的lib/include，请检查压缩包内容"
+          # 2. 校验py2droid的核心库文件（仅校验必须的运行时库，不再校验include）
+          echo "校验py2droid核心库文件..."
+          PY2DROID_LIB_DIR=$(pwd)/prefix/lib
+          if [ ! -f "$PY2DROID_LIB_DIR/libpython3.14.so" ]; then
+            echo "❌ 错误：未找到libpython3.14.so"
             exit 1
           fi
+          echo "✅ 成功提取py2droid原生Python库"
+          echo "py2droid lib目录: $PY2DROID_LIB_DIR"
           
-          # 4. 导出路径到环境变量，供后续步骤使用
-          export ANDROID_PYTHON_LIB_DIR=$(pwd)/prefix/lib
-          export ANDROID_PYTHON_INCLUDE_DIR=$(pwd)/prefix/include/python3.14
+          # 3. 【关键修复】下载同版本Python 3.14.3的Android专用头文件，解决编译缺失问题
+          echo "📥 补充Python 3.14编译所需头文件..."
+          cd ../python_headers
+          # 从Termux官方仓库下载同版本Python包，提取头文件（和py2droid版本完全一致，无兼容性问题）
+          wget -O python_3.14.deb https://termux.dev/dists/stable/main/binary-aarch64/python_3.14.3_aarch64.deb
+          dpkg -x python_3.14.deb .
           
-          echo "ANDROID_PYTHON_LIB_DIR=$ANDROID_PYTHON_LIB_DIR" >> $GITHUB_ENV
-          echo "ANDROID_PYTHON_INCLUDE_DIR=$ANDROID_PYTHON_INCLUDE_DIR" >> $GITHUB_ENV
-          
-          # 验证文件存在
-          if [ ! -f "$ANDROID_PYTHON_LIB_DIR/libpython3.14.so" ]; then
-            echo "❌ 错误：libpython3.14.so不存在"
+          # 校验头文件完整性
+          PYTHON_INCLUDE_DIR=$(pwd)/data/data/com.termux/files/usr/include/python3.14
+          if [ ! -f "$PYTHON_INCLUDE_DIR/Python.h" ]; then
+            echo "❌ 错误：头文件提取失败"
             exit 1
           fi
-          if [ ! -f "$ANDROID_PYTHON_INCLUDE_DIR/Python.h" ]; then
-            echo "❌ 错误：Python.h头文件不存在"
-            exit 1
-          fi
+          echo "✅ 成功补充Python 3.14头文件"
+          echo "Python include目录: $PYTHON_INCLUDE_DIR"
           
-          # 打印信息，方便调试
-          echo "✅ 成功提取py2droid Python环境"
-          echo "lib目录: $ANDROID_PYTHON_LIB_DIR"
-          echo "include目录: $ANDROID_PYTHON_INCLUDE_DIR"
-          echo "libpython3.14.so路径: $ANDROID_PYTHON_LIB_DIR/libpython3.14.so"
+          # 4. 导出核心路径到全局环境变量
+          echo "ANDROID_PYTHON_LIB_DIR=$PY2DROID_LIB_DIR" >> $GITHUB_ENV
+          echo "ANDROID_PYTHON_INCLUDE_DIR=$PYTHON_INCLUDE_DIR" >> $GITHUB_ENV
 
       - name: Build Android compatible wheels
         env:
-          # 基础固定变量（无shell展开依赖，避免GitHub Actions变量解析问题）
+          # 基础固定变量
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           TARGET_ARCH: aarch64-linux-android
           ANDROID_API: 24
@@ -110,13 +107,11 @@ jobs:
           PKG_CONFIG_ALLOW_CROSS: 1
           CARGO_NET_GIT_FETCH_WITH_CLI: true
         run: |
-          # ==============================================
-          # 核心环境变量正确展开，彻底解决linker路径问题
-          # ==============================================
+          # 核心交叉编译环境变量，确保路径100%正确展开
           export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
           export SYSROOT=${TOOLCHAIN}/sysroot
           
-          # 绑定NDK的交叉编译工具，100%确保路径正确
+          # 绑定NDK交叉编译工具
           export CC=${TOOLCHAIN}/bin/${TARGET_ARCH}${ANDROID_API}-clang
           export CXX=${TOOLCHAIN}/bin/${TARGET_ARCH}${ANDROID_API}-clang++
           export AR=${TOOLCHAIN}/bin/llvm-ar
@@ -126,12 +121,9 @@ jobs:
           # Rust Android交叉编译核心配置
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CC}
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${AR}
-          # Android专用链接参数：允许运行时解析Python符号
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,--allow-shlib-undefined -C link-arg=-Wl,-z,now -C strip=symbols"
           
-          # ==============================================
-          # PyO3配置完全匹配py2droid环境
-          # ==============================================
+          # PyO3交叉编译配置，完美适配py2droid环境
           export PYO3_CROSS=1
           export PYO3_CROSS_PYTHON_VERSION=${TARGET_PYTHON_VERSION}
           export PYO3_CROSS_LIB_DIR=${ANDROID_PYTHON_LIB_DIR}
@@ -139,7 +131,7 @@ jobs:
           export PYO3_NO_AUTO_LINK=1
           export PYO3_ABI3=1
           
-          # 生成完整的PyO3配置文件
+          # 生成完整PyO3配置文件
           cat > pyo3-config.ini << EOF
           implementation=CPython
           version=${TARGET_PYTHON_VERSION}
@@ -168,12 +160,11 @@ jobs:
             echo "🚀 正在编译py2droid兼容版本: $pkg_spec"
             echo "--------------------------------------------------"
             
-            # 清空构建目录，避免交叉污染
+            # 清空构建目录
             rm -rf build_source && mkdir -p build_source && cd build_source
             
-            # 仅下载源码包，不下载二进制和依赖
+            # 下载源码包
             pip download --no-binary :all: --no-deps "$pkg_spec"
-            # 解压源码
             tar -xzf *.tar.gz --strip-components=1
             
             # 全场景兼容构建逻辑
@@ -195,7 +186,7 @@ jobs:
                 --verbose
             fi
             
-            # 复制原始构建产物
+            # 复制构建产物
             cp dist/*.whl ../raw_wheels/
             cd ..
             echo "✅ $pkg_name 构建完成"
@@ -203,7 +194,7 @@ jobs:
           
           # 统一修正Wheel平台标签，确保py2droid的pip能正常识别
           echo "--------------------------------------------------"
-          echo "📦 统一修正Wheel平台标签，适配Android"
+          echo "📦 统一修正Wheel平台标签"
           echo "--------------------------------------------------"
           for wheel in raw_wheels/*.whl; do
             echo "处理: $(basename $wheel)"
@@ -227,14 +218,12 @@ jobs:
             echo "--------------------------------------------------"
             echo "验证文件: $(basename $wheel)"
             unzip -q "$wheel" -d ./validate_temp
-            # 检查所有so二进制文件
             find ./validate_temp -name "*.so" -type f | while read so_file; do
               echo "  检查二进制: $(basename $so_file)"
               deps=$(aarch64-linux-gnu-readelf -d "$so_file" 2>/dev/null | grep NEEDED || echo "无动态依赖")
               echo "    依赖: $deps"
-              # 检查是否链接了glibc（Android不兼容）
               if echo "$deps" | grep -q "libc.so.6"; then
-                echo "    ❌ 错误：检测到glibc依赖，不兼容py2droid"
+                echo "    ❌ 错误：检测到glibc依赖，不兼容Android"
                 all_valid=false
               else
                 echo "    ✅ 无glibc依赖，完全兼容py2droid"
