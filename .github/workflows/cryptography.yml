@@ -12,6 +12,7 @@ env:
   ANDROID_API_LEVEL: 24
   LIBFFI_VERSION: "3.4.6"
   OPENSSL_VERSION: "1.1.1w"
+  LIBSODIUM_VERSION: "1.0.20"
 
 jobs:
   build_android_wheels:
@@ -261,7 +262,57 @@ jobs:
           echo "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}" >> $GITHUB_ENV
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
           echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
-
+      # ==============================================
+      # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
+      # ==============================================
+      - name: Cross-compile libsodium for Android aarch64
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
+          export SYSROOT=${TOOLCHAIN}/sysroot
+          export CC=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
+          export CXX=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
+          export AR=${TOOLCHAIN}/bin/llvm-ar
+          export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
+          export STRIP=${TOOLCHAIN}/bin/llvm-strip
+          
+          mkdir -p libsodium_build libsodium_install
+          cd libsodium_build
+          
+          echo "📥 下载 libsodium ${{ env.LIBSODIUM_VERSION }} 源码..."
+          wget -O libsodium.tar.gz \
+            https://download.libsodium.org/libsodium/releases/libsodium-${{ env.LIBSODIUM_VERSION }}-stable.tar.gz \
+            --tries=5 --timeout=15
+          tar -xzf libsodium.tar.gz --strip-components=1
+          
+          echo "🔧 配置 libsodium 交叉编译..."
+          ./configure \
+            --host=${{ env.ANDROID_TARGET_ARCH }} \
+            --prefix=$(pwd)/../libsodium_install \
+            --enable-static \
+            --disable-shared \
+            --disable-dependency-tracking \
+            --with-pic
+          
+          echo "🚀 编译 libsodium..."
+          make -j$(nproc)
+          make install
+          
+          LIBSODIUM_INSTALL_DIR=$(pwd)/../libsodium_install
+          if [ ! -f "\( {LIBSODIUM_INSTALL_DIR}/include/sodium.h" ] || [ ! -f " \){LIBSODIUM_INSTALL_DIR}/lib/libsodium.a" ]; then
+            echo "❌ 错误：libsodium 编译失败"
+            exit 1
+          fi
+          
+          echo "✅ libsodium 交叉编译完成"
+          echo "libsodium include: ${LIBSODIUM_INSTALL_DIR}/include"
+          echo "libsodium lib: ${LIBSODIUM_INSTALL_DIR}/lib"
+          
+          echo "LIBSODIUM_INSTALL_DIR=${LIBSODIUM_INSTALL_DIR}" >> $GITHUB_ENV
+          echo "LIBSODIUM_INCLUDE_DIR=${LIBSODIUM_INSTALL_DIR}/include" >> $GITHUB_ENV
+          echo "LIBSODIUM_LIB_DIR=${LIBSODIUM_INSTALL_DIR}/lib" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=\( {PKG_CONFIG_PATH}: \){LIBSODIUM_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
       # ==============================================
       # 步骤4：差异化构建，适配pydantic-core
       # ==============================================
@@ -279,10 +330,13 @@ jobs:
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
           # 编译链接参数
-          export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} -I${OPENSSL_INCLUDE_DIR} --sysroot=${SYSROOT}"
-          export CFLAGS="${CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
+          export CPPFLAGS="-I\( {PY2DROID_INCLUDE_DIR} -I \){LIBFFI_INCLUDE_DIR} -I\( {OPENSSL_INCLUDE_DIR} -I \){LIBSODIUM_INCLUDE_DIR} --sysroot=${SYSROOT}"
+          export CFLAGS="\( {CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__= \){{ env.ANDROID_API_LEVEL }}"
           export CXXFLAGS="${CFLAGS}"
-          export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${OPENSSL_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
+          export LDFLAGS="-L\( {PY2DROID_LIB_DIR} -L \){LIBFFI_LIB_DIR} -L\( {OPENSSL_LIB_DIR} -L \){LIBSODIUM_LIB_DIR} -L\( {SYSROOT}/usr/lib/ \){{ env.ANDROID_TARGET_ARCH }}/\( {{ env.ANDROID_API_LEVEL }} --sysroot= \){SYSROOT} -Wl,--allow-shlib-undefined"
+          
+          # PKG_CONFIG 也加上 libsodium（pynacl system 模式会用）
+          export PKG_CONFIG_PATH="\( {PKG_CONFIG_PATH}: \){LIBSODIUM_LIB_DIR}/pkgconfig"
           
           # Rust交叉编译配置
           export CARGO_BUILD_TARGET=${{ env.ANDROID_TARGET_ARCH }}
@@ -340,6 +394,8 @@ jobs:
             echo "include_dir=${PY2DROID_INCLUDE_DIR}" >> $CONFIG_FILE
             
             export PYO3_CONFIG_FILE=$(pwd)/../pyo3-config.ini
+            export SODIUM_INSTALL=system     # ← 新增这一行！让 pynacl 使用我们预编译的 libsodium
+            echo "✅ 使用预编译的 libsodium（system 模式）"
             
            # 【终极修复】使用 PyPI JSON API 下载 sdist（彻底绕过 build isolation）
             echo "📥 下载 $pkg_spec 源码包（使用 PyPI JSON API）..."
