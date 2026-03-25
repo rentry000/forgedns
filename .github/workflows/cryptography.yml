@@ -20,7 +20,7 @@ jobs:
           python-version: '3.14'
           allow-prereleases: true
 
-      # Android NDK 核心工具链，和py2droid的编译环境匹配
+      # Android NDK 核心工具链，和py2droid编译环境匹配
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
@@ -37,13 +37,13 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt update
-          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip
+          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils
           # 安装全量构建工具，兼容所有Python包构建场景
           pip install -U pip wheel setuptools setuptools-rust maturin build
 
       # ==============================================
-      # 【核心适配】自动下载你指定的py2droid v0.3.1包
-      # 提取和你手机完全一致的Python库+头文件，100%兼容
+      # 【核心修复】适配py2droid嵌套压缩包结构
+      # 先解压外层zip，再解压内层cpython-arm64.tar.xz，精准定位Python环境
       # ==============================================
       - name: Prepare py2droid Python 3.14 environment
         run: |
@@ -53,35 +53,49 @@ jobs:
           # 下载你指定的py2droid官方包
           wget -O py2droid-v0.3.1.zip https://github.com/Mrakorez/py2droid/releases/download/v0.3.1/py2droid-v0.3.1.zip
           
-          # 解压包
+          # 1. 解压外层zip包
+          echo "解压外层zip包..."
           unzip -q py2droid-v0.3.1.zip
           
-          # 自动查找和你手机完全一致的libpython3.14.so路径
-          PYTHON_LIB=$(find . -name "libpython3.14.so" -type f | head -n 1)
-          if [ -z "$PYTHON_LIB" ]; then
-            echo "❌ 错误：未找到libpython3.14.so，请检查py2droid包结构"
+          # 2. 查找并解压内层cpython-arm64.tar.xz压缩包
+          echo "查找内层cpython压缩包..."
+          PYTHON_TAR=$(find . -name "cpython-arm64.tar.xz" -type f | head -n 1)
+          if [ -z "$PYTHON_TAR" ]; then
+            echo "❌ 错误：未找到cpython-arm64.tar.xz，请检查py2droid包结构"
             exit 1
           fi
-          # 提取lib目录路径
-          export ANDROID_PYTHON_LIB_DIR=$(dirname "$PYTHON_LIB")
           
-          # 自动查找Python头文件路径（Python.h）
-          PYTHON_INCLUDE=$(find . -name "Python.h" -type f | grep "python3.14" | head -n 1)
-          if [ -z "$PYTHON_INCLUDE" ]; then
-            echo "❌ 错误：未找到Python.h头文件，请检查py2droid包结构"
+          echo "解压内层cpython压缩包..."
+          tar -xJf "$PYTHON_TAR"
+          
+          # 3. 精准定位prefix目录下的lib和include（和你手机里的结构完全一致）
+          if [ ! -d "./prefix/lib" ] || [ ! -d "./prefix/include/python3.14" ]; then
+            echo "❌ 错误：未找到prefix目录下的lib/include，请检查压缩包内容"
             exit 1
           fi
-          # 提取include/python3.14目录路径
-          export ANDROID_PYTHON_INCLUDE_DIR=$(dirname "$PYTHON_INCLUDE")
           
-          # 输出路径到环境变量，供后续步骤使用
+          # 4. 导出路径到环境变量，供后续步骤使用
+          export ANDROID_PYTHON_LIB_DIR=$(pwd)/prefix/lib
+          export ANDROID_PYTHON_INCLUDE_DIR=$(pwd)/prefix/include/python3.14
+          
           echo "ANDROID_PYTHON_LIB_DIR=$ANDROID_PYTHON_LIB_DIR" >> $GITHUB_ENV
           echo "ANDROID_PYTHON_INCLUDE_DIR=$ANDROID_PYTHON_INCLUDE_DIR" >> $GITHUB_ENV
+          
+          # 验证文件存在
+          if [ ! -f "$ANDROID_PYTHON_LIB_DIR/libpython3.14.so" ]; then
+            echo "❌ 错误：libpython3.14.so不存在"
+            exit 1
+          fi
+          if [ ! -f "$ANDROID_PYTHON_INCLUDE_DIR/Python.h" ]; then
+            echo "❌ 错误：Python.h头文件不存在"
+            exit 1
+          fi
           
           # 打印信息，方便调试
           echo "✅ 成功提取py2droid Python环境"
           echo "lib目录: $ANDROID_PYTHON_LIB_DIR"
           echo "include目录: $ANDROID_PYTHON_INCLUDE_DIR"
+          echo "libpython3.14.so路径: $ANDROID_PYTHON_LIB_DIR/libpython3.14.so"
 
       - name: Build Android compatible wheels
         env:
@@ -97,8 +111,7 @@ jobs:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
         run: |
           # ==============================================
-          # 【核心修复1】所有带shell变量的环境变量必须在run内export
-          # 彻底解决之前linker路径不展开、找不到的问题
+          # 核心环境变量正确展开，彻底解决linker路径问题
           # ==============================================
           export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
           export SYSROOT=${TOOLCHAIN}/sysroot
@@ -110,30 +123,23 @@ jobs:
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # Rust Android交叉编译核心配置，指定linker和归档工具
+          # Rust Android交叉编译核心配置
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CC}
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=${AR}
-          # Android专用链接参数：允许运行时解析Python符号，避免编译时强制链接检查
+          # Android专用链接参数：允许运行时解析Python符号
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,--allow-shlib-undefined -C link-arg=-Wl,-z,now -C strip=symbols"
           
           # ==============================================
-          # 【核心适配2】PyO3配置完全匹配py2droid环境
-          # 彻底解决unable to find library -lpython3.14报错
+          # PyO3配置完全匹配py2droid环境
           # ==============================================
-          # 开启PyO3交叉编译模式
           export PYO3_CROSS=1
-          # 目标Python版本和py2droid完全一致
           export PYO3_CROSS_PYTHON_VERSION=${TARGET_PYTHON_VERSION}
-          # 指定py2droid的Python库路径，给链接器提供符号校验用
           export PYO3_CROSS_LIB_DIR=${ANDROID_PYTHON_LIB_DIR}
-          # 指定py2droid的Python头文件路径
           export PYO3_CROSS_INCLUDE_DIR=${ANDROID_PYTHON_INCLUDE_DIR}
-          # 关闭PyO3自动链接libpython，运行时由手机上的Python解释器提供符号
           export PYO3_NO_AUTO_LINK=1
-          # 启用abi3兼容模式，后续Python小版本更新无需重新编译
           export PYO3_ABI3=1
           
-          # 生成完整的PyO3配置文件，确保所有参数生效
+          # 生成完整的PyO3配置文件
           cat > pyo3-config.ini << EOF
           implementation=CPython
           version=${TARGET_PYTHON_VERSION}
@@ -167,14 +173,10 @@ jobs:
             
             # 仅下载源码包，不下载二进制和依赖
             pip download --no-binary :all: --no-deps "$pkg_spec"
-            # 解压源码，自动处理压缩包
+            # 解压源码
             tar -xzf *.tar.gz --strip-components=1
             
-            # ==============================================
-            # 【全场景兼容构建逻辑】
-            # 彻底解决无setup.py的现代包构建失败问题
-            # ==============================================
-            # 1. 适配maturin构建的Rust包（如pydantic-core）
+            # 全场景兼容构建逻辑
             if [ -f pyproject.toml ] && grep -q "build-backend.*maturin" pyproject.toml; then
               echo "使用maturin构建（Rust扩展包）"
               maturin build \
@@ -184,7 +186,6 @@ jobs:
                 --out ./dist \
                 --no-auto-link-python \
                 --abi3
-            # 2. 通用PEP 517标准构建（兼容所有setuptools包，无论有没有setup.py）
             else
               echo "使用PEP 517标准构建（setuptools兼容）"
               python -m build \
@@ -200,15 +201,12 @@ jobs:
             echo "✅ $pkg_name 构建完成"
           done
           
-          # ==============================================
-          # 【Wheel标签修正】确保py2droid的pip能正常识别安装
-          # ==============================================
+          # 统一修正Wheel平台标签，确保py2droid的pip能正常识别
           echo "--------------------------------------------------"
           echo "📦 统一修正Wheel平台标签，适配Android"
           echo "--------------------------------------------------"
           for wheel in raw_wheels/*.whl; do
             echo "处理: $(basename $wheel)"
-            # 移除原有平台标签，设置Android aarch64专用标签
             wheel tags \
               --platform-tag android_aarch64 \
               --python-tag py314 \
@@ -220,7 +218,7 @@ jobs:
           
           echo "✅ 所有包构建完成，最终产物已输出到dist目录"
 
-      # 验证构建产物：确保无glibc依赖，完全兼容Android Bionic库
+      # 验证构建产物兼容性
       - name: Validate Android wheels
         run: |
           echo "===== 验证构建产物兼容性 ====="
@@ -232,12 +230,11 @@ jobs:
             # 检查所有so二进制文件
             find ./validate_temp -name "*.so" -type f | while read so_file; do
               echo "  检查二进制: $(basename $so_file)"
-              # 读取动态依赖
               deps=$(aarch64-linux-gnu-readelf -d "$so_file" 2>/dev/null | grep NEEDED || echo "无动态依赖")
               echo "    依赖: $deps"
-              # 检查是否链接了glibc（Android不兼容，必须禁止）
+              # 检查是否链接了glibc（Android不兼容）
               if echo "$deps" | grep -q "libc.so.6"; then
-                echo "    ❌ 错误：检测到glibc依赖，不兼容Android/py2droid"
+                echo "    ❌ 错误：检测到glibc依赖，不兼容py2droid"
                 all_valid=false
               else
                 echo "    ✅ 无glibc依赖，完全兼容py2droid"
