@@ -265,6 +265,9 @@ jobs:
       # ==============================================
       # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
       # ==============================================
+      # ==============================================
+      # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
+      # ==============================================
       - name: Cross-compile libsodium for Android aarch64
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -323,8 +326,8 @@ jobs:
           # 基础工具链配置（不影响主机Python运行时）
           export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
           export SYSROOT=${TOOLCHAIN}/sysroot
-          export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
-          export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
+          export CC=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
+          export CXX=\( {TOOLCHAIN}/bin/ \){{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
