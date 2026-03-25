@@ -2,9 +2,10 @@ name: Build py2droid Android aarch64 Python 3.14 Wheels
 on:
   workflow_dispatch:
 
-# 全局统一版本配置，避免版本不匹配问题
+# 全局统一版本配置，提前拆分避免运行时截取报错
 env:
-  PY_VERSION: "3.14.3"
+  PY_FULL_VERSION: "3.14.3"
+  PY_ABI_VERSION: "3.14"
   PY2DROID_VERSION: "v0.3.1"
   ANDROID_NDK_VERSION: "r27b"
   ANDROID_TARGET_ARCH: "aarch64-linux-android"
@@ -25,7 +26,7 @@ jobs:
       - name: Set up Host Python 3.14
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '${{ env.PY_ABI_VERSION }}'
           allow-prereleases: true
 
       # Android NDK 交叉编译核心工具链
@@ -50,8 +51,7 @@ jobs:
           python -m pip install -U pip wheel setuptools setuptools-rust maturin build auditwheel patchelf
 
       # ==============================================
-      # 【核心修复】适配py2droid环境，彻底解决404问题
-      # 优先使用py2droid自带头文件，缺失部分用官方同版本源码补充
+      # 适配py2droid环境，彻底解决404与解析报错问题
       # ==============================================
       - name: Prepare py2droid Python 3.14 cross-compile environment
         run: |
@@ -80,16 +80,16 @@ jobs:
           echo "校验py2droid核心库文件..."
           PY2DROID_PREFIX=$(pwd)/prefix
           PY2DROID_LIB_DIR=${PY2DROID_PREFIX}/lib
-          if [ ! -f "${PY2DROID_LIB_DIR}/libpython${{ env.PY_VERSION%.*}}.so" ]; then
-            echo "❌ 错误：未找到libpython${{ env.PY_VERSION%.*}}.so"
+          if [ ! -f "${PY2DROID_LIB_DIR}/libpython${{ env.PY_ABI_VERSION }}.so" ]; then
+            echo "❌ 错误：未找到libpython${{ env.PY_ABI_VERSION }}.so"
             exit 1
           fi
           echo "✅ 成功提取py2droid原生Python库"
           echo "py2droid lib目录: ${PY2DROID_LIB_DIR}"
           
-          # 3. 【关键修复】构建完整适配的Python头文件目录
-          echo "📥 准备Python ${{ env.PY_VERSION }} 编译头文件..."
-          PY2DROID_INCLUDE_DIR=${PY2DROID_PREFIX}/include/python${{ env.PY_VERSION%.*}}
+          # 3. 构建完整适配的Python头文件目录
+          echo "📥 准备Python ${{ env.PY_FULL_VERSION }} 编译头文件..."
+          PY2DROID_INCLUDE_DIR=${PY2DROID_PREFIX}/include/python${{ env.PY_ABI_VERSION }}
           
           # 优先使用py2droid自带的头文件，确保平台兼容性
           if [ -d "${PY2DROID_INCLUDE_DIR}" ] && [ -f "${PY2DROID_INCLUDE_DIR}/Python.h" ]; then
@@ -99,15 +99,15 @@ jobs:
             echo "⚠️ py2droid未带完整头文件，从Python官方源码补充"
             cd ../python_headers
             # 下载同版本官方源码，提取通用头文件
-            wget -O Python-${{ env.PY_VERSION }}.tgz \
-              https://www.python.org/ftp/python/${{ env.PY_VERSION }}/Python-${{ env.PY_VERSION }}.tgz \
+            wget -O Python-${{ env.PY_FULL_VERSION }}.tgz \
+              https://www.python.org/ftp/python/${{ env.PY_FULL_VERSION }}/Python-${{ env.PY_FULL_VERSION }}.tgz \
               --tries=5 --timeout=15
-            tar -xzf Python-${{ env.PY_VERSION }}.tgz
+            tar -xzf Python-${{ env.PY_FULL_VERSION }}.tgz
             
             # 合并官方通用头文件 + py2droid平台专属pyconfig.h
             FINAL_INCLUDE_DIR=$(pwd)/combined_include
             mkdir -p ${FINAL_INCLUDE_DIR}
-            cp -r Python-${{ env.PY_VERSION }}/Include/* ${FINAL_INCLUDE_DIR}/
+            cp -r Python-${{ env.PY_FULL_VERSION }}/Include/* ${FINAL_INCLUDE_DIR}/
             cp ${PY2DROID_INCLUDE_DIR}/pyconfig.h ${FINAL_INCLUDE_DIR}/ 2>/dev/null || true
             
             # 校验头文件完整性
@@ -120,10 +120,9 @@ jobs:
           
           echo "最终Python include目录: ${FINAL_INCLUDE_DIR}"
           
-          # 4. 导出核心路径到全局环境变量，供后续步骤使用
+          # 4. 导出核心路径到全局环境变量
           echo "PY2DROID_LIB_DIR=${PY2DROID_LIB_DIR}" >> $GITHUB_ENV
           echo "PY2DROID_INCLUDE_DIR=${FINAL_INCLUDE_DIR}" >> $GITHUB_ENV
-          echo "PYTHON_ABI_VERSION=${{ env.PY_VERSION%.*}}" >> $GITHUB_ENV
 
       - name: Build Android aarch64 wheels for py2droid
         env:
@@ -150,7 +149,7 @@ jobs:
           
           # PyO3交叉编译配置，完美适配py2droid环境
           export PYO3_CROSS=1
-          export PYO3_CROSS_PYTHON_VERSION=${PYTHON_ABI_VERSION}
+          export PYO3_CROSS_PYTHON_VERSION=${{ env.PY_ABI_VERSION }}
           export PYO3_CROSS_LIB_DIR=${PY2DROID_LIB_DIR}
           export PYO3_CROSS_INCLUDE_DIR=${PY2DROID_INCLUDE_DIR}
           export PYO3_NO_AUTO_LINK=1
@@ -159,10 +158,10 @@ jobs:
           # 生成PyO3专属配置文件，避免自动检测异常
           cat > pyo3-config.ini << EOF
           implementation=CPython
-          version=${PYTHON_ABI_VERSION}
+          version=${{ env.PY_ABI_VERSION }}
           shared=true
           abi3=true
-          lib_name=python${PYTHON_ABI_VERSION}
+          lib_name=python${{ env.PY_ABI_VERSION }}
           lib_dir=${PY2DROID_LIB_DIR}
           include_dir=${PY2DROID_INCLUDE_DIR}
           EOF
@@ -201,7 +200,7 @@ jobs:
               maturin build \
                 --release \
                 --target ${{ env.ANDROID_TARGET_ARCH }} \
-                --interpreter python${PYTHON_ABI_VERSION} \
+                --interpreter python${{ env.PY_ABI_VERSION }} \
                 --out ./dist \
                 --no-auto-link-python \
                 --abi3
