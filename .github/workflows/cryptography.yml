@@ -2,7 +2,7 @@ name: Build py2droid Android aarch64 Python 3.14 Wheels
 on:
   workflow_dispatch:
 
-# 全局统一版本配置，提前拆分避免运行时截取报错
+# 全局统一版本配置
 env:
   PY_FULL_VERSION: "3.14.3"
   PY_ABI_VERSION: "3.14"
@@ -10,6 +10,7 @@ env:
   ANDROID_NDK_VERSION: "r27b"
   ANDROID_TARGET_ARCH: "aarch64-linux-android"
   ANDROID_API_LEVEL: 24
+  LIBFFI_VERSION: "3.4.6"
 
 jobs:
   build_android_wheels:
@@ -46,12 +47,12 @@ jobs:
       - name: Install system build dependencies
         run: |
           sudo apt update
-          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils
+          sudo apt install -y make pkg-config patchelf binutils-aarch64-linux-gnu wget unzip xz-utils autoconf automake libtool
           # 安装Python构建工具
           python -m pip install -U pip wheel setuptools setuptools-rust maturin build auditwheel patchelf
 
       # ==============================================
-      # 适配py2droid环境，彻底解决404与解析报错问题
+      # 步骤1：准备py2droid Python 3.14交叉编译环境
       # ==============================================
       - name: Prepare py2droid Python 3.14 cross-compile environment
         run: |
@@ -80,6 +81,8 @@ jobs:
           echo "校验py2droid核心库文件..."
           PY2DROID_PREFIX=$(pwd)/prefix
           PY2DROID_LIB_DIR=${PY2DROID_PREFIX}/lib
+          PY2DROID_INCLUDE_DIR=${PY2DROID_PREFIX}/include/python${{ env.PY_ABI_VERSION }}
+          
           if [ ! -f "${PY2DROID_LIB_DIR}/libpython${{ env.PY_ABI_VERSION }}.so" ]; then
             echo "❌ 错误：未找到libpython${{ env.PY_ABI_VERSION }}.so"
             exit 1
@@ -87,30 +90,24 @@ jobs:
           echo "✅ 成功提取py2droid原生Python库"
           echo "py2droid lib目录: ${PY2DROID_LIB_DIR}"
           
-          # 3. 构建完整适配的Python头文件目录
+          # 3. 补充完整头文件（官方源码兜底）
           echo "📥 准备Python ${{ env.PY_FULL_VERSION }} 编译头文件..."
-          PY2DROID_INCLUDE_DIR=${PY2DROID_PREFIX}/include/python${{ env.PY_ABI_VERSION }}
-          
-          # 优先使用py2droid自带的头文件，确保平台兼容性
           if [ -d "${PY2DROID_INCLUDE_DIR}" ] && [ -f "${PY2DROID_INCLUDE_DIR}/Python.h" ]; then
             echo "✅ 检测到py2droid自带完整头文件，直接使用"
             FINAL_INCLUDE_DIR=${PY2DROID_INCLUDE_DIR}
           else
             echo "⚠️ py2droid未带完整头文件，从Python官方源码补充"
             cd ../python_headers
-            # 下载同版本官方源码，提取通用头文件
             wget -O Python-${{ env.PY_FULL_VERSION }}.tgz \
               https://www.python.org/ftp/python/${{ env.PY_FULL_VERSION }}/Python-${{ env.PY_FULL_VERSION }}.tgz \
               --tries=5 --timeout=15
             tar -xzf Python-${{ env.PY_FULL_VERSION }}.tgz
             
-            # 合并官方通用头文件 + py2droid平台专属pyconfig.h
             FINAL_INCLUDE_DIR=$(pwd)/combined_include
             mkdir -p ${FINAL_INCLUDE_DIR}
             cp -r Python-${{ env.PY_FULL_VERSION }}/Include/* ${FINAL_INCLUDE_DIR}/
             cp ${PY2DROID_INCLUDE_DIR}/pyconfig.h ${FINAL_INCLUDE_DIR}/ 2>/dev/null || true
             
-            # 校验头文件完整性
             if [ ! -f "${FINAL_INCLUDE_DIR}/Python.h" ]; then
               echo "❌ 错误：头文件构建失败，缺少核心Python.h"
               exit 1
@@ -121,9 +118,72 @@ jobs:
           echo "最终Python include目录: ${FINAL_INCLUDE_DIR}"
           
           # 4. 导出核心路径到全局环境变量
+          echo "PY2DROID_PREFIX=${PY2DROID_PREFIX}" >> $GITHUB_ENV
           echo "PY2DROID_LIB_DIR=${PY2DROID_LIB_DIR}" >> $GITHUB_ENV
           echo "PY2DROID_INCLUDE_DIR=${FINAL_INCLUDE_DIR}" >> $GITHUB_ENV
 
+      # ==============================================
+      # 步骤2：【核心修复】交叉编译Android aarch64版本libffi，解决ffi.h缺失问题
+      # ==============================================
+      - name: Cross-compile libffi for Android aarch64
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          # 配置工具链路径
+          export TOOLCHAIN=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64
+          export SYSROOT=${TOOLCHAIN}/sysroot
+          export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang
+          export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET_ARCH }}${{ env.ANDROID_API_LEVEL }}-clang++
+          export AR=${TOOLCHAIN}/bin/llvm-ar
+          export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
+          export STRIP=${TOOLCHAIN}/bin/llvm-strip
+          
+          # 创建libffi构建目录
+          mkdir -p libffi_build libffi_install
+          cd libffi_build
+          
+          # 下载官方libffi源码
+          echo "📥 下载libffi ${{ env.LIBFFI_VERSION }} 源码..."
+          wget -O libffi.tar.gz \
+            https://github.com/libffi/libffi/releases/download/v${{ env.LIBFFI_VERSION }}/libffi-${{ env.LIBFFI_VERSION }}.tar.gz \
+            --tries=5 --timeout=15
+          tar -xzf libffi.tar.gz --strip-components=1
+          
+          # 配置交叉编译参数
+          echo "🔧 配置libffi交叉编译..."
+          ./configure \
+            --host=${{ env.ANDROID_TARGET_ARCH }} \
+            --prefix=$(pwd)/../libffi_install \
+            --enable-shared \
+            --enable-static \
+            --with-sysroot=${SYSROOT}
+          
+          # 编译并安装
+          echo "🚀 编译libffi..."
+          make -j$(nproc)
+          make install
+          
+          # 校验编译产物
+          LIBFFI_INSTALL_DIR=$(pwd)/../libffi_install
+          if [ ! -f "${LIBFFI_INSTALL_DIR}/include/ffi.h" ] || [ ! -f "${LIBFFI_INSTALL_DIR}/lib/libffi.so" ]; then
+            echo "❌ 错误：libffi编译失败，缺少头文件或库文件"
+            exit 1
+          fi
+          
+          echo "✅ libffi交叉编译完成"
+          echo "libffi include目录: ${LIBFFI_INSTALL_DIR}/include"
+          echo "libffi lib目录: ${LIBFFI_INSTALL_DIR}/lib"
+          
+          # 导出libffi路径到全局环境变量
+          echo "LIBFFI_INSTALL_DIR=${LIBFFI_INSTALL_DIR}" >> $GITHUB_ENV
+          echo "LIBFFI_INCLUDE_DIR=${LIBFFI_INSTALL_DIR}/include" >> $GITHUB_ENV
+          echo "LIBFFI_LIB_DIR=${LIBFFI_INSTALL_DIR}/lib" >> $GITHUB_ENV
+          # 配置pkg-config路径，让cffi等包能自动找到依赖
+          echo "PKG_CONFIG_PATH=${LIBFFI_INSTALL_DIR}/lib/pkgconfig" >> $GITHUB_ENV
+
+      # ==============================================
+      # 步骤3：构建Android aarch64 wheels，完善交叉编译环境
+      # ==============================================
       - name: Build Android aarch64 wheels for py2droid
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -138,6 +198,18 @@ jobs:
           export AR=${TOOLCHAIN}/bin/llvm-ar
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
+          
+          # 【关键修复】全量交叉编译CFLAGS/LDFLAGS，优先使用Android版本头文件和依赖
+          export CPPFLAGS="-I${PY2DROID_INCLUDE_DIR} -I${LIBFFI_INCLUDE_DIR} --sysroot=${SYSROOT}"
+          export CFLAGS="${CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
+          export CXXFLAGS="${CFLAGS}"
+          export LDFLAGS="-L${PY2DROID_LIB_DIR} -L${LIBFFI_LIB_DIR} -L${SYSROOT}/usr/lib/${{ env.ANDROID_TARGET_ARCH }}/${{ env.ANDROID_API_LEVEL }} --sysroot=${SYSROOT} -Wl,--allow-shlib-undefined"
+          
+          # 【关键修复】Python交叉编译核心环境变量，强制setuptools识别交叉编译
+          export _PYTHON_HOST_PLATFORM="android-aarch64"
+          export PYTHON_CROSSENV=1
+          export PYTHONPATH="${PY2DROID_LIB_DIR}/python${{ env.PY_ABI_VERSION }}"
+          export PYTHONNOUSERSITE=1
           
           # Rust Android交叉编译核心配置
           export CARGO_BUILD_TARGET=${{ env.ANDROID_TARGET_ARCH }}
@@ -155,7 +227,7 @@ jobs:
           export PYO3_NO_AUTO_LINK=1
           export PYO3_ABI3=1
           
-          # 生成PyO3专属配置文件，避免自动检测异常
+          # 生成PyO3专属配置文件
           cat > pyo3-config.ini << EOF
           implementation=CPython
           version=${{ env.PY_ABI_VERSION }}
