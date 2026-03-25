@@ -279,14 +279,18 @@ jobs:
           mkdir -p dist raw_wheels
           
           # 定义需要编译的包
+                    # 定义需要编译的包（把 paramiko 的所有二进制依赖都加上）
           declare -A pkgs
           pkgs=( 
-            ["cffi"]="cffi>=1.17.0" 
+            ["cffi"]="cffi>=1.17.2" 
+            ["pynacl"]="pynacl>=1.5.0"
             ["bcrypt"]="bcrypt>=4.0.0" 
             ["cryptography"]="cryptography>=43.0.0"
             ["pydantic-core"]="pydantic-core" 
             ["paramiko"]="paramiko>=3.0.0"
+            ["invoke"]="invoke>=2.0.0"
           )
+
           
                     # 循环构建每个包
           for pkg_name in "${!pkgs[@]}"; do
