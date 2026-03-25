@@ -268,6 +268,9 @@ jobs:
       # ==============================================
       # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
       # ==============================================
+      # ==============================================
+      # 步骤3.5：交叉编译 libsodium（解决 pynacl configure 失败）
+      # ==============================================
       - name: Cross-compile libsodium for Android aarch64
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -332,13 +335,13 @@ jobs:
           export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
           export STRIP=${TOOLCHAIN}/bin/llvm-strip
           
-          # 编译链接参数
+          # 编译链接参数（已包含 libsodium）
           export CPPFLAGS="-I\( {PY2DROID_INCLUDE_DIR} -I \){LIBFFI_INCLUDE_DIR} -I\( {OPENSSL_INCLUDE_DIR} -I \){LIBSODIUM_INCLUDE_DIR} --sysroot=${SYSROOT}"
           export CFLAGS="\( {CPPFLAGS} -fPIC -O2 -DANDROID -D__ANDROID_API__= \){{ env.ANDROID_API_LEVEL }}"
           export CXXFLAGS="${CFLAGS}"
           export LDFLAGS="-L\( {PY2DROID_LIB_DIR} -L \){LIBFFI_LIB_DIR} -L\( {OPENSSL_LIB_DIR} -L \){LIBSODIUM_LIB_DIR} -L\( {SYSROOT}/usr/lib/ \){{ env.ANDROID_TARGET_ARCH }}/\( {{ env.ANDROID_API_LEVEL }} --sysroot= \){SYSROOT} -Wl,--allow-shlib-undefined"
           
-          # PKG_CONFIG 也加上 libsodium（pynacl system 模式会用）
+          # PKG_CONFIG 也加上 libsodium
           export PKG_CONFIG_PATH="\( {PKG_CONFIG_PATH}: \){LIBSODIUM_LIB_DIR}/pkgconfig"
           
           # Rust交叉编译配置
