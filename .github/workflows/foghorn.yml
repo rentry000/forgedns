@@ -1,4 +1,4 @@
-name: Build foghorn for Android arm64-v8a
+name: Build foghorn Android arm64-v8a
 
 on:
   workflow_dispatch:
@@ -12,32 +12,27 @@ jobs:
         with:
           repository: zallison/foghorn
 
-      - name: Install dependencies
+      - name: Install Python & dependencies
         run: |
-          sudo apt update && sudo apt install -y python3-pip gcc-aarch64-linux-gnu
+          sudo apt update -y
+          sudo apt install -y python3-pip python3-venv
           python3 -m venv venv
           source venv/bin/activate
           pip install --upgrade pip
           pip install dnslib pyyaml python-dotenv
           pip install pyinstaller
 
-      - name: Build Linux arm64 binary (runs on Android arm64-v8a)
+      - name: Build binary
         run: |
           source venv/bin/activate
-          mkdir -p dist
-
           pyinstaller \
             --onefile \
-            --target-arch aarch64 \
-            --name foghorn-arm64 \
+            --name foghorn-android-arm64 \
             --add-data "config.example.yaml:." \
             --add-data "foghorn/plugins:foghorn/plugins" \
-            foghorn/cli.py
+            src/main.py  # ✅ 完全正确的入口
 
-      - name: Prepare artifact
-        run: mv dist/foghorn-arm64 dist/foghorn-android-arm64
-
-      - name: Upload
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-v8a
