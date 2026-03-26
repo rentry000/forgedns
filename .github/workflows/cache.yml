@@ -1,110 +1,147 @@
-name: Build Android arm64 Static Binary
+name: Build libffi for Android aarch64
+
 on:
   push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
-    permissions:
-      contents: write
-
-permissions:
-  contents: write
 
 jobs:
-  build-android-arm64:
-    name: Build Android arm64 Static Binary
+  build-libffi:
     runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: r26b
+      NDK_URL: https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+      NDK_SHA256: ad73c0370f0b0a87d1671ed2fd5a9ac9acfd1eb5c43a7fbfbd330f85d19dd632
+      TARGET_API: 21
+      TARGET_ARCH: aarch64-linux-android
+      BUILD_ARCH: x86_64-linux-gnu
+
     steps:
-      - name: Checkout Code
+      - name: Checkout libffi 稳定版源码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          repository: libffi/libffi
+          ref: v3.4.6
+          path: libffi
+          clean: true
 
-      - name: Setup Go Environment
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22.x'
-          check-latest: true
-          cache: true
-
-      - name: Build Preparation
+      - name: 安装全量构建依赖（无遗漏）
         run: |
-          mkdir -p build_output
-          rm -rf build_output/*
-          echo "BUILD_VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          echo "BUILD_TIME=$(date +%Y-%m-%d_%H-%M-%S)" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            libtool \
+            autoconf-archive \
+            pkg-config \
+            make \
+            gcc \
+            g++ \
+            curl \
+            unzip \
+            m4 \
+            coreutils
 
-      # 新增：核心修复步骤，自动初始化Go模块，兼容有无go.mod的情况
-      - name: Fix Go Module Missing
+      - name: 下载并安装Android NDK
         run: |
-          if [ ! -f go.mod ]; then
-            echo "未找到go.mod，自动初始化Go模块"
-            # 模块名可自定义，不影响编译结果
-            go mod init forgedns
-            go mod tidy
-          else
-            echo "已存在go.mod，自动补齐依赖"
-            go mod tidy
-          fi
+          curl -fSL --retry 5 --retry-delay 10 -o android-ndk.zip $NDK_URL
+          echo "$NDK_SHA256  android-ndk.zip" | sha256sum --check --status
+          unzip -q android-ndk.zip
+          mv android-ndk-$NDK_VERSION $HOME/android-ndk
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
-      # 核心交叉编译步骤，保持之前的静态编译配置不变
-      - name: Cross Compile Static Binary
+      - name: 分步可控预构建（三重保障解决宏缺失）
         run: |
-          CGO_ENABLED=0 \
-          GOOS=android \
-          GOARCH=arm64 \
-          go build \
-          -ldflags "-w -s -extldflags '-static' -X main.version=${{ env.BUILD_VERSION }} -X main.buildTime=${{ env.BUILD_TIME }}" \
-          -o build_output/forgedns-android-arm64
-
-      - name: Validate Static Binary
-        run: |
-          echo "===== 二进制文件信息校验 ====="
-          file build_output/forgedns-android-arm64
+          cd libffi
           
-          echo "===== 静态链接校验 ====="
-          if file build_output/forgedns-android-arm64 | grep -q "statically linked"; then
-            echo "✅ 校验通过：已编译为完全静态二进制，无外部依赖"
-          else
-            echo "❌ 校验失败：二进制非静态链接，存在运行依赖"
-            exit 1
-          fi
+          # 1. 安全清理：仅删除自动生成的文件，绝不删除源码自带的m4宏
+          rm -rf autom4te.cache configure aclocal.m4 ltmain.sh config.h.in fficonfig.h.in
+          find . -name "Makefile.in" -delete
+          mkdir -p m4
           
-          echo "===== 架构校验 ====="
-          if file build_output/forgedns-android-arm64 | grep -q "ARM aarch64"; then
-            echo "✅ 校验通过：目标架构为arm64(aarch64)，适配安卓设备"
-          else
-            echo "❌ 校验失败：架构不匹配，非arm64架构"
+          # 2. 【第一重保障】强制复制libtool全量宏到项目m4目录
+          # 确保LT_SYS_SYMBOL_USCORE所在的libtool.m4被完整复制到项目中
+          libtoolize --force --copy --install
+          
+          # 3. 【第二重保障】兜底注入LT_SYS_SYMBOL_USCORE宏定义
+          # 不管系统libtool是否正确加载，autoconf都能100%找到该宏
+          cat > m4/lt_sys_symbol_underscore.m4 << 'EOF'
+AC_DEFUN([LT_SYS_SYMBOL_USCORE],
+[AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
+[lt_cv_sys_symbol_underscore],
+[AC_LINK_IFELSE([AC_LANG_PROGRAM([],
+[[extern int foo(); int main() { return foo(); }]])],
+[AC_LINK_IFELSE([AC_LANG_PROGRAM([],
+[[extern int _foo(); int main() { return _foo(); }]])],
+[lt_cv_sys_symbol_underscore=yes],
+[lt_cv_sys_symbol_underscore=no])],
+[AC_MSG_ERROR([cannot check for symbol underscore])])])
+AS_IF([test "$lt_cv_sys_symbol_underscore" = yes],
+[AC_DEFINE([SYMBOL_UNDERSCORE], 1,
+[Define to 1 if C symbols are prefixed with an underscore.])])
+])
+EOF
+          
+          # 4. 【第三重保障】显式加载所有宏，强制生成aclocal.m4
+          # 同时加载项目m4目录和系统宏目录，确保无遗漏
+          aclocal --force -I m4 -I /usr/share/aclocal
+          
+          # 5. 分步生成所有必须文件，完全可控无遗漏
+          autoheader --force -I m4
+          automake --add-missing --copy --force --foreign
+          autoconf --force -I m4
+          
+          # 6. 前置校验：提前拦截所有问题
+          test -f configure || { echo "ERROR: configure脚本生成失败！"; exit 1; }
+          test -f fficonfig.h.in || { echo "ERROR: fficonfig.h.in生成失败！"; exit 1; }
+          grep -q "LT_SYS_SYMBOL_USCORE" aclocal.m4 || {
+            echo "ERROR: LT_SYS_SYMBOL_USCORE宏未被加载到aclocal.m4！"
+            cat m4/lt_sys_symbol_underscore.m4
             exit 1
-          fi
+          }
 
-      - name: Package & Generate Checksum
+      - name: 交叉编译libffi for Android aarch64
         run: |
-          cp LICENSE README.md build_output/ 2>/dev/null || true
-          cd build_output
-          zip -9 forgedns-android-arm64.zip forgedns-android-arm64 LICENSE README.md
-          sha256sum forgedns-android-arm64.zip > forgedns-android-arm64.zip.sha256
-          sha256sum forgedns-android-arm64 > forgedns-android-arm64.sha256
-          echo "===== 构建产物列表 ====="
-          ls -lh
+          cd libffi
+          
+          # 完整Android交叉编译工具链配置
+          export TARGET=$TARGET_ARCH
+          export API=$TARGET_API
+          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export AS=$TOOLCHAIN/bin/llvm-as
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export SYSROOT=$TOOLCHAIN/sysroot
+          
+          # 交叉编译兜底：直接指定检查结果，跳过无法执行的运行时测试
+          export lt_cv_sys_symbol_underscore=no
+          
+          # 官方标准Android编译配置
+          ./configure \
+            --build=$BUILD_ARCH \
+            --host=$TARGET \
+            --prefix=$PWD/build \
+            --disable-shared \
+            --enable-static \
+            --with-sysroot=$SYSROOT \
+            --disable-docs \
+            --disable-maintainer-mode \
+            --disable-dependency-tracking
+          
+          # 并行编译安装+产物验证
+          make -j$(nproc)
+          make install
+          
+          echo "===== 构建产物验证 ====="
+          ls -la build/lib/
+          ls -la build/include/
+          file build/lib/libffi.a | grep "aarch64"
 
-      - name: Upload Build Artifact
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: forgedns-android-arm64
-          path: build_output/*
-          retention-days: 90
-
-      - name: Publish to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Release ${{ env.BUILD_VERSION }}
-          files: |
-            build_output/forgedns-android-arm64.zip
-            build_output/forgedns-android-arm64.zip.sha256
-            build_output/forgedns-android-arm64
-            build_output/forgedns-android-arm64.sha256
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: libffi-android-aarch64
+          path: libffi/build
