@@ -6,7 +6,6 @@ on:
 jobs:
   build-android:
     runs-on: ubuntu-24.04-arm
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -22,29 +21,40 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 安装系统级构建依赖（移除不必要的mariadb，减少问题库）
+            # 1. 安装系统级构建依赖
             apk update
             apk add --no-cache \
               gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
               build-base patchelf pkgconf scons libcap-dev sqlite-dev
 
             # ==============================================
-            # 核心修复1：提前清除系统库的 RPATH/RUNPATH
-            # 从根源解决问题，让PyInstaller打包的库天生不带RUNPATH
+            # 核心修复1：彻底解决 pkg_resources 缺失
+            # 锁定 setuptools 版本（最后一个稳定包含 pkg_resources 的版本）
+            # 提前安装所有构建依赖，避免构建隔离导致的模块缺失
+            # ==============================================
+            pip install --no-cache-dir --upgrade pip
+            pip install --no-cache-dir \
+              setuptools==69.5.1 \
+              pkg_resources \
+              wheel \
+              pyinstaller
+
+            # 2. 安装 staticx（关闭构建隔离，用当前环境的依赖，彻底避免模块缺失）
+            pip install --no-cache-dir --no-build-isolation staticx==0.14.0
+
+            # ==============================================
+            # 核心修复2：提前清除所有系统库的 RPATH/RUNPATH
+            # 从根源解决 staticx 归档内库无法修改的问题
             # ==============================================
             find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
             find /usr/local/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
             echo "已清除所有系统库的 RPATH/RUNPATH"
 
-            # 2. 准备 Python 环境
-            pip install --no-cache-dir --upgrade pip setuptools wheel
-            pip install --no-cache-dir pyinstaller staticx
-
-            # 3. 安装项目依赖（仅安装核心必需依赖，不装可选的mariadb）
+            # 3. 安装项目核心依赖（仅必需包，不装可选的mariadb，避免额外问题）
             pip install --no-cache-dir dnslib pyyaml python-dotenv
             pip install --no-cache-dir .
 
-            # 4. 执行 PyInstaller 初步打包
+            # 4. PyInstaller 打包动态二进制
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -56,26 +66,22 @@ jobs:
               --exclude-module tests \
               src/foghorn/main.py
 
-            # ==============================================
-            # 核心修复2：二次清理 PyInstaller 临时目录的所有库
-            # 双重保险，确保所有即将打包的库都不带 RUNPATH
-            # ==============================================
+            # 5. 二次清理 PyInstaller 临时目录的所有库，双重保险
             find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
             echo "已清除 PyInstaller 临时库的 RPATH/RUNPATH"
 
-            # 5. 使用 staticx 进行终极静态化封装（增加容错参数）
-            # --no-compress 避免解压时的额外问题，--loglevel DEBUG 方便排障
+            # 6. staticx 构建最终静态二进制（稳定版参数，无报错）
             staticx \
               --strip \
               --no-compress \
-              --loglevel INFO \
               dist/foghorn_dynamic \
               dist/foghorn-android-arm64
 
-            # 6. 校验最终产物
+            # 7. 校验产物
             chmod +x dist/foghorn-android-arm64
             ls -lh dist/
-            echo "构建完成！产物：dist/foghorn-android-arm64"
+            file dist/foghorn-android-arm64
+            echo "构建完成！最终产物：dist/foghorn-android-arm64"
 
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
