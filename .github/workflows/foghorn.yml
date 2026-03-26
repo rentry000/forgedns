@@ -20,45 +20,66 @@ jobs:
           image: arm64v8/python:3.11-alpine
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
-            set -e
+            set -euxo pipefail
 
-            # 1. 安装系统级构建依赖
+            # 1. 安装系统级构建依赖（移除不必要的mariadb，减少问题库）
             apk update
             apk add --no-cache \
               gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
-              build-base patchelf mariadb-dev mariadb-connector-c-dev pkgconf \
-              scons libcap-dev
+              build-base patchelf pkgconf scons libcap-dev sqlite-dev
+
+            # ==============================================
+            # 核心修复1：提前清除系统库的 RPATH/RUNPATH
+            # 从根源解决问题，让PyInstaller打包的库天生不带RUNPATH
+            # ==============================================
+            find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            find /usr/local/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            echo "已清除所有系统库的 RPATH/RUNPATH"
 
             # 2. 准备 Python 环境
-            pip install --no-cache-dir --upgrade pip
-            pip install --no-cache-dir setuptools wheel pyinstaller
+            pip install --no-cache-dir --upgrade pip setuptools wheel
+            pip install --no-cache-dir pyinstaller staticx
 
-            # 3. 安装 staticx (禁用编译隔离)
-            pip install --no-cache-dir --no-build-isolation staticx
+            # 3. 安装项目依赖（仅安装核心必需依赖，不装可选的mariadb）
+            pip install --no-cache-dir dnslib pyyaml python-dotenv
+            pip install --no-cache-dir .
 
-            # 4. 安装项目依赖
-            pip install .
-
-            # 5. 执行 PyInstaller 初步打包
+            # 4. 执行 PyInstaller 初步打包
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
               --collect-all foghorn \
-              --hidden-import mariadb \
+              --hidden-import dnslib \
+              --hidden-import yaml \
+              --hidden-import dotenv \
+              --exclude-module mariadb \
+              --exclude-module tests \
               src/foghorn/main.py
 
-            # 6. 核心修正：清理 DT_RUNPATH 解决 staticx 报错
-            # PyInstaller 会在构建目录生成临时的 .so 文件，我们需要清除它们的 RPATH
-            find build/foghorn_dynamic -name "*.so*" -exec patchelf --remove-rpath {} \; || true
+            # ==============================================
+            # 核心修复2：二次清理 PyInstaller 临时目录的所有库
+            # 双重保险，确保所有即将打包的库都不带 RUNPATH
+            # ==============================================
+            find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            echo "已清除 PyInstaller 临时库的 RPATH/RUNPATH"
 
-            # 7. 使用 staticx 进行终极静态化封装
-            # 加上 --strip 减小体积，并指向清理后的动态文件
-            staticx --strip dist/foghorn_dynamic dist/foghorn-android-arm64
+            # 5. 使用 staticx 进行终极静态化封装（增加容错参数）
+            # --no-compress 避免解压时的额外问题，--loglevel DEBUG 方便排障
+            staticx \
+              --strip \
+              --no-compress \
+              --loglevel INFO \
+              dist/foghorn_dynamic \
+              dist/foghorn-android-arm64
 
+            # 6. 校验最终产物
             chmod +x dist/foghorn-android-arm64
+            ls -lh dist/
+            echo "构建完成！产物：dist/foghorn-android-arm64"
 
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64
           path: dist/foghorn-android-arm64
+          retention-days: 30
