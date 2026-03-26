@@ -1,7 +1,7 @@
-name: Build foghorn Android arm64-v8a | 全依赖完整版
+name: Build foghorn Android arm64-v8a
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -9,28 +9,31 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout 项目源码
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
           fetch-depth: 1
 
-      - name: 安装 Python
-        uses: setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 安装 foghorn 全部真实依赖（无多余包）
+      # 👇 直接装系统 Python，不用 setup-python Action
+      - name: Install system Python & build tools
         run: |
-          python -m venv venv
+          sudo apt update -y
+          sudo apt install -y python3 python3-pip python3-venv build-essential
+
+      - name: Install ALL real dependencies
+        run: |
+          python3 -m venv venv
           source venv/bin/activate
           pip install --upgrade pip
-          # 👇 这就是项目用到的「所有第三方依赖」，一个不漏
+          
+          # 👇 这是 foghorn 全部真实依赖，一个不漏
           pip install dnslib pyyaml python-dotenv
-          # 安装编译工具
+          
+          # 编译工具
           pip install nuitka ordered-set
 
-      - name: 编译 Android arm64-v8a 单二进制
+      - name: Build Android arm64-v8a binary
         run: |
           source venv/bin/activate
           mkdir -p dist/android
@@ -50,10 +53,10 @@ jobs:
             --hidden-import=asyncio \
             foghorn/cli.py
 
-      - name: 添加可执行权限
+      - name: Chmod executable
         run: chmod +x dist/android/foghorn-arm64
 
-      - name: 上传最终二进制
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-v8a
