@@ -62,21 +62,21 @@ jobs:
           
           # 3. 【核心兜底】手动注入LT_SYS_SYMBOL_USCORE宏定义，彻底解决未定义问题
           cat > m4/ltsys_underscore.m4 << 'EOF'
-AC_DEFUN([LT_SYS_SYMBOL_USCORE],
-[AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
-[lt_cv_sys_symbol_underscore],
-[AC_LINK_IFELSE([AC_LANG_PROGRAM([],
-[[extern int foo(); int main() { return foo(); }]])],
-[AC_LINK_IFELSE([AC_LANG_PROGRAM([],
-[[extern int _foo(); int main() { return _foo(); }]])],
-[lt_cv_sys_symbol_underscore=yes],
-[lt_cv_sys_symbol_underscore=no])],
-[AC_MSG_ERROR([cannot check for symbol underscore])])])
-AS_IF([test "$lt_cv_sys_symbol_underscore" = yes],
-[AC_DEFINE([SYMBOL_UNDERSCORE], 1,
-[Define to 1 if C symbols are prefixed with an underscore.])])
-])
-EOF
+          AC_DEFUN([LT_SYS_SYMBOL_USCORE],
+          [AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
+          [lt_cv_sys_symbol_underscore],
+          [AC_LINK_IFELSE([AC_LANG_PROGRAM([],
+          [[extern int foo(); int main() { return foo(); }]])],
+          [AC_LINK_IFELSE([AC_LANG_PROGRAM([],
+          [[extern int _foo(); int main() { return _foo(); }]])],
+          [lt_cv_sys_symbol_underscore=yes],
+          [lt_cv_sys_symbol_underscore=no])],
+          [AC_MSG_ERROR([cannot check for symbol underscore])])])
+          AS_IF([test "$lt_cv_sys_symbol_underscore" = yes],
+          [AC_DEFINE([SYMBOL_UNDERSCORE], 1,
+          [Define to 1 if C symbols are prefixed with an underscore.])])
+          ])
+          EOF
           
           # 4. 前置校验：确认宏已存在，提前拦截问题
           grep -q "LT_SYS_SYMBOL_USCORE" m4/*.m4 || {
