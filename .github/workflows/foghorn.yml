@@ -1,40 +1,34 @@
-name: Build foghorn for Android arm64-v8a
+name: Build foghorn Android arm64-v8a
 
 on:
-  workflow_dispatch:  # 手动点一下就编译
-  push:
-    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build-foghorn-android-arm64:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - name: Checkout foghorn
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
           fetch-depth: 1
 
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup_ndk
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          ndk-version: r26b
-          add-to-path: true
+          python-version: '3.11'
 
-      - name: Install Python & build tools
+      - name: Install dependencies from pyproject.toml
         run: |
-          sudo apt update -y
-          sudo apt install -y python3 python3-pip python3-venv build-essential
-          python3 -m venv venv
+          python -m venv venv
           source venv/bin/activate
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install .
           pip install nuitka ordered-set
 
-      - name: Build standalone arm64 binary
+      - name: Build Android arm64-v8a binary
         run: |
           source venv/bin/activate
           mkdir -p dist/android
@@ -50,12 +44,10 @@ jobs:
             --include-data-dir=foghorn/plugins=foghorn/plugins \
             --hidden-import=dnslib \
             --hidden-import=yaml \
-            --hidden-import=asyncio \
-            --hidden-import=paramiko \
-            --hidden-import=cryptography \
+            --hidden-import=dotenv \
             foghorn/cli.py
 
-      - name: Chmod executable
+      - name: Make executable
         run: chmod +x dist/android/foghorn-arm64
 
       - name: Upload artifact
@@ -63,4 +55,3 @@ jobs:
         with:
           name: foghorn-android-arm64-v8a
           path: dist/android/foghorn-arm64
-          retention-days: 30
