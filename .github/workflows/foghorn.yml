@@ -1,5 +1,4 @@
 name: Build Foghorn Android ARM64
-
 on:
   workflow_dispatch:
 
@@ -7,13 +6,22 @@ jobs:
   build-android:
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Checkout Code
+      - name: Checkout 项目源码
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
           ref: main
+          fetch-depth: 1
 
-      - name: Build Static Binary in Alpine Container
+      - name: 移除数据库可选依赖（根治mariadb编译报错）
+        run: |
+          # 直接修改pyproject.toml，删除会触发编译报错的数据库依赖
+          sed -i '/mariadb/d' pyproject.toml
+          sed -i '/psycopg2/d' pyproject.toml
+          sed -i '/influxdb/d' pyproject.toml
+          echo "已移除所有会触发编译失败的数据库可选依赖"
+
+      - name: 构建静态二进制
         uses: addnab/docker-run-action@v3
         with:
           image: arm64v8/python:3.11-alpine
@@ -21,45 +29,39 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 安装系统级构建依赖
+            # 1. 安装系统级构建依赖（全量覆盖项目所需）
             apk update
             apk add --no-cache \
               gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
               build-base patchelf pkgconf scons libcap-dev sqlite-dev
 
-            # ==============================================
-            # 核心修复1：彻底解决 pkg_resources 问题
-            # 1. 移除错误的 pkg_resources 安装（它不是独立包）
-            # 2. 锁定稳定版 setuptools（内置完整的 pkg_resources）
-            # 3. 关闭 root 用户 pip 警告
-            # ==============================================
+            # 2. 配置Python环境，安装稳定版工具链
             pip install --no-cache-dir --upgrade pip --root-user-action ignore
             pip install --no-cache-dir \
               setuptools==69.5.1 \
               wheel \
               pyinstaller \
               --root-user-action ignore
-
-            # 2. 安装 staticx（关闭构建隔离，直接使用当前环境的 setuptools）
-            # 彻底避免构建隔离环境里 pkg_resources 找不到的问题
+            
+            # 安装稳定版staticx（0.13.9无被撤回问题，兼容musl）
             pip install --no-cache-dir \
               --no-build-isolation \
-              staticx==0.14.0 \
+              staticx==0.13.9 \
               --root-user-action ignore
 
-            # ==============================================
-            # 核心修复2：提前清除所有系统库的 RPATH/RUNPATH
-            # 从根源解决 staticx 归档内库无法修改的问题
-            # ==============================================
-            find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
-            find /usr/local/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
-            echo "已清除所有系统库的 RPATH/RUNPATH"
-
-            # 3. 安装项目核心依赖（仅必需包，不装可选的mariadb，避免额外问题）
-            pip install --no-cache-dir dnslib pyyaml python-dotenv --root-user-action ignore
+            # 3. 安装项目完整依赖（已移除mariadb，无编译报错）
             pip install --no-cache-dir . --root-user-action ignore
 
-            # 4. PyInstaller 打包动态二进制
+            # ==============================================
+            # 核心修复：全链路清除RPATH/RUNPATH，根治staticx报错
+            # ==============================================
+            # 清理系统库
+            find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            # 清理Python依赖库
+            find /usr/local/lib/python3.11/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            echo "已完成全量RPATH/RUNPATH清理"
+
+            # 4. PyInstaller打包动态二进制（全量包含项目模块+插件）
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -67,30 +69,36 @@ jobs:
               --hidden-import dnslib \
               --hidden-import yaml \
               --hidden-import dotenv \
+              --hidden-import cachetools \
+              --hidden-import cryptography \
+              --hidden-import dnspython \
+              --hidden-import docker \
+              --hidden-import fastapi \
+              --hidden-import jsonschema \
               --exclude-module mariadb \
               --exclude-module tests \
               src/foghorn/main.py
 
-            # 5. 二次清理 PyInstaller 临时目录的所有库，双重保险
+            # 二次清理PyInstaller临时目录的库，双重保险
             find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
-            echo "已清除 PyInstaller 临时库的 RPATH/RUNPATH"
+            echo "已清理PyInstaller临时库RPATH/RUNPATH"
 
-            # 6. staticx 构建最终静态二进制（稳定版参数，无报错）
+            # 5. staticx构建最终静态二进制（Android arm64直接可用）
             staticx \
               --strip \
               --no-compress \
               dist/foghorn_dynamic \
               dist/foghorn-android-arm64
 
-            # 7. 校验产物
+            # 6. 校验产物
             chmod +x dist/foghorn-android-arm64
             ls -lh dist/
             file dist/foghorn-android-arm64
             echo "构建完成！最终产物：dist/foghorn-android-arm64"
 
-      - name: Upload Binary Artifact
+      - name: 上传最终二进制产物
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64
+          name: foghorn-android-arm64-v8a
           path: dist/foghorn-android-arm64
           retention-days: 30
