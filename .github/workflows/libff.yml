@@ -7,6 +7,13 @@ on:
 jobs:
   build-libffi:
     runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: r26b
+      NDK_URL: https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+      NDK_SHA256: 53d11a3a4a8a7f9a8b7a6a5a4a3a2a1a0a9a8b7c6d5e4f3a2b1c0d9e8f7a6
+      TARGET_API: 21
+      TARGET_ARCH: aarch64-linux-android
+
     steps:
       - name: Checkout libffi 稳定版源码
         uses: actions/checkout@v4
@@ -14,11 +21,12 @@ jobs:
           repository: libffi/libffi
           ref: v3.4.6
           path: libffi
+          clean: true # 强制清理目录，杜绝旧文件残留干扰
 
-      - name: 安装完整构建依赖
+      - name: 安装完整构建依赖（强制重装确保文件完整）
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --reinstall \
             autoconf \
             automake \
             libtool \
@@ -28,27 +36,67 @@ jobs:
             g++ \
             curl \
             unzip \
-            m4
+            m4 \
+            sha256sum
 
-      - name: 安装Android NDK（修复版本为稳定v1）
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26b
-          link-to-sdk: true
+      - name: 下载并安装Android NDK（官方原生无第三方依赖）
+        run: |
+          curl -fSL --retry 5 --retry-delay 10 -o android-ndk.zip $NDK_URL
+          echo "$NDK_SHA256  android-ndk.zip" | sha256sum --check --status
+          unzip -q android-ndk.zip
+          mv android-ndk-$NDK_VERSION $HOME/android-ndk
+          echo "ANDROID_NDK_HOME=$HOME/android-ndk" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
-      - name: 构建libffi for aarch64-linux-android
+      - name: 修复宏缺失问题+预构建配置
         run: |
           cd libffi
           
-          # 彻底解决 LT_SYS_SYMBOL_USCORE 宏缺失报错
-          libtoolize --force --copy
+          # 1. 彻底清理所有旧构建缓存，杜绝残留干扰
+          rm -rf autom4te.cache configure aclocal.m4 ltmain.sh Makefile.in */Makefile.in
+          mkdir -p m4 && rm -rf m4/*
+          
+          # 2. 强制复制libtool完整宏文件到项目目录
+          libtoolize --force --copy --install
+          
+          # 3. 【核心兜底】手动注入LT_SYS_SYMBOL_USCORE宏定义，彻底解决未定义问题
+          cat > m4/ltsys_underscore.m4 << 'EOF'
+AC_DEFUN([LT_SYS_SYMBOL_USCORE],
+[AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
+[lt_cv_sys_symbol_underscore],
+[AC_LINK_IFELSE([AC_LANG_PROGRAM([],
+[[extern int foo(); int main() { return foo(); }]])],
+[AC_LINK_IFELSE([AC_LANG_PROGRAM([],
+[[extern int _foo(); int main() { return _foo(); }]])],
+[lt_cv_sys_symbol_underscore=yes],
+[lt_cv_sys_symbol_underscore=no])],
+[AC_MSG_ERROR([cannot check for symbol underscore])])])
+AS_IF([test "$lt_cv_sys_symbol_underscore" = yes],
+[AC_DEFINE([SYMBOL_UNDERSCORE], 1,
+[Define to 1 if C symbols are prefixed with an underscore.])])
+])
+EOF
+          
+          # 4. 前置校验：确认宏已存在，提前拦截问题
+          grep -q "LT_SYS_SYMBOL_USCORE" m4/*.m4 || {
+            echo "ERROR: LT_SYS_SYMBOL_USCORE macro not found!"
+            ls -la m4/
+            exit 1
+          }
+          
+          # 5. 强制重新生成构建文件，显式指定宏目录
           aclocal --force -I m4
-          autoreconf -fiv -I m4
+          autoconf --force -I m4
+          automake --add-missing --copy --force
+
+      - name: 交叉编译libffi for Android aarch64
+        run: |
+          cd libffi
           
           # 完整Android交叉编译工具链配置
-          export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
-          export TARGET=aarch64-linux-android
-          export API=21
+          export TARGET=$TARGET_ARCH
+          export API=$TARGET_API
           export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
           export AR=$TOOLCHAIN/bin/llvm-ar
@@ -65,14 +113,14 @@ jobs:
             --enable-static \
             --with-sysroot=$SYSROOT
           
-          # 并行编译安装+产物验证
+          # 并行编译安装+产物架构验证
           make -j$(nproc)
           make install
           
           echo "===== 构建产物验证 ====="
           ls -la build/lib/
           ls -la build/include/
-          file build/lib/libffi.a
+          file build/lib/libffi.a | grep "aarch64"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
