@@ -1,0 +1,66 @@
+name: Build foghorn for Android arm64-v8a
+
+on:
+  workflow_dispatch:  # 手动点一下就编译
+  push:
+    branches: [ main ]
+
+jobs:
+  build-foghorn-android-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout foghorn
+        uses: actions/checkout@v4
+        with:
+          repository: zallison/foghorn
+          fetch-depth: 1
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup_ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Install Python & build tools
+        run: |
+          sudo apt update -y
+          sudo apt install -y python3 python3-pip python3-venv build-essential
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nuitka ordered-set
+
+      - name: Build standalone arm64 binary
+        run: |
+          source venv/bin/activate
+          mkdir -p dist/android
+
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --linux-android \
+            --android-arch=arm64-v8a \
+            --output-filename=foghorn-arm64 \
+            --output-dir=dist/android \
+            --include-data-file=config.example.yaml=config.example.yaml \
+            --include-data-dir=foghorn/plugins=foghorn/plugins \
+            --hidden-import=dnslib \
+            --hidden-import=yaml \
+            --hidden-import=asyncio \
+            --hidden-import=paramiko \
+            --hidden-import=cryptography \
+            foghorn/cli.py
+
+      - name: Chmod executable
+        run: chmod +x dist/android/foghorn-arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: foghorn-android-arm64-v8a
+          path: dist/android/foghorn-arm64
+          retention-days: 30
