@@ -39,7 +39,8 @@ jobs:
             curl \
             unzip \
             m4 \
-            coreutils
+            coreutils \
+            sed
 
       - name: 下载并安装Android NDK
         run: |
@@ -51,55 +52,45 @@ jobs:
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
           echo "TOOLCHAIN=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
-      - name: 分步可控预构建（三重保障解决宏缺失）
+      - name: 【核心修复】终极宏注入+标准预构建
         run: |
           cd libffi
           
-          # 1. 安全清理：仅删除自动生成的文件，绝不删除源码自带的m4宏
+          # 1. 安全清理：仅删除自动生成的文件，绝不修改源码自带的m4宏
           rm -rf autom4te.cache configure aclocal.m4 ltmain.sh config.h.in fficonfig.h.in
           find . -name "Makefile.in" -delete
-          mkdir -p m4
           
-          # 2. 【第一重保障】强制复制libtool全量宏到项目m4目录
-          # 确保LT_SYS_SYMBOL_USCORE所在的libtool.m4被完整复制到项目中
-          libtoolize --force --copy --install
+          # 2. 【终极兜底】直接把LT_SYS_SYMBOL_USCORE宏注入到configure.ac最开头
+          # 完全不依赖m4目录、aclocal加载，autoconf执行时第一时间就能识别宏定义
+          sed -i '/^AC_INIT/a \
+          AC_DEFUN([LT_SYS_SYMBOL_USCORE], \
+          [AC_CACHE_CHECK([whether C symbols are prefixed with underscore], \
+          [lt_cv_sys_symbol_underscore], \
+          [AC_LINK_IFELSE([AC_LANG_PROGRAM([], \
+          [[extern int foo(); int main() { return foo(); }]])], \
+          [AC_LINK_IFELSE([AC_LANG_PROGRAM([], \
+          [[extern int _foo(); int main() { return _foo(); }]])], \
+          [lt_cv_sys_symbol_underscore=yes], \
+          [lt_cv_sys_symbol_underscore=no])], \
+          [AC_MSG_ERROR([cannot check for symbol underscore])])]) \
+          AS_IF([test "$lt_cv_sys_symbol_underscore" = yes], \
+          [AC_DEFINE([SYMBOL_UNDERSCORE], 1, \
+          [Define to 1 if C symbols are prefixed with an underscore.])]) \
+          ])' configure.ac
           
-          # 3. 【第二重保障】兜底注入LT_SYS_SYMBOL_USCORE宏定义
-          # 不管系统libtool是否正确加载，autoconf都能100%找到该宏
-          cat > m4/lt_sys_symbol_underscore.m4 << 'EOF'
-          AC_DEFUN([LT_SYS_SYMBOL_USCORE],
-          [AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
-          [lt_cv_sys_symbol_underscore],
-          [AC_LINK_IFELSE([AC_LANG_PROGRAM([],
-          [[extern int foo(); int main() { return foo(); }]])],
-          [AC_LINK_IFELSE([AC_LANG_PROGRAM([],
-          [[extern int _foo(); int main() { return _foo(); }]])],
-          [lt_cv_sys_symbol_underscore=yes],
-          [lt_cv_sys_symbol_underscore=no])],
-          [AC_MSG_ERROR([cannot check for symbol underscore])])])
-          AS_IF([test "$lt_cv_sys_symbol_underscore" = yes],
-          [AC_DEFINE([SYMBOL_UNDERSCORE], 1,
-          [Define to 1 if C symbols are prefixed with an underscore.])])
-          ])
-          EOF
-                    
-          # 4. 【第三重保障】显式加载所有宏，强制生成aclocal.m4
-          # 同时加载项目m4目录和系统宏目录，确保无遗漏
-          aclocal --force -I m4 -I /usr/share/aclocal
-          
-          # 5. 分步生成所有必须文件，完全可控无遗漏
-          autoheader --force -I m4
-          automake --add-missing --copy --force --foreign
-          autoconf --force -I m4
-          
-          # 6. 前置校验：提前拦截所有问题
-          test -f configure || { echo "ERROR: configure脚本生成失败！"; exit 1; }
-          test -f fficonfig.h.in || { echo "ERROR: fficonfig.h.in生成失败！"; exit 1; }
-          grep -q "LT_SYS_SYMBOL_USCORE" aclocal.m4 || {
-            echo "ERROR: LT_SYS_SYMBOL_USCORE宏未被加载到aclocal.m4！"
-            cat m4/lt_sys_symbol_underscore.m4
+          # 3. 前置校验：确认宏已成功注入configure.ac
+          grep -q "LT_SYS_SYMBOL_USCORE" configure.ac || {
+            echo "ERROR: 宏注入configure.ac失败！"
+            cat configure.ac | head -20
             exit 1
           }
+          
+          # 4. 官方标准全量autotools流程，自动补全所有文件
+          autoreconf -fiv --install -I m4
+          
+          # 5. 最终校验：核心文件生成确认
+          test -f configure || { echo "ERROR: configure脚本生成失败！"; exit 1; }
+          test -f fficonfig.h.in || { echo "ERROR: fficonfig.h.in生成失败！"; exit 1; }
 
       - name: 交叉编译libffi for Android aarch64
         run: |
@@ -116,7 +107,7 @@ jobs:
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           export SYSROOT=$TOOLCHAIN/sysroot
           
-          # 交叉编译兜底：直接指定检查结果，跳过无法执行的运行时测试
+          # 交叉编译终极兜底：直接指定检查结果，跳过无法执行的运行时测试
           export lt_cv_sys_symbol_underscore=no
           
           # 官方标准Android编译配置
@@ -131,7 +122,7 @@ jobs:
             --disable-maintainer-mode \
             --disable-dependency-tracking
           
-          # 并行编译安装+产物验证
+          # 并行编译安装+产物架构验证
           make -j$(nproc)
           make install
           
