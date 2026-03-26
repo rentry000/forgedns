@@ -24,33 +24,35 @@ jobs:
           image: arm64v8/python:3.11-alpine
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
-            # 1. 安装底层构建依赖
-            # Foghorn 等网络/DNS 代理通常依赖 cryptography 等底层库，需要 C 编译环境
+            set -e # 开启此选项：遇到任何一步报错立即停止，方便排查定位
+            
+            # 1. 安装底层构建依赖（新增了 mariadb-dev, mariadb-connector-c-dev 和 pkgconf）
             apk update
-            apk add --no-cache gcc g++ musl-dev linux-headers libffi-dev openssl-dev build-base patchelf
+            apk add --no-cache \
+              gcc g++ musl-dev linux-headers libffi-dev openssl-dev build-base patchelf \
+              mariadb-dev mariadb-connector-c-dev pkgconf
             
             # 2. 安装 Python 打包与静态化工具
             pip install --upgrade pip
             pip install pyinstaller staticx
             
             # 3. 依赖安装
-            # 这一步会自动读取项目中的 pyproject.toml 并安装所有声明的依赖环境
+            # 现在 mariadb 已经有了底层的 C 库支持，可以顺利编译成 wheel 格式了
             pip install .
             
             # 4. 确认入口文件并使用 PyInstaller 编译
-            # 注意：请根据 Makefile 或 entrypoint.sh 中的实际启动命令，将下方 `foghorn/__main__.py` 替换为正确的入口文件
             pyinstaller --onefile --clean \
               --name foghorn-dynamic \
               --hidden-import dns \
               --hidden-import pkg_resources \
               foghorn/__main__.py 
               
-            # 5. 使用 staticx 进行彻底静态化（核心步骤）
-            # 这会将 musl libc 一并打包静态化，确保二进制文件可以在 Android 的 Bionic libc 环境下原生独立运行
+            # 5. 使用 staticx 进行彻底静态化
             staticx dist/foghorn-dynamic dist/foghorn-arm64-v8a
             
             # 赋予执行权限
             chmod +x dist/foghorn-arm64-v8a
+
 
       - name: Upload Android Binary Artifact
         uses: actions/upload-artifact@v4
