@@ -30,8 +30,8 @@ jobs:
             unzip \
             m4
 
-      - name: 安装Android NDK（官方Action，解决下载异常）
-        uses: nttld/setup-ndk@v2
+      - name: 安装Android NDK（修复版本为稳定v1）
+        uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26b
           link-to-sdk: true
