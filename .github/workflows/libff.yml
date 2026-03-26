@@ -14,6 +14,7 @@ jobs:
       NDK_SHA256: ad73c0370f0b0a87d1671ed2fd5a9ac9acfd1eb5c43a7fbfbd330f85d19dd632
       TARGET_API: 21
       TARGET_ARCH: aarch64-linux-android
+      BUILD_ARCH: x86_64-linux-gnu
 
     steps:
       - name: Checkout libffi 稳定版源码
@@ -24,13 +25,14 @@ jobs:
           path: libffi
           clean: true
 
-      - name: 安装完整构建依赖
+      - name: 安装完整构建依赖（补全核心缺失包）
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf \
             automake \
             libtool \
+            autoconf-archive \
             pkg-config \
             make \
             gcc \
@@ -55,51 +57,23 @@ jobs:
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
           echo "TOOLCHAIN=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
-      - name: 彻底解决文件缺失+宏报错 预构建配置
+      - name: 标准autotools预构建（无破坏性清理，解决所有宏缺失）
         run: |
           cd libffi
           
-          # 1. 全量清理所有旧构建缓存，彻底杜绝残留干扰
-          rm -rf autom4te.cache configure aclocal.m4 ltmain.sh Makefile.in */Makefile.in fficonfig.h.in fficonfig.h config.h.in config.h
-          mkdir -p m4 && rm -rf m4/*
+          # 1. 安全清理：仅删除自动生成的文件，绝不删除源码自带的m4宏文件
+          rm -rf autom4te.cache configure aclocal.m4 ltmain.sh config.h.in fficonfig.h.in
+          find . -name "Makefile.in" -delete
           
-          # 2. 强制复制libtool完整宏文件到项目目录
-          libtoolize --force --copy --install
+          # 2. 完整执行官方标准构建流程，自动补全所有宏和辅助文件
+          # --install 自动安装缺失的辅助文件，-I m4 加载源码自带宏，自动识别autoconf-archive宏
+          autoreconf -fiv --install -I m4
           
-          # 3. 核心兜底：手动注入LT_SYS_SYMBOL_USCORE宏，彻底解决未定义报错
-          cat > m4/ltsys_underscore.m4 << 'EOF'
-          AC_DEFUN([LT_SYS_SYMBOL_USCORE],
-          [AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
-          [lt_cv_sys_symbol_underscore],
-          [AC_LINK_IFELSE([AC_LANG_PROGRAM([],
-          [[extern int foo(); int main() { return foo(); }]])],
-          [AC_LINK_IFELSE([AC_LANG_PROGRAM([],
-          [[extern int _foo(); int main() { return _foo(); }]])],
-          [lt_cv_sys_symbol_underscore=yes],
-          [lt_cv_sys_symbol_underscore=no])],
-          [AC_MSG_ERROR([cannot check for symbol underscore])])])
-          AS_IF([test "$lt_cv_sys_symbol_underscore" = yes],
-          [AC_DEFINE([SYMBOL_UNDERSCORE], 1,
-          [Define to 1 if C symbols are prefixed with an underscore.])])
-          ])
-          EOF
-          
-          # 4. 【核心修复】自动执行完整autotools流程，自动补全所有缺失步骤
-          # autoreconf会按标准顺序自动执行：aclocal → autoheader → automake → autoconf，不会漏掉任何环节
-          autoreconf -fiv -I m4 --warnings=none
-          
-          # 5. 前置校验：确认必须文件已生成，提前拦截问题
-          test -f fficonfig.h.in || {
-            echo "ERROR: 核心文件fficonfig.h.in生成失败！"
-            ls -la
-            exit 1
-          }
-          test -f configure || {
-            echo "ERROR: configure脚本生成失败！"
-            exit 1
-          }
+          # 3. 前置校验：确认核心文件已生成，提前拦截问题
+          test -f configure || { echo "ERROR: configure脚本生成失败！"; exit 1; }
+          test -f fficonfig.h.in || { echo "ERROR: fficonfig.h.in生成失败！"; exit 1; }
 
-      - name: 交叉编译libffi for Android aarch64
+      - name: 交叉编译libffi for Android aarch64（解决交叉检查失败）
         run: |
           cd libffi
           
@@ -114,14 +88,20 @@ jobs:
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           export SYSROOT=$TOOLCHAIN/sysroot
           
-          # 适配Android的编译配置，关闭文档构建避免额外依赖报错
+          # 【核心修复】交叉编译兜底：直接告诉configure检查结果，跳过无法执行的运行时测试
+          # Android aarch64 符号无下划线前缀，直接设置缓存变量，彻底解决检查失败报错
+          export lt_cv_sys_symbol_underscore=no
+          
+          # 官方标准Android交叉编译配置，明确指定build/host，关闭非必要功能
           ./configure \
+            --build=$BUILD_ARCH \
             --host=$TARGET \
             --prefix=$PWD/build \
             --disable-shared \
             --enable-static \
             --with-sysroot=$SYSROOT \
             --disable-docs \
+            --disable-maintainer-mode \
             --disable-dependency-tracking
           
           # 并行编译安装+产物架构验证
