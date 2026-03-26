@@ -1,4 +1,35 @@
-git clone https://github.com/cbuijs/sdproxy
-cd sdproxy
-go mod tidy       # 只修复依赖，不创建文件
-go build -o sdproxy-android-arm64-v8a .
+name: Build sdproxy Android arm64-v8a
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      # 1. 克隆项目
+      - name: Clone sdproxy
+        run: git clone https://github.com/cbuijs/sdproxy
+
+      # 2. 进入目录，只修复依赖，不重复创建 go.mod
+      - name: Prepare dependencies
+        run: |
+          cd sdproxy
+          go mod tidy
+
+      # 3. 官方风格构建（Android arm64-v8a 静态版）
+      - name: Build
+        run: |
+          cd sdproxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o sdproxy-android-arm64-v8a .
+
+      # 4. 上传二进制
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdproxy-android-arm64-v8a
+          path: sdproxy/sdproxy-android-arm64-v8a
