@@ -1,0 +1,51 @@
+name: Build libffi for Android arm64
+
+on:
+  workflow_dispatch:  # 允许手动点一下运行
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git make autoconf libtool
+
+      - name: Download NDK r25c
+        run: |
+          wget -O ndk.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          unzip -q ndk.zip
+          mv android-ndk-r25c ndk
+          echo "NDK=$PWD/ndk" >> $GITHUB_ENV
+
+      - name: Clone libffi
+        run: git clone https://github.com/libffi/libffi
+
+      - name: Build libffi for aarch64-android
+        run: |
+          cd libffi
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          TARGET="aarch64-linux-android"
+          API="24"
+
+          ./configure \
+            --host=$TARGET \
+            --prefix=$PWD/build \
+            CC="$TOOLCHAIN/bin/$TARGET$API-clang" \
+            CXX="$TOOLCHAIN/bin/$TARGET$API-clang++"
+
+          make -j$(nproc)
+          make install
+
+      - name: Pack libraries
+        run: |
+          mkdir -p output
+          cp libffi/build/lib/libffi.so* output/
+          zip -j libffi-android-arm64.zip output/*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libffi-android-arm64
+          path: libffi-android-arm64.zip
