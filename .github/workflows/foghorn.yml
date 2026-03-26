@@ -1,11 +1,11 @@
 name: Build Foghorn Android ARM64
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 支持在 GitHub Actions 页面手动点击运行
 
 jobs:
   build-android:
-    # 使用原生 ARM 运行器，避免模拟器的性能瓶颈
+    # 使用 GitHub 原生 ARM64 运行器，编译速度最快且兼容性最好
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -18,29 +18,34 @@ jobs:
       - name: Build Static Binary in Alpine Container
         uses: addnab/docker-run-action@v3
         with:
-          # 使用 Alpine 以确保基于 musl libc，这是跨平台静态化的最佳起点
+          # 使用 Alpine 镜像以确保二进制文件基于 musl libc，这是 Android 兼容性的核心
           image: arm64v8/python:3.11-alpine
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
             set -e
 
-            # 1. 安装编译 mariadb 和 staticx 所需的系统依赖
+            # 1. 安装系统级构建依赖 (包含 MariaDB 编译器和 C 库)
             apk update
             apk add --no-cache \
               gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
               build-base patchelf mariadb-dev mariadb-connector-c-dev pkgconf
 
-            # 2. 准备构建环境（修复 pkg_resources 报错）
+            # 2. 准备基础 Python 构建工具
             pip install --no-cache-dir --upgrade pip
-            pip install --no-cache-dir setuptools wheel pyinstaller staticx
+            pip install --no-cache-dir setuptools wheel pyinstaller
 
-            # 3. 安装项目及其依赖
-            # 使用 -e 或直接安装，确保 PyInstaller 能找到项目模块
+            # 3. 核心修复：禁用编译隔离安装 staticx
+            # 解决 "ModuleNotFoundError: No module named 'pkg_resources'" 报错
+            pip install --no-cache-dir --no-build-isolation staticx
+
+            # 4. 安装项目依赖
+            # 这一步会自动安装 pyproject.toml 中声明的所有第三方库
             pip install .
 
-            # 4. 执行 PyInstaller 打包
-            # --paths src: 告诉 PyInstaller 去哪里找源代码
-            # --hidden-import: 强制包含一些动态加载的库
+            # 5. 执行 PyInstaller 打包
+            # --paths src: 指定源码目录，解决导入路径问题
+            # --collect-all: 确保资源文件被包含
+            # --hidden-import: 强制包含可能被遗漏的动态库
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -48,14 +53,14 @@ jobs:
               --hidden-import mariadb \
               src/foghorn/main.py
 
-            # 5. 使用 staticx 进行终极静态化
-            # 这一步会将所有的 .so 库（包括数据库驱动）全部封装进二进制
+            # 6. 使用 staticx 进行终极静态化
+            # 将动态库封装进二进制，使其在 Android 的 Bionic libc 环境下独立运行
             staticx dist/foghorn_dynamic dist/foghorn-android-arm64
 
             # 赋予执行权限
             chmod +x dist/foghorn-android-arm64
 
-      - name: Upload Artifact
+      - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64
