@@ -1,34 +1,4 @@
-name: Build sdproxy Android arm64-v8a
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      # 1. 克隆代码（完全按你命令）
-      - name: Clone sdproxy
-        run: git clone https://github.com/cbuijs/sdproxy
-
-      # 2. 进入项目 + 初始化模块 + 下载依赖（解决你报错的关键）
-      - name: Install dependencies
-        run: |
-          cd sdproxy
-          go mod init sdproxy
-          go mod tidy
-
-      # 3. 真正构建：和你官方命令一模一样，只加 Android 架构
-      - name: Build
-        run: |
-          cd sdproxy
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o sdproxy .
-
-      # 4. 重命名方便你识别，然后上传
-      - name: Rename and upload
-        run: mv sdproxy/sdproxy sdproxy/sdproxy-android-arm64-v8a
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sdproxy-android-arm64-v8a
-          path: sdproxy/sdproxy-android-arm64-v8a
+git clone https://github.com/cbuijs/sdproxy
+cd sdproxy
+go mod tidy       # 只修复依赖，不创建文件
+go build -o sdproxy-android-arm64-v8a .
