@@ -1,0 +1,64 @@
+name: Build Android Binary
+
+# 触发条件：可以手动点击运行，也可以设置 push 标签时自动构建
+on:
+  workflow_dispatch:
+    branches: [ main ]
+    # 可以指定自定义版本号
+    inputs:
+      build_version:
+        description: 'Build Version Suffix'
+        required: false
+        default: 'android'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 根据项目要求，使用 1.25+ 版本
+          go-version: '1.25'
+
+      - name: Install Dependencies (Android NDK)
+        run: |
+          # 虽然 CGO_ENABLED=0，但 actions/setup-go 环境可能需要一些基础工具
+          sudo apt-get update && sudo apt-get install -y zip
+
+      - name: Build for Android ARM64 (aarch64)
+        id: build_android
+        run: |
+          # 关键构建参数
+          # CGO_ENABLED=0: 禁用C语言环境，确保纯Go项目编译出完全静态的二进制
+          # GOOS=linux: Android 内核为 Linux
+          # GOARCH=arm64: 对应 Android ARM64-v8a 架构
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o sdproxy-android-arm64 .
+          
+          # 赋予执行权限（打包时保留）
+          chmod +x sdproxy-android-arm64
+          
+          # 打印构建信息
+          file sdproxy-android-arm64
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdproxy-android-arm64
+          path: |
+            sdproxy-android-arm64
+          if-no-files-found: error
+
+      - name: Create Release Asset (Optional)
+        # 如果你想自动将构建好的文件发布到 Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: sdproxy-android-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
