@@ -7,21 +7,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
 
-      # 解决：go: cannot find main module
+      # 修复：go: cannot find main module
       - name: Init Go module
         run: |
-          go mod init github.com/cbuijs/sdproxy
+          go mod init sdproxy
           go mod tidy
 
-      # 编译 Android arm64-v8a 静态二进制
+      # 完全对标官方编译风格 · Android arm64-v8a
       - name: Build for Android arm64-v8a
         run: |
           CGO_ENABLED=0 \
@@ -29,11 +28,10 @@ jobs:
           GOARCH=arm64 \
           go build -ldflags="-s -w" -o sdproxy-android-arm64-v8a
 
-      - name: Show file info
+      - name: Check binary
         run: file sdproxy-android-arm64-v8a
 
-      # 上传构建产物
-      - name: Upload binary
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sdproxy-android-arm64-v8a
