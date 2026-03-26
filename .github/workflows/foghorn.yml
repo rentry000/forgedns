@@ -28,19 +28,24 @@ jobs:
               build-base patchelf pkgconf scons libcap-dev sqlite-dev
 
             # ==============================================
-            # 核心修复1：彻底解决 pkg_resources 缺失
-            # 锁定 setuptools 版本（最后一个稳定包含 pkg_resources 的版本）
-            # 提前安装所有构建依赖，避免构建隔离导致的模块缺失
+            # 核心修复1：彻底解决 pkg_resources 问题
+            # 1. 移除错误的 pkg_resources 安装（它不是独立包）
+            # 2. 锁定稳定版 setuptools（内置完整的 pkg_resources）
+            # 3. 关闭 root 用户 pip 警告
             # ==============================================
-            pip install --no-cache-dir --upgrade pip
+            pip install --no-cache-dir --upgrade pip --root-user-action ignore
             pip install --no-cache-dir \
               setuptools==69.5.1 \
-              pkg_resources \
               wheel \
-              pyinstaller
+              pyinstaller \
+              --root-user-action ignore
 
-            # 2. 安装 staticx（关闭构建隔离，用当前环境的依赖，彻底避免模块缺失）
-            pip install --no-cache-dir --no-build-isolation staticx==0.14.0
+            # 2. 安装 staticx（关闭构建隔离，直接使用当前环境的 setuptools）
+            # 彻底避免构建隔离环境里 pkg_resources 找不到的问题
+            pip install --no-cache-dir \
+              --no-build-isolation \
+              staticx==0.14.0 \
+              --root-user-action ignore
 
             # ==============================================
             # 核心修复2：提前清除所有系统库的 RPATH/RUNPATH
@@ -51,8 +56,8 @@ jobs:
             echo "已清除所有系统库的 RPATH/RUNPATH"
 
             # 3. 安装项目核心依赖（仅必需包，不装可选的mariadb，避免额外问题）
-            pip install --no-cache-dir dnslib pyyaml python-dotenv
-            pip install --no-cache-dir .
+            pip install --no-cache-dir dnslib pyyaml python-dotenv --root-user-action ignore
+            pip install --no-cache-dir . --root-user-action ignore
 
             # 4. PyInstaller 打包动态二进制
             pyinstaller --onefile --clean \
