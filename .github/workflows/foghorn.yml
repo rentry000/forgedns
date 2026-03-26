@@ -5,7 +5,6 @@ on:
 
 jobs:
   build-android:
-    # 使用 GitHub 原生 ARM64 运行器，避免模拟器带来的环境干扰和低效率
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -18,37 +17,29 @@ jobs:
       - name: Build Static Binary in Alpine Container
         uses: addnab/docker-run-action@v3
         with:
-          # 使用 Alpine 以确保二进制文件基于 musl libc，这是 Android 兼容性的基石
           image: arm64v8/python:3.11-alpine
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
             set -e
 
-            # 1. 安装所有系统级构建依赖
-            # - scons: 解决 staticx 编译 bootloader 报错
-            # - mariadb-dev/pkgconf: 解决 mariadb 驱动安装报错
-            # - libcap-dev/patchelf: 静态化必须的底层工具
+            # 1. 安装系统级构建依赖
             apk update
             apk add --no-cache \
               gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
               build-base patchelf mariadb-dev mariadb-connector-c-dev pkgconf \
               scons libcap-dev
 
-            # 2. 准备基础 Python 环境
+            # 2. 准备 Python 环境
             pip install --no-cache-dir --upgrade pip
             pip install --no-cache-dir setuptools wheel pyinstaller
 
             # 3. 安装 staticx (禁用编译隔离)
-            # 这样 staticx 就能直接使用我们安装好的 setuptools (pkg_resources) 和系统中的 scons
             pip install --no-cache-dir --no-build-isolation staticx
 
             # 4. 安装项目依赖
-            # 这一步会自动处理 pyproject.toml 中的所有库
             pip install .
 
             # 5. 执行 PyInstaller 初步打包
-            # --paths src: 你的代码在 src/ 目录下，必须指定路径
-            # --collect-all foghorn: 确保项目内的资源文件被完整提取
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -56,11 +47,14 @@ jobs:
               --hidden-import mariadb \
               src/foghorn/main.py
 
-            # 6. 使用 staticx 进行终极静态化封装
-            # 这会将所有的 .so 依赖（如数据库驱动、加密库）全部锁死在一个文件里
-            staticx dist/foghorn_dynamic dist/foghorn-android-arm64
+            # 6. 核心修正：清理 DT_RUNPATH 解决 staticx 报错
+            # PyInstaller 会在构建目录生成临时的 .so 文件，我们需要清除它们的 RPATH
+            find build/foghorn_dynamic -name "*.so*" -exec patchelf --remove-rpath {} \; || true
 
-            # 赋予执行权限
+            # 7. 使用 staticx 进行终极静态化封装
+            # 加上 --strip 减小体积，并指向清理后的动态文件
+            staticx --strip dist/foghorn_dynamic dist/foghorn-android-arm64
+
             chmod +x dist/foghorn-android-arm64
 
       - name: Upload Binary Artifact
