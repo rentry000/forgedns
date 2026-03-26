@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 最终适配版
+name: Build Foghorn Android ARM64 最终可运行版
 on:
   workflow_dispatch:
 
@@ -15,6 +15,7 @@ jobs:
 
       - name: 移除数据库可选依赖（根治编译报错）
         run: |
+          # 直接修改pyproject.toml，删除所有会触发本地编译的数据库可选依赖
           sed -i '/mariadb/d' pyproject.toml
           sed -i '/psycopg2/d' pyproject.toml
           sed -i '/influxdb/d' pyproject.toml
@@ -28,12 +29,15 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 安装全量构建依赖（固定Alpine 3.20，兼容性最好）
+            # 1. 安装全量构建依赖（修复包名错误，删除不存在的static-dev）
             apk update
             apk add --no-cache \
               python3 python3-dev py3-pip \
-              gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
-              build-base patchelf pkgconf scons libcap-dev sqlite-dev libgcc static-dev
+              gcc g++ musl-dev musl-static \
+              linux-headers libffi-dev libffi-static \
+              openssl-dev openssl-libs-static \
+              build-base patchelf pkgconf scons \
+              libcap-dev sqlite-dev sqlite-static libgcc
 
             # 2. 配置Python环境
             python3 -m venv /opt/venv
@@ -45,7 +49,7 @@ jobs:
               pyinstaller \
               --no-build-isolation
             
-            # 安装稳定版staticx（构建纯静态二进制）
+            # 安装稳定版staticx（无被撤回问题，完美兼容静态构建）
             pip install --no-cache-dir \
               --no-build-isolation \
               staticx==0.13.9
@@ -57,6 +61,7 @@ jobs:
             # 核心修复：全链路彻底清理RPATH/RUNPATH
             # 确保staticx能成功构建纯静态二进制
             # ==============================================
+            # 修复：Alpine 3.20默认Python版本是3.12，修正路径
             find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
             find /opt/venv/lib/python3.12/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
             echo "全量RPATH/RUNPATH清理完成"
@@ -81,10 +86,12 @@ jobs:
               --hidden-import bcrypt \
               --hidden-import rpds \
               --exclude-module mariadb \
+              --exclude-module psycopg2 \
+              --exclude-module influxdb \
               --exclude-module tests \
               src/foghorn/main.py
 
-            # 二次清理临时目录的库
+            # 二次清理临时目录的库，双重保险
             find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
 
             # 5. staticx构建最终纯静态二进制（无任何动态依赖，Android直接可跑）
@@ -94,7 +101,7 @@ jobs:
               dist/foghorn_dynamic \
               dist/foghorn-android-arm64
 
-            # 6. 校验产物（确认是纯静态）
+            # 6. 校验产物（必须输出statically linked，才是真正的静态二进制）
             chmod +x dist/foghorn-android-arm64
             ls -lh dist/
             file dist/foghorn-android-arm64
@@ -103,6 +110,6 @@ jobs:
       - name: 上传最终Android适配版二进制
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-v8a-最终适配版
+          name: foghorn-android-arm64-v8a-最终可运行版
           path: dist/foghorn-android-arm64
           retention-days: 30
