@@ -1,51 +1,74 @@
-name: Build libffi for Android arm64
+name: Build libffi for Android aarch64
 
 on:
-  workflow_dispatch:  # 允许手动点一下运行
+  push:
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04
+  build-libffi:
+    runs-on: ubuntu-latest
     steps:
+      - name: Checkout libffi
+        uses: actions/checkout@v4
+        with:
+          repository: libffi/libffi
+          path: libffi
+
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y git make autoconf libtool
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            libtool \
+            make \
+            gcc \
+            g++ \
+            curl \
+            unzip
 
-      - name: Download NDK r25c
+      - name: Install Android NDK
         run: |
-          wget -O ndk.zip https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-          unzip -q ndk.zip
-          mv android-ndk-r25c ndk
-          echo "NDK=$PWD/ndk" >> $GITHUB_ENV
+          curl -sLO https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          mv android-ndk-r26b $HOME/android-ndk
+          echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
 
-      - name: Clone libffi
-        run: git clone https://github.com/libffi/libffi
-
-      - name: Build libffi for aarch64-android
+      - name: Build libffi for aarch64-linux-android
         run: |
           cd libffi
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          TARGET="aarch64-linux-android"
-          API="24"
-
+          
+          # 生成 configure（解决你现在的错误）
+          autoreconf -fiv
+          
+          # 交叉编译工具链
+          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          export TARGET=aarch64-linux-android
+          export API=21
+          export CC=$TOOLCHAIN/bin/$TARGET$API-clang
+          export CXX=$TOOLCHAIN/bin/$TARGET$API-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export AS=$TOOLCHAIN/bin/llvm-as
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          
+          # 配置
           ./configure \
             --host=$TARGET \
             --prefix=$PWD/build \
-            CC="$TOOLCHAIN/bin/$TARGET$API-clang" \
-            CXX="$TOOLCHAIN/bin/$TARGET$API-clang++"
-
+            --disable-shared \
+            --enable-static
+          
+          # 编译安装
           make -j$(nproc)
           make install
-
-      - name: Pack libraries
-        run: |
-          mkdir -p output
-          cp libffi/build/lib/libffi.so* output/
-          zip -j libffi-android-arm64.zip output/*
+          
+          # 输出结果
+          ls -la build/lib/
+          ls -la build/include/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libffi-android-arm64
-          path: libffi-android-arm64.zip
+          name: libffi-android-aarch64
+          path: libffi/build
