@@ -8,66 +8,73 @@ jobs:
   build-libffi:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout libffi
+      - name: Checkout libffi 稳定版源码
         uses: actions/checkout@v4
         with:
           repository: libffi/libffi
+          ref: v3.4.6
           path: libffi
 
-      - name: Install dependencies
+      - name: 安装完整构建依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             autoconf \
             automake \
             libtool \
+            pkg-config \
             make \
             gcc \
             g++ \
             curl \
-            unzip
+            unzip \
+            m4
 
-      - name: Install Android NDK
-        run: |
-          curl -sLO https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
-          unzip -q android-ndk-r26b-linux.zip
-          mv android-ndk-r26b $HOME/android-ndk
-          echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
+      - name: 安装Android NDK（官方Action，解决下载异常）
+        uses: nttld/setup-ndk@v2
+        with:
+          ndk-version: r26b
+          link-to-sdk: true
 
-      - name: Build libffi for aarch64-linux-android
+      - name: 构建libffi for aarch64-linux-android
         run: |
           cd libffi
           
-          # 生成 configure（解决你现在的错误）
-          autoreconf -fiv
+          # 彻底解决 LT_SYS_SYMBOL_USCORE 宏缺失报错
+          libtoolize --force --copy
+          aclocal --force -I m4
+          autoreconf -fiv -I m4
           
-          # 交叉编译工具链
-          export TOOLCHAIN=$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          # 完整Android交叉编译工具链配置
+          export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
           export TARGET=aarch64-linux-android
           export API=21
-          export CC=$TOOLCHAIN/bin/$TARGET$API-clang
-          export CXX=$TOOLCHAIN/bin/$TARGET$API-clang++
+          export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
           export AR=$TOOLCHAIN/bin/llvm-ar
           export AS=$TOOLCHAIN/bin/llvm-as
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export SYSROOT=$TOOLCHAIN/sysroot
           
-          # 配置
+          # 适配Android的编译配置
           ./configure \
             --host=$TARGET \
             --prefix=$PWD/build \
             --disable-shared \
-            --enable-static
+            --enable-static \
+            --with-sysroot=$SYSROOT
           
-          # 编译安装
+          # 并行编译安装+产物验证
           make -j$(nproc)
           make install
           
-          # 输出结果
+          echo "===== 构建产物验证 ====="
           ls -la build/lib/
           ls -la build/include/
+          file build/lib/libffi.a
 
-      - name: Upload artifact
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: libffi-android-aarch64
