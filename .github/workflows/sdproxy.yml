@@ -1,32 +1,29 @@
 name: Build sdproxy Android arm64-v8a
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 第一步：克隆代码 (等价于 git clone)
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          repository: cbuijs/sdproxy # 指定克隆的项目地址
+          path: sdproxy             # 克隆到 sdproxy 目录
 
-      - name: Fix go module
+      # 第二步：进入项目目录并构建 (等价于 cd sdproxy && go build)
+      - name: Build for Android arm64-v8a
         run: |
-          go mod init sdproxy
-          go mod tidy
-
-      # 👇 完全对齐官方快速开始命令，只加 Android 架构参数
-      - name: Build
-        run: |
+          cd sdproxy
+          # 核心构建命令：完全按你的要求，只加 Android 目标平台参数
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o sdproxy-android-arm64-v8a .
 
-      - name: Upload binary
+      # 第三步：上传构建好的二进制文件
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sdproxy-android-arm64-v8a
-          path: sdproxy-android-arm64-v8a
+          path: sdproxy/sdproxy-android-arm64-v8a
