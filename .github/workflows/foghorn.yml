@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64
+name: Build Foghorn Android ARM64 最终适配版
 on:
   workflow_dispatch:
 
@@ -13,47 +13,57 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: 移除数据库可选依赖（根治mariadb编译报错）
+      - name: 移除数据库可选依赖（根治编译报错）
         run: |
-          # 直接修改pyproject.toml，删除所有会触发本地编译的数据库可选依赖
           sed -i '/mariadb/d' pyproject.toml
           sed -i '/psycopg2/d' pyproject.toml
           sed -i '/influxdb/d' pyproject.toml
           echo "已移除所有会触发编译失败的数据库可选依赖"
 
-      - name: 构建 Android 可用单文件二进制
+      - name: 构建Android纯静态二进制
         uses: addnab/docker-run-action@v3
         with:
-          image: arm64v8/python:3.11-alpine
+          image: alpine:3.20
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
             set -euxo pipefail
 
-            # 1. 安装系统级依赖（补全libgcc，解决libgcc_s缺失警告）
+            # 1. 安装全量构建依赖（固定Alpine 3.20，兼容性最好）
             apk update
             apk add --no-cache \
+              python3 python3-dev py3-pip \
               gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
-              build-base patchelf pkgconf libcap-dev sqlite-dev libgcc
+              build-base patchelf pkgconf scons libcap-dev sqlite-dev libgcc static-dev
 
-            # 2. 配置Python环境，安装稳定版工具链
-            pip install --no-cache-dir --upgrade pip --root-user-action ignore
+            # 2. 配置Python环境
+            python3 -m venv /opt/venv
+            source /opt/venv/bin/activate
+            pip install --no-cache-dir --upgrade pip
             pip install --no-cache-dir \
               setuptools==69.5.1 \
               wheel \
               pyinstaller \
-              --root-user-action ignore
+              --no-build-isolation
+            
+            # 安装稳定版staticx（构建纯静态二进制）
+            pip install --no-cache-dir \
+              --no-build-isolation \
+              staticx==0.13.9
 
-            # 3. 安装项目完整依赖（已移除mariadb，无编译报错）
-            pip install --no-cache-dir . --root-user-action ignore
+            # 3. 安装项目完整依赖
+            pip install --no-cache-dir .
 
-            # 4. 预清理所有依赖库的RPATH/RUNPATH（彻底消除潜在问题）
+            # ==============================================
+            # 核心修复：全链路彻底清理RPATH/RUNPATH
+            # 确保staticx能成功构建纯静态二进制
+            # ==============================================
             find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
-            find /usr/local/lib/python3.11/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
-            echo "已完成全量依赖库RPATH/RUNPATH清理"
+            find /opt/venv/lib/python3.12/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            echo "全量RPATH/RUNPATH清理完成"
 
-            # 5. PyInstaller 打包最终单文件二进制（全量包含所有功能）
+            # 4. PyInstaller打包动态二进制（全量包含所有功能）
             pyinstaller --onefile --clean \
-              --name foghorn-android-arm64 \
+              --name foghorn_dynamic \
               --paths src \
               --collect-all foghorn \
               --add-data "example_configs:example_configs" \
@@ -71,20 +81,28 @@ jobs:
               --hidden-import bcrypt \
               --hidden-import rpds \
               --exclude-module mariadb \
-              --exclude-module psycopg2 \
-              --exclude-module influxdb \
               --exclude-module tests \
               src/foghorn/main.py
 
-            # 6. 校验最终产物
+            # 二次清理临时目录的库
+            find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+
+            # 5. staticx构建最终纯静态二进制（无任何动态依赖，Android直接可跑）
+            staticx \
+              --strip \
+              --no-compress \
+              dist/foghorn_dynamic \
+              dist/foghorn-android-arm64
+
+            # 6. 校验产物（确认是纯静态）
             chmod +x dist/foghorn-android-arm64
             ls -lh dist/
             file dist/foghorn-android-arm64
             echo "构建完成！最终产物：dist/foghorn-android-arm64"
 
-      - name: 上传最终二进制产物
+      - name: 上传最终Android适配版二进制
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-v8a
+          name: foghorn-android-arm64-v8a-最终适配版
           path: dist/foghorn-android-arm64
           retention-days: 30
