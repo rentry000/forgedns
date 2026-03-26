@@ -1,39 +1,59 @@
-name: Build foghorn Android arm64-v8a
+name: Build Foghorn for Android arm64-v8a
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-android-arm64:
+    # 使用 GitHub 提供的原生 ARM64 运行器，极大提升含 C 扩展的 Python 库编译速度
+    runs-on: ubuntu-24.04-arm
+
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
+          ref: main
 
-      - name: Install Python & dependencies
-        run: |
-          sudo apt update -y
-          sudo apt install -y python3-pip python3-venv
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-          pip install dnslib pyyaml python-dotenv
-          pip install pyinstaller
+      - name: Build Static Binary via Alpine Docker
+        uses: addnab/docker-run-action@v3
+        with:
+          # Alpine 提供 musl libc 环境，适合构建静态二进制
+          image: arm64v8/python:3.11-alpine
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
+          run: |
+            # 1. 安装底层构建依赖
+            # Foghorn 等网络/DNS 代理通常依赖 cryptography 等底层库，需要 C 编译环境
+            apk update
+            apk add --no-cache gcc g++ musl-dev linux-headers libffi-dev openssl-dev build-base patchelf
+            
+            # 2. 安装 Python 打包与静态化工具
+            pip install --upgrade pip
+            pip install pyinstaller staticx
+            
+            # 3. 依赖安装
+            # 这一步会自动读取项目中的 pyproject.toml 并安装所有声明的依赖环境
+            pip install .
+            
+            # 4. 确认入口文件并使用 PyInstaller 编译
+            # 注意：请根据 Makefile 或 entrypoint.sh 中的实际启动命令，将下方 `foghorn/__main__.py` 替换为正确的入口文件
+            pyinstaller --onefile --clean \
+              --name foghorn-dynamic \
+              --hidden-import dns \
+              --hidden-import pkg_resources \
+              foghorn/__main__.py 
+              
+            # 5. 使用 staticx 进行彻底静态化（核心步骤）
+            # 这会将 musl libc 一并打包静态化，确保二进制文件可以在 Android 的 Bionic libc 环境下原生独立运行
+            staticx dist/foghorn-dynamic dist/foghorn-arm64-v8a
+            
+            # 赋予执行权限
+            chmod +x dist/foghorn-arm64-v8a
 
-      - name: Build binary
-        run: |
-          source venv/bin/activate
-          pyinstaller \
-            --onefile \
-            --name foghorn-android-arm64 \
-            --add-data "config.example.yaml:." \
-            --add-data "foghorn/plugins:foghorn/plugins" \
-            src/foghorn/main.py  # ✅ 完全正确的路径
-
-      - name: Upload artifact
+      - name: Upload Android Binary Artifact
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-v8a
-          path: dist/foghorn-android-arm64
+          path: dist/foghorn-arm64-v8a
