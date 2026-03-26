@@ -30,7 +30,7 @@ jobs:
             --name foghorn-android-arm64 \
             --add-data "config.example.yaml:." \
             --add-data "foghorn/plugins:foghorn/plugins" \
-            src/main.py  # ✅ 完全正确的入口
+            src/foghorn/main.py  # ✅ 完全正确的路径
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
