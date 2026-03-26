@@ -1,13 +1,11 @@
-name: Build Foghorn for Android arm64-v8a
+name: Build Foghorn Android ARM64
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main", "master" ]
 
 jobs:
-  build-android-arm64:
-    # 使用 GitHub 提供的原生 ARM64 运行器，极大提升含 C 扩展的 Python 库编译速度
+  build-android:
+    # 使用原生 ARM 运行器，避免模拟器的性能瓶颈
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -17,45 +15,48 @@ jobs:
           repository: zallison/foghorn
           ref: main
 
-      - name: Build Static Binary via Alpine Docker
+      - name: Build Static Binary in Alpine Container
         uses: addnab/docker-run-action@v3
         with:
-          # Alpine 提供 musl libc 环境，适合构建静态二进制
+          # 使用 Alpine 以确保基于 musl libc，这是跨平台静态化的最佳起点
           image: arm64v8/python:3.11-alpine
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
-            set -e # 开启此选项：遇到任何一步报错立即停止，方便排查定位
-            
-            # 1. 安装底层构建依赖（新增了 mariadb-dev, mariadb-connector-c-dev 和 pkgconf）
+            set -e
+
+            # 1. 安装编译 mariadb 和 staticx 所需的系统依赖
             apk update
             apk add --no-cache \
-              gcc g++ musl-dev linux-headers libffi-dev openssl-dev build-base patchelf \
-              mariadb-dev mariadb-connector-c-dev pkgconf
-            
-            # 2. 安装 Python 打包与静态化工具
-            pip install --upgrade pip
-            pip install pyinstaller staticx
-            
-            # 3. 依赖安装
-            # 现在 mariadb 已经有了底层的 C 库支持，可以顺利编译成 wheel 格式了
+              gcc g++ musl-dev linux-headers libffi-dev openssl-dev \
+              build-base patchelf mariadb-dev mariadb-connector-c-dev pkgconf
+
+            # 2. 准备构建环境（修复 pkg_resources 报错）
+            pip install --no-cache-dir --upgrade pip
+            pip install --no-cache-dir setuptools wheel pyinstaller staticx
+
+            # 3. 安装项目及其依赖
+            # 使用 -e 或直接安装，确保 PyInstaller 能找到项目模块
             pip install .
-            
-            # 4. 确认入口文件并使用 PyInstaller 编译
+
+            # 4. 执行 PyInstaller 打包
+            # --paths src: 告诉 PyInstaller 去哪里找源代码
+            # --hidden-import: 强制包含一些动态加载的库
             pyinstaller --onefile --clean \
-              --name foghorn-dynamic \
-              --hidden-import dns \
-              --hidden-import pkg_resources \
-              foghorn/__main__.py 
-              
-            # 5. 使用 staticx 进行彻底静态化
-            staticx dist/foghorn-dynamic dist/foghorn-arm64-v8a
-            
+              --name foghorn_dynamic \
+              --paths src \
+              --collect-all foghorn \
+              --hidden-import mariadb \
+              src/foghorn/main.py
+
+            # 5. 使用 staticx 进行终极静态化
+            # 这一步会将所有的 .so 库（包括数据库驱动）全部封装进二进制
+            staticx dist/foghorn_dynamic dist/foghorn-android-arm64
+
             # 赋予执行权限
-            chmod +x dist/foghorn-arm64-v8a
+            chmod +x dist/foghorn-android-arm64
 
-
-      - name: Upload Android Binary Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-v8a
-          path: dist/foghorn-arm64-v8a
+          name: foghorn-android-arm64
+          path: dist/foghorn-android-arm64
