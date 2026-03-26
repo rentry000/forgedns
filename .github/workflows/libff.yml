@@ -24,7 +24,7 @@ jobs:
           path: libffi
           clean: true
 
-      - name: 安装完整构建依赖（修复包名错误）
+      - name: 安装完整构建依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -42,10 +42,10 @@ jobs:
 
       - name: 下载并安装Android NDK
         run: |
-          # 带重试下载，避免网络波动导致失败
+          # 带重试下载，避免网络波动失败
           curl -fSL --retry 5 --retry-delay 10 -o android-ndk.zip $NDK_URL
           
-          # 完整性校验（sha256sum为coreutils内置工具）
+          # 完整性校验
           echo "$NDK_SHA256  android-ndk.zip" | sha256sum --check --status
           
           # 解压并配置全局环境变量
@@ -55,18 +55,18 @@ jobs:
           echo "ANDROID_NDK_ROOT=$HOME/android-ndk" >> $GITHUB_ENV
           echo "TOOLCHAIN=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
 
-      - name: 彻底解决宏缺失问题 预构建配置
+      - name: 彻底解决文件缺失+宏报错 预构建配置
         run: |
           cd libffi
           
-          # 全量清理旧构建缓存，杜绝残留文件干扰
-          rm -rf autom4te.cache configure aclocal.m4 ltmain.sh Makefile.in */Makefile.in
+          # 1. 全量清理所有旧构建缓存，彻底杜绝残留干扰
+          rm -rf autom4te.cache configure aclocal.m4 ltmain.sh Makefile.in */Makefile.in fficonfig.h.in fficonfig.h config.h.in config.h
           mkdir -p m4 && rm -rf m4/*
           
-          # 强制复制libtool完整宏文件到项目目录
+          # 2. 强制复制libtool完整宏文件到项目目录
           libtoolize --force --copy --install
           
-          # 核心兜底：手动注入LT_SYS_SYMBOL_USCORE宏定义，100%解决未定义报错
+          # 3. 核心兜底：手动注入LT_SYS_SYMBOL_USCORE宏，彻底解决未定义报错
           cat > m4/ltsys_underscore.m4 << 'EOF'
           AC_DEFUN([LT_SYS_SYMBOL_USCORE],
           [AC_CACHE_CHECK([whether C symbols are prefixed with underscore],
@@ -84,17 +84,20 @@ jobs:
           ])
           EOF
           
-          # 前置校验：确认宏已存在，提前拦截问题
-          grep -q "LT_SYS_SYMBOL_USCORE" m4/*.m4 || {
-            echo "ERROR: LT_SYS_SYMBOL_USCORE macro not found!"
-            ls -la m4/
+          # 4. 【核心修复】自动执行完整autotools流程，自动补全所有缺失步骤
+          # autoreconf会按标准顺序自动执行：aclocal → autoheader → automake → autoconf，不会漏掉任何环节
+          autoreconf -fiv -I m4 --warnings=none
+          
+          # 5. 前置校验：确认必须文件已生成，提前拦截问题
+          test -f fficonfig.h.in || {
+            echo "ERROR: 核心文件fficonfig.h.in生成失败！"
+            ls -la
             exit 1
           }
-          
-          # 分步生成构建文件，显式指定宏目录，可控性拉满
-          aclocal --force -I m4
-          autoconf --force -I m4
-          automake --add-missing --copy --force
+          test -f configure || {
+            echo "ERROR: configure脚本生成失败！"
+            exit 1
+          }
 
       - name: 交叉编译libffi for Android aarch64
         run: |
@@ -111,13 +114,15 @@ jobs:
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           export SYSROOT=$TOOLCHAIN/sysroot
           
-          # 适配Android的编译配置
+          # 适配Android的编译配置，关闭文档构建避免额外依赖报错
           ./configure \
             --host=$TARGET \
             --prefix=$PWD/build \
             --disable-shared \
             --enable-static \
-            --with-sysroot=$SYSROOT
+            --with-sysroot=$SYSROOT \
+            --disable-docs \
+            --disable-dependency-tracking
           
           # 并行编译安装+产物架构验证
           make -j$(nproc)
