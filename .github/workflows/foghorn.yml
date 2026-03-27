@@ -18,9 +18,8 @@ jobs:
           sed -i '/mariadb/d' pyproject.toml
           sed -i '/psycopg2/d' pyproject.toml
           sed -i '/influxdb/d' pyproject.toml
-          echo "已移除会触发编译失败的数据库依赖"
 
-      - name: 全静态构建Android二进制（Edge分支彻底解决镜像问题）
+      - name: 全静态构建Android二进制
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
@@ -28,10 +27,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ==============================================
             # 1. 配置镜像源
-            # ==============================================
-            echo "===== 配置镜像源 ====="
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
@@ -39,13 +35,9 @@ jobs:
             https://mirrors.ustc.edu.cn/alpine/edge/main
             https://mirrors.ustc.edu.cn/alpine/edge/community
             EOF
-
             apk update --no-cache
 
-            # ==============================================
             # 2. 安装系统构建依赖
-            # ==============================================
-            echo "===== 安装系统依赖 ====="
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev \
@@ -61,9 +53,7 @@ jobs:
 
             apk add --no-cache musl-static || true
 
-            # ==============================================
             # 3. 环境配置
-            # ==============================================
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
             export LDFLAGS="-L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static"
@@ -77,22 +67,14 @@ jobs:
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             
-            # ==============================================
             # 4. 安装打包工具
-            # ==============================================
-            echo "===== 安装打包工具 ====="
             pip install --upgrade pip
             pip install --no-cache-dir "setuptools<70.0.0" wheel 
             pip install --no-cache-dir pyinstaller
             pip install --no-cache-dir --no-build-isolation staticx
-            echo "✅ staticx 编译并安装成功"
 
-            # ==============================================
             # 5. 安装 Python 业务依赖
-            # ==============================================
-            echo "===== 安装业务依赖 ====="
             pip install --no-cache-dir cryptography==38.0.4
-            
             pip install --no-cache-dir \
               annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
               bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 \
@@ -104,21 +86,12 @@ jobs:
               pynacl==1.6.2 pyyaml==6.0.3 referencing==0.37.0 requests==2.33.0 rpds-py==0.30.0 \
               starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 \
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
-
             pip install --no-cache-dir .
 
-            # ==============================================
-            # 6. 【核心修复】：清理库 RPATH 以便 staticx 处理
-            # ==============================================
-            echo "===== 预处理：移除所有系统库和虚拟环境库的 RPATH (防止 staticx 报错) ====="
-            # 使用 patchelf 扫描并清理所有可能被 PyInstaller 抓取的 .so 文件
-            # 这解决了 staticx: Unsupported PyInstaller input (DT_RUNPATH) 报错
+            # 6. 预处理：移除所有库的 RPATH
             find /usr/lib /lib /opt/venv -name "*.so*" -type f -exec patchelf --remove-rpath {} \; 2>/dev/null || true
 
-            # ==============================================
             # 7. 打包
-            # ==============================================
-            echo "===== 生成启动脚本与打包 ====="
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -138,13 +111,16 @@ jobs:
               --strip \
               run.py
 
-            # 最终静态化
-            echo "===== 执行 staticx 封包 ====="
+            # 执行 staticx 封包
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
-            echo "===== 构建产物 ====="
-            ls -lh dist/
-            file dist/foghorn-android-arm64-static
+            # ==============================================
+            # 【核心修复】：将 dist 目录所有权交给宿主机用户 (UID 1001)
+            # ==============================================
+            echo "===== 修复权限，防止上传失败 ====="
+            chown -R 1001:1001 dist/
+            chmod -R 755 dist/
+            echo "✅ 权限已修复"
 
       - name: 上传最终全静态二进制
         uses: actions/upload-artifact@v4
