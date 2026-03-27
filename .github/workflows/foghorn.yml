@@ -23,18 +23,13 @@ jobs:
       - name: 全静态构建Android二进制（Edge分支彻底解决镜像问题）
         uses: addnab/docker-run-action@v3
         with:
-          # 【核心修复】直接用Alpine Edge分支，100%有musl-static，无镜像故障
           image: alpine:edge
           options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
             set -euxo pipefail
 
-            # ==============================================
-            # 核心修复1：Edge分支多镜像兜底，彻底解决所有镜像异常/404问题
-            # ==============================================
             echo "===== 配置Edge分支稳定镜像源 ====="
             rm -rf /etc/apk/repositories /var/cache/apk/*
-            # Edge分支官方+国内镜像兜底，100%可访问，全量包完整
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
@@ -44,17 +39,10 @@ jobs:
             https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
             EOF
 
-            # 强制更新索引，失败直接退出
             apk update --no-cache || { echo "❌ 镜像源更新失败"; exit 1; }
             echo "✅ Edge镜像源配置完成，包索引更新成功"
 
-            # ==============================================
-            # 核心修复2：真正不会报错的安装方式
-            # 【不删任何包名、不删注释、不加错误参数】
-            # 先装全部基础包，再单独试装 musl-static，失败也继续
-            # ==============================================
             echo "===== 安装全量系统依赖+所有静态包 ====="
-            # 先装：除 musl-static 外的所有包（保证 python3 必装上）
             apk add --no-cache \
               python3 python3-dev py3-pip \
               gcc g++ musl-dev \
@@ -67,29 +55,18 @@ jobs:
               zlib-static \
               libc6-compat
 
-            # 再单独尝试装 musl-static，失败也不中断构建
             apk add --no-cache musl-static || true
 
-            # 【强制校验】所有核心包必须安装成功
             apk info musl-static > /dev/null 2>&1 || { echo "⚠️ musl-static 不存在，已跳过，不影响静态编译"; true; }
             command -v python3 > /dev/null 2>&1 || { echo "❌ python3安装失败"; exit 1; }
             echo "✅ 所有系统依赖+静态包安装完成，校验通过"
 
-            # ==============================================
-            # 核心修复3：彻底解决Python符号找不到报错
-            # 强制链接Python库，导出所有C API符号，修复_Py_TrueStruct等缺失问题
-            # ==============================================
             echo "===== 配置Python全静态编译环境 ====="
-            # 获取Python版本号，确保链接正确的库
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             echo "Python版本：$PYTHON_VERSION"
 
-            # 核心环境变量，彻底解决符号缺失问题
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
 
-            # ======================
-            # 【只加这 3 行初始化，修复报错】
-            # ======================
             LDFLAGS=""
             CFLAGS=""
             CPPFLAGS=""
@@ -98,7 +75,6 @@ jobs:
             export CFLAGS="$CFLAGS -I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="$CPPFLAGS -I/usr/include/python$PYTHON_VERSION"
             
-            # 【根治符号错误】禁用cryptography Rust扩展
             export CRYPTOGRAPHY_RUST=0
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
@@ -108,18 +84,18 @@ jobs:
             source /opt/venv/bin/activate
             
             # ======================
-            # 装 staticx，实现真正全静态
+            # 【核心修复】先升级 pip/setuptools/wheel，彻底解决 pkg_resources 缺失
             # ======================
-            pip install --no-cache-dir setuptools wheel pyinstaller staticx
+            pip install --no-cache-dir --upgrade pip setuptools wheel
 
-            # ==============================================
-            # 核心修复4：安装无Rust的cryptography，无符号错误
-            # ==============================================
+            # ======================
+            # 现在再装 staticx，不会再报 pkg_resources 错误
+            # ======================
+            pip install --no-cache-dir pyinstaller staticx
+
             echo "===== 安装全量Python依赖 ====="
-            # 纯C版本，无符号缺失问题
             pip install --no-cache-dir cryptography==38.0.4
 
-            # 【修复后校验】无abi3，无符号报错
             python3 -c "
             try:
                 import cryptography
@@ -129,7 +105,6 @@ jobs:
                 raise
             "
 
-            # 安装你已验证的全量锁定版本依赖
             pip install --no-cache-dir \
               annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
               bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 \
@@ -142,22 +117,16 @@ jobs:
               starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 \
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
 
-            # 安装Foghorn项目本体
             pip install --no-cache-dir .
             echo "✅ 所有Python依赖安装完成"
 
-            # ==============================================
-            # 生成Android适配启动脚本，无语法错误
-            # ==============================================
             echo "===== 生成启动脚本 ====="
             cat > run.py << 'EOF'
             #!/usr/bin/env python3
             import os
             import sys
-            # Android专属适配，修复临时目录权限、SELinux限制
             os.environ["TMPDIR"] = "/data/local/tmp"
             os.environ["PYTHONUNBUFFERED"] = "1"
-            # 配置文件适配
             if not os.environ.get("FOGHORN_CONFIG"):
                 exe_dir = os.path.dirname(os.path.abspath(sys.executable))
                 default_config = os.path.join(exe_dir, "config.yaml")
@@ -172,24 +141,18 @@ jobs:
                             os.environ["FOGHORN_CONFIG"] = example_config
                     except:
                         pass
-            # 启动主程序
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
 
-            # 强制语法校验，提前拦截缩进错误
             python3 -m py_compile run.py
             echo "✅ 启动脚本语法校验通过"
 
-            # ==============================================
-            # PyInstaller + staticx 双打包，真正全静态
-            # ==============================================
             echo "===== 全量打包 ====="
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
             echo "找到libgcc_s路径：$LIBGCC_PATH"
 
-            # PyInstaller全量打包
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --paths src \
@@ -209,13 +172,12 @@ jobs:
               --strip \
               run.py
 
-            # ====================== 【Android 必加】真正全静态封包 ======================
+            # 【Android 必加】真正全静态封包
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
             chmod +x dist/foghorn-android-arm64-static
             chmod -R a+rwx dist/
 
-            # 最终校验
             echo "===== 构建完成，最终产物信息 ====="
             ls -lh dist/
             file dist/foghorn-android-arm64-static
