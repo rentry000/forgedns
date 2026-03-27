@@ -64,10 +64,10 @@ jobs:
             # 完全不动上游源码，用顶层启动脚本规避相对导入问题
             # ==============================================
             cat > run.py << 'EOF'
-from foghorn.main import main
-if __name__ == "__main__":
-    main()
-EOF
+            from foghorn.main import main
+            if __name__ == "__main__":
+            main()
+            EOF
 
             # 5. PyInstaller打包（用新的启动脚本作为入口）
             pyinstaller --onefile --clean \
