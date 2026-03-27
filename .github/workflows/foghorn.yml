@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 最终无依赖版
+name: Build Foghorn Android ARM64 最终稳定版
 on:
   workflow_dispatch:
 
@@ -29,22 +29,52 @@ jobs:
             set -euxo pipefail
 
             # ==============================================
-            # 核心修复1：替换官方源为国内镜像，解决CDN波动+包找不到问题
+            # 核心修复1：多镜像兜底+官方源优先，彻底解决镜像波动/包缺失问题
             # ==============================================
-            echo "===== 替换Alpine镜像源 ====="
-            sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+            echo "===== 配置稳定Alpine镜像源 ====="
+            # 先清理所有旧源和缓存，避免干扰
+            rm -rf /etc/apk/repositories /var/cache/apk/*
+            # 优先官方主源（100%包含musl-static包），备用国内镜像兜底
+            cat > /etc/apk/repositories << 'EOF'
+            https://dl-cdn.alpinelinux.org/alpine/v3.20/main
+            https://dl-cdn.alpinelinux.org/alpine/v3.20/community
+            https://mirrors.ustc.edu.cn/alpine/v3.20/main
+            https://mirrors.ustc.edu.cn/alpine/v3.20/community
+            https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.20/main
+            https://mirrors.tuna.tsinghua.edu.cn/alpine/v3.20/community
+            EOF
 
-            # 1. 安装系统级构建依赖，移除不存在的-static包，保留正确的开发包
+            # 强制更新索引，确保包列表完整
+            apk update --no-cache
+            echo "✅ 镜像源配置完成，包索引更新成功"
+
+            # ==============================================
+            # 核心修复2：musl-static多重兜底安装，彻底解决包找不到问题
+            # ==============================================
             echo "===== 安装系统构建依赖 ====="
-            apk update
+            # 先安装基础依赖，单独处理musl-static
             apk add --no-cache \
               python3 python3-dev py3-pip \
-              gcc g++ musl-dev musl-static \
+              gcc g++ musl-dev \
               linux-headers libffi-dev \
               openssl-dev openssl-libs-static \
               build-base patchelf pkgconf scons \
               libcap-dev sqlite-dev sqlite-static libgcc \
               libsodium-dev libsodium-static zlib-dev zlib-static rust cargo
+
+            # 兜底1：优先从v3.20主源安装musl-static
+            if ! apk add --no-cache musl-static; then
+              echo "⚠️  主源musl-static安装失败，启用edge仓库兜底"
+              # 兜底2：临时添加edge官方仓库（100%有musl-static），仅安装该包，不升级其他包
+              echo "https://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositories
+              apk update --no-cache
+              apk add --no-cache musl-static
+              # 安装完成后移除edge仓库，避免其他包被意外升级
+              sed -i '/edge/d' /etc/apk/repositories
+              apk update --no-cache
+            fi
+
+            echo "✅ 所有系统依赖安装完成"
 
             # 2. 配置Python虚拟环境，升级构建工具
             python3 -m venv /opt/venv
@@ -80,7 +110,7 @@ jobs:
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
 
             # ==============================================
-            # 核心修复2：修改cryptography库依赖，解决带哈希的libgcc_s找不到问题
+            # 核心修复3：修改cryptography库依赖，解决带哈希的libgcc_s找不到问题
             # ==============================================
             echo "===== 修复cryptography库依赖 ====="
             # 找到cryptography的Rust扩展so文件
@@ -103,7 +133,7 @@ jobs:
             pip install --no-cache-dir .
 
             # ==============================================
-            # 核心修复3：生成适配Android的启动脚本
+            # 核心修复4：生成适配Android的启动脚本
             # ==============================================
             echo "===== 生成启动脚本 ====="
             cat > run.py << 'EOF'
@@ -142,13 +172,13 @@ jobs:
             if __name__ == "__main__":
                 main()
             EOF
-
+            
             # 语法校验，提前拦截错误
             python3 -m py_compile run.py
             echo "✅ 启动脚本语法校验通过"
 
             # ==============================================
-            # 核心修复4：PyInstaller全量打包，所有依赖内置到二进制
+            # 核心修复5：PyInstaller全量打包，所有依赖内置到二进制
             # ==============================================
             echo "===== PyInstaller全量打包 ====="
             # 获取libgcc_s.so.1的路径
@@ -205,9 +235,9 @@ jobs:
             ldd dist/foghorn-android-arm64 || true
             echo "✅ 构建完成！最终产物：dist/foghorn-android-arm64"
 
-      - name: 上传最终Android无依赖版二进制
+      - name: 上传最终Android稳定版二进制
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-v8a-无依赖最终版
+          name: foghorn-android-arm64-v8a-最终稳定版
           path: dist/foghorn-android-arm64
           retention-days: 30
