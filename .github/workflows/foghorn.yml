@@ -47,10 +47,9 @@ jobs:
             echo "✅ Edge镜像源配置完成，包索引更新成功"
 
             # ==============================================
-            # 核心修复2：真正不会报错的安装方式
+            # 核心修复2：安装系统依赖
             # ==============================================
             echo "===== 安装全量系统依赖+所有静态包 ====="
-            # 【修复补充】：额外加上 py3-setuptools 以防系统级缺失
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev \
@@ -94,18 +93,19 @@ jobs:
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             
-            # ======================
-            # 【关键修复区】分步安装构建工具与 staticx
-            # ======================
+            # ==============================================
+            # 【终极修复区】：降级 setuptools 以兼容 staticx
+            # ==============================================
             echo "===== 安装打包工具 ====="
-            # 1. 升级 pip 并预先安装 setuptools 和 wheel (提供 pkg_resources)
             pip install --upgrade pip
-            pip install --no-cache-dir setuptools wheel
             
-            # 2. 安装 pyinstaller
+            # 1. 强制安装低于 70.0.0 版本的 setuptools，保留 pkg_resources 模块
+            pip install --no-cache-dir "setuptools<70.0.0" wheel
+            
+            # 2. 正常安装 pyinstaller
             pip install --no-cache-dir pyinstaller
             
-            # 3. 强制关闭构建隔离安装 staticx，让其使用刚才装好的 setuptools
+            # 3. 强制关闭构建隔离，让 staticx 必须使用我们刚刚安装的老版本 setuptools 进行构建
             pip install --no-cache-dir --no-build-isolation staticx
             echo "✅ 打包工具安装成功"
 
