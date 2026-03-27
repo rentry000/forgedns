@@ -110,7 +110,11 @@ jobs:
             # 2. 配置Python虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
-            pip install --no-cache-dir --upgrade pip setuptools wheel pyinstaller staticx
+            
+            # ======================
+            # 【唯一修改：锁定版本，修复staticx pkg_resources报错】
+            # ======================
+            pip install --no-cache-dir "setuptools<70" "pip<26" wheel pyinstaller staticx==0.13.9
 
             # ==============================================
             # 核心修复4：修复cryptography编译，彻底解决符号问题
