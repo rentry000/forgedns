@@ -28,7 +28,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 安装构建依赖（适配Alpine 3.20，删除废弃包）
+            # 1. 安装系统级构建依赖（适配Alpine 3.20，补全静态编译所需全量依赖）
             apk update
             apk add --no-cache \
               python3 python3-dev py3-pip \
@@ -36,9 +36,10 @@ jobs:
               linux-headers libffi-dev \
               openssl-dev openssl-libs-static \
               build-base patchelf pkgconf scons \
-              libcap-dev sqlite-dev sqlite-static libgcc
+              libcap-dev sqlite-dev sqlite-static libgcc \
+              libsodium-dev zlib-dev zlib-static
 
-            # 2. 配置Python虚拟环境
+            # 2. 配置Python虚拟环境，升级核心构建工具
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             pip install --no-cache-dir --upgrade pip
@@ -52,27 +53,64 @@ jobs:
               --no-build-isolation \
               staticx==0.13.9
 
-            # 3. 安装项目核心依赖
+            # 3. 安装你已验证的全量固定版本依赖（彻底解决版本冲突&编译报错）
+            echo "===== 安装锁定版本的全量Python依赖 ====="
+            pip install --no-cache-dir \
+              annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
+              bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 \
+              charset-normalizer==3.4.6 click==8.3.1 cryptography==46.0.6 dnslib==0.9.26 \
+              dnspython==2.8.0 docker==7.1.0 fastapi==0.135.2 h11==0.16.0 \
+              idna==3.11 ifaddr==0.2.0 invoke==2.2.1 jsonschema==4.26.0 \
+              jsonschema-specifications==2025.9.1 mysql-connector-python==9.6.0 paho-mqtt==2.1.0 \
+              paramiko==4.0.0 psutil==7.2.2 pycparser==3.0 pydantic==2.12.5 pydantic-core==2.41.5 \
+              pynacl==1.6.2 pyyaml==6.0.3 referencing==0.37.0 requests==2.33.0 rpds-py==0.30.0 \
+              starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 \
+              uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
+
+            # 4. 安装Foghorn项目本体（已提前锁定依赖，无版本冲突）
+            echo "===== 安装Foghorn核心项目 ====="
             pip install --no-cache-dir .
 
-            # 4. 全量清理RPATH，避免静态打包失败
-            find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
-            find /opt/venv/lib/python3.12/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            # 5. 全量清理RPATH，解决Android环境so库兼容性问题，避免静态打包失败
+            echo "===== 清理so库RPATH ====="
+            find /usr/lib -name "*.so*" -type f -print0 | xargs -0 -r patchelf --remove-rpath 2>/dev/null || true
+            find /opt/venv/lib/python3.12/site-packages -name "*.so*" -type f -print0 | xargs -0 -r patchelf --remove-rpath 2>/dev/null || true
 
             # ==============================================
-            # 已修复：修正缩进错误，彻底解决语法报错
+            # 核心修复：彻底解决IndentationError缩进报错
+            # 完整启动脚本，适配静态打包，无任何语法错误
             # ==============================================
+            echo "===== 生成无语法错误的启动脚本 ====="
             cat > run.py << 'EOF'
+            #!/usr/bin/env python3
+            """
+            Foghorn DNS 启动入口
+            适配PyInstaller静态打包，无缩进语法错误
+            """
+            import os
+            import sys
             from foghorn.main import main
+            
+            # 静态打包适配：强制设置配置文件默认路径
+            if not os.environ.get("FOGHORN_CONFIG"):
+                # 优先读取同目录下的config.yaml，无则使用示例配置
+                default_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+                if os.path.exists(default_config):
+                    os.environ["FOGHORN_CONFIG"] = default_config
+                else:
+                    os.environ["FOGHORN_CONFIG"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "example_configs", "config.full.yaml")
+            
             if __name__ == "__main__":
-            main()
+                main()
             EOF
 
-            # 校验启动脚本语法（提前拦截语法错误）
+            # 强制语法校验，提前拦截所有缩进/语法错误（构建失败直接终止，不往下执行）
+            echo "===== 启动脚本语法校验 ====="
             python3 -m py_compile run.py
-            echo "启动脚本语法校验通过，无缩进/语法错误"
+            echo "✅ 启动脚本语法校验通过，无缩进/语法错误"
 
-            # 5. PyInstaller打包（用修复后的启动脚本作为入口）
+            # 6. PyInstaller全量打包，补全所有隐藏导入，避免打包后模块缺失
+            echo "===== PyInstaller打包动态二进制 ====="
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -91,30 +129,39 @@ jobs:
               --hidden-import pydantic_core \
               --hidden-import bcrypt \
               --hidden-import rpds \
+              --hidden-import paramiko \
+              --hidden-import pynacl \
+              --hidden-import cffi \
+              --hidden-import anyio \
+              --hidden-import starlette \
+              --hidden-import uvicorn \
+              --hidden-import requests \
               --exclude-module mariadb \
               --exclude-module psycopg2 \
               --exclude-module influxdb \
               --exclude-module tests \
               run.py
 
-            # 二次清理构建目录的库文件RPATH
-            find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
+            # 二次清理构建产物的RPATH，确保静态打包兼容性
+            find build/foghorn_dynamic -name "*.so*" -type f -print0 | xargs -0 -r patchelf --remove-rpath 2>/dev/null || true
 
-            # 6. staticx构建最终纯静态ARM64二进制（Android直接可运行）
+            # 7. staticx构建最终纯静态ARM64二进制（Android免环境直接可运行）
+            echo "===== 构建纯静态二进制 ====="
             staticx \
               --strip \
               --no-compress \
               dist/foghorn_dynamic \
               dist/foghorn-android-arm64
 
-            # 修复上传权限问题
+            # 修复权限问题，确保Android端可直接执行
             chmod +x dist/foghorn-android-arm64
             chmod -R a+rwx dist/
 
-            # 校验产物
+            # 最终产物校验，确认构建成功
+            echo "===== 构建完成，产物信息 ====="
             ls -lh dist/
             file dist/foghorn-android-arm64
-            echo "构建完成！最终产物：dist/foghorn-android-arm64"
+            echo "✅ 最终可执行文件：dist/foghorn-android-arm64"
 
       - name: 上传最终Android适配版二进制
         uses: actions/upload-artifact@v4
