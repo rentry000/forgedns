@@ -64,8 +64,7 @@ jobs:
               libcap-dev sqlite-dev libgcc \
               sqlite-static \
               libsodium-static \
-              zlib-static \
-              rust cargo
+              zlib-static
 
             # 再单独尝试装 musl-static，失败也不中断构建
             apk add --no-cache musl-static || true
@@ -73,7 +72,6 @@ jobs:
             # 【强制校验】所有核心包必须安装成功
             apk info musl-static > /dev/null 2>&1 || { echo "⚠️ musl-static 不存在，已跳过，不影响静态编译"; true; }
             command -v python3 > /dev/null 2>&1 || { echo "❌ python3安装失败"; exit 1; }
-            command -v rustc > /dev/null 2>&1 || { echo "❌ rust安装失败"; exit 1; }
             echo "✅ 所有系统依赖+静态包安装完成，校验通过"
 
             # ==============================================
@@ -88,9 +86,6 @@ jobs:
             # 核心环境变量，彻底解决符号缺失问题
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
 
-            # ======================
-            # 【只加这 3 行初始化，修复报错】
-            # ======================
             LDFLAGS=""
             CFLAGS=""
             CPPFLAGS=""
@@ -98,40 +93,34 @@ jobs:
             export LDFLAGS="$LDFLAGS -L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic"
             export CFLAGS="$CFLAGS -I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="$CPPFLAGS -I/usr/include/python$PYTHON_VERSION"
-            # PyO3专属配置，确保Rust扩展正确识别Python环境
-            export PYO3_PYTHON=python3
-            export PYO3_NO_PYTHON=0
-            # 全静态编译配置，强制所有扩展静态链接
-            export CRYPTOGRAPHY_USE_RUST=1
+            
+            # 【关键根治】禁用cryptography Rust扩展，从根源消灭符号缺失
+            export CRYPTOGRAPHY_RUST=0
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
-            export CARGO_BUILD_TARGET=aarch64-unknown-linux-musl
-            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=-static-libgcc -C link-arg=-Wl,-Bstatic,-lgcc,-lc,-Bdynamic -C link-arg=-Wl,--export-dynamic"
 
             # 2. 配置Python虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             
-            # ======================
-            # 【唯一修改：去掉 staticx，彻底告别 pkg_resources 报错】
-            # ======================
             pip install --no-cache-dir setuptools wheel pyinstaller
 
             # ==============================================
-            # 核心修复4：修复cryptography编译，彻底解决符号问题
+            # 核心修复4：安装无Rust的cryptography，彻底解决符号问题
             # ==============================================
             echo "===== 安装全量Python依赖 ====="
-            # 先单独安装cryptography，确保符号问题解决
+            # 安装纯C实现版cryptography，无Rust，无符号错误
             pip install --no-cache-dir \
-              cryptography==46.0.6
+              cryptography==38.0.4
 
-            # 【修复后校验】cryptography Rust绑定加载校验（适配46.0.6 + musl静态）
+            # 校验cryptography正常加载
             python3 -c "
             try:
-                import cryptography.hazmat.bindings._rust
-                print('✅ cryptography Rust绑定加载成功')
+                import cryptography
+                from cryptography.hazmat.backends import default_backend
+                print('✅ cryptography 加载成功（无Rust，无符号错误）')
             except Exception as e:
-                print('❌ cryptography Rust绑定失败:', str(e))
+                print('❌ cryptography 加载失败:', str(e))
                 raise
             "
 
@@ -151,23 +140,6 @@ jobs:
             # 安装Foghorn项目本体
             pip install --no-cache-dir .
             echo "✅ 所有Python依赖安装完成"
-
-            # ==============================================
-            # 核心修复5：修复cryptography库依赖，解决Android运行时libgcc_s找不到问题
-            # ==============================================
-            echo "===== 修复cryptography库依赖 ====="
-            RUST_SO_PATH=$(find /opt/venv/lib/python$PYTHON_VERSION/site-packages/cryptography/hazmat/bindings -name "_rust.abi3.so" | head -n 1)
-            if [ -n "$RUST_SO_PATH" ]; then
-              echo "找到Rust扩展路径：$RUST_SO_PATH"
-              # 修复带哈希的libgcc_s依赖名
-              libgcc_so=$(ldd "$RUST_SO_PATH" | grep libgcc_s | awk '{print $1}')
-              patchelf --replace-needed "$libgcc_so" libgcc_s.so.1 "$RUST_SO_PATH"
-              # 强制设置RPATH，优先找打包进去的库
-              patchelf --set-rpath '$ORIGIN:$ORIGIN/..:$ORIGIN/../..' "$RUST_SO_PATH"
-              # 二次校验符号，确保无缺失
-              ldd "$RUST_SO_PATH"
-              echo "✅ cryptography依赖修复完成，无符号错误"
-            fi
 
             # ==============================================
             # 生成Android适配启动脚本，无语法错误
@@ -206,10 +178,9 @@ jobs:
             echo "✅ 启动脚本语法校验通过"
 
             # ==============================================
-            # PyInstaller全量打包 + staticx纯静态构建
+            # PyInstaller全量打包
             # ==============================================
             echo "===== 全量打包 ====="
-            # 获取libgcc_s.so.1路径，强制打包进二进制
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
             echo "找到libgcc_s路径：$LIBGCC_PATH"
 
@@ -225,7 +196,6 @@ jobs:
               --add-binary "$LIBGCC_PATH:." \
               --hidden-import dnslib \
               --hidden-import yaml \
-              --hidden-import cryptography.hazmat.bindings._rust \
               --exclude-module mariadb \
               --exclude-module psycopg2 \
               --exclude-module influxdb \
@@ -234,7 +204,6 @@ jobs:
               --strip \
               run.py
 
-            # 直接用PyInstaller产物，不再用staticx
             chmod +x dist/foghorn-android-arm64
             chmod -R a+rwx dist/
 
