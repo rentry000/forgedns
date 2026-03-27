@@ -28,7 +28,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 安装构建依赖（已修复：删除 musl-static libffi-static，适配 Alpine 3.20）
+            # 1. 安装构建依赖（已修复：删除 Alpine 3.20 不存在的 musl-static libffi-static）
             apk update
             apk add --no-cache \
               python3 python3-dev py3-pip \
@@ -38,7 +38,7 @@ jobs:
               build-base patchelf pkgconf scons \
               libcap-dev sqlite-dev sqlite-static libgcc
 
-            # 2. Python 环境
+            # 2. 配置Python虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             pip install --no-cache-dir --upgrade pip
@@ -48,18 +48,19 @@ jobs:
               pyinstaller \
               --no-build-isolation
             
+            # 安装稳定版staticx
             pip install --no-cache-dir \
               --no-build-isolation \
               staticx==0.13.9
 
-            # 3. 安装项目依赖
+            # 3. 安装项目核心依赖
             pip install --no-cache-dir .
 
-            # 4. 清理 RPATH（避免静态打包失败）
+            # 4. 全量清理RPATH，避免静态打包失败
             find /usr/lib -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
             find /opt/venv/lib/python3.12/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
 
-            # 5. PyInstaller 打包
+            # 5. PyInstaller打包动态二进制
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -84,19 +85,31 @@ jobs:
               --exclude-module tests \
               src/foghorn/main.py
 
+            # 二次清理构建目录的库文件RPATH
             find build/foghorn_dynamic -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
 
-            # 6. staticx 转纯静态（Android 直接运行）
+            # 6. staticx构建最终纯静态ARM64二进制（Android直接可运行）
             staticx \
               --strip \
               --no-compress \
               dist/foghorn_dynamic \
               dist/foghorn-android-arm64
 
+            # ==============================================
+            # 核心修复：解决上传权限报错
+            # 给产物目录开放权限，确保宿主机runner用户可正常读取
+            # ==============================================
             chmod +x dist/foghorn-android-arm64
+            chmod -R a+rwx dist/
+
+            # 校验产物
             ls -lh dist/
             file dist/foghorn-android-arm64
             echo "构建完成！最终产物：dist/foghorn-android-arm64"
+
+      # 可选：宿主机二次权限修复（双重保险，极端情况启用）
+      # - name: 宿主机权限修复
+      #   run: sudo chmod -R a+rwx ${{ github.workspace }}/dist/
 
       - name: 上传最终Android适配版二进制
         uses: actions/upload-artifact@v4
