@@ -28,15 +28,22 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 安装系统级构建依赖，补全全量静态库
+            # ==============================================
+            # 核心修复1：替换官方源为国内镜像，解决CDN波动+包找不到问题
+            # ==============================================
+            echo "===== 替换Alpine镜像源 ====="
+            sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
+            # 1. 安装系统级构建依赖，移除不存在的-static包，保留正确的开发包
+            echo "===== 安装系统构建依赖 ====="
             apk update
             apk add --no-cache \
               python3 python3-dev py3-pip \
               gcc g++ musl-dev musl-static \
-              linux-headers libffi-dev libffi-static \
+              linux-headers libffi-dev \
               openssl-dev openssl-libs-static \
               build-base patchelf pkgconf scons \
-              libcap-dev sqlite-dev sqlite-static libgcc libgcc-static \
+              libcap-dev sqlite-dev sqlite-static libgcc \
               libsodium-dev libsodium-static zlib-dev zlib-static rust cargo
 
             # 2. 配置Python虚拟环境，升级构建工具
@@ -50,14 +57,14 @@ jobs:
               --no-build-isolation
 
             # 3. 强制完全静态编译所有带Rust/C扩展的依赖，消除动态依赖
-            echo "===== 静态编译核心依赖 ====="
-            # 核心环境变量，强制静态链接，消除对libgcc_s的动态依赖
+            echo "===== 静态编译核心Python依赖 ====="
+            # 核心环境变量，强制静态链接，彻底解决libgcc_s依赖问题
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
             export PYO3_STATIC=1
-            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=-static-libgcc -C link-arg=-Wl,-Bstatic,-lgcc,-Bdynamic"
+            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=-static-libgcc -C link-arg=-Wl,-Bstatic,-lgcc,-lc,-Bdynamic"
             export CFLAGS="-static -static-libgcc"
-            export LDFLAGS="-static -static-libgcc -Wl,-Bstatic,-lgcc,-Bdynamic"
+            export LDFLAGS="-static -static-libgcc -Wl,-Bstatic,-lgcc,-lc,-Bdynamic"
 
             # 安装全量锁定版本依赖，强制静态编译
             pip install --no-cache-dir \
@@ -73,7 +80,7 @@ jobs:
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
 
             # ==============================================
-            # 核心修复1：修改cryptography库的依赖，解决带哈希的libgcc_s找不到的问题
+            # 核心修复2：修改cryptography库依赖，解决带哈希的libgcc_s找不到问题
             # ==============================================
             echo "===== 修复cryptography库依赖 ====="
             # 找到cryptography的Rust扩展so文件
@@ -96,7 +103,7 @@ jobs:
             pip install --no-cache-dir .
 
             # ==============================================
-            # 核心修复2：生成适配Android的启动脚本
+            # 核心修复3：生成适配Android的启动脚本
             # ==============================================
             echo "===== 生成启动脚本 ====="
             cat > run.py << 'EOF'
@@ -135,13 +142,13 @@ jobs:
             if __name__ == "__main__":
                 main()
             EOF
-            
+
             # 语法校验，提前拦截错误
             python3 -m py_compile run.py
             echo "✅ 启动脚本语法校验通过"
 
             # ==============================================
-            # 核心修复3：PyInstaller全量打包，把所有依赖库内置到二进制
+            # 核心修复4：PyInstaller全量打包，所有依赖内置到二进制
             # ==============================================
             echo "===== PyInstaller全量打包 ====="
             # 获取libgcc_s.so.1的路径
