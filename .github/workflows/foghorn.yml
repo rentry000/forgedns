@@ -87,6 +87,14 @@ jobs:
 
             # 核心环境变量，彻底解决符号缺失问题
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
+
+            # ======================
+            # 【只加这 3 行初始化，修复报错】
+            # ======================
+            LDFLAGS=""
+            CFLAGS=""
+            CPPFLAGS=""
+
             export LDFLAGS="$LDFLAGS -L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic"
             export CFLAGS="$CFLAGS -I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="$CPPFLAGS -I/usr/include/python$PYTHON_VERSION"
