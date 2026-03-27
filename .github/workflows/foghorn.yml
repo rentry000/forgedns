@@ -4,7 +4,7 @@ on:
 
 jobs:
   build-android:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04-arm64
     steps:
       - name: Checkout 项目源码
         uses: actions/checkout@v4
@@ -46,27 +46,29 @@ jobs:
               zlib-static libc6-compat scons binutils git
             apk add --no-cache musl-static || true
 
-            # 3. 环境变量：强制全静态链接
+            # 3. 环境变量：彻底静态链接，拒绝任何动态 libgcc
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
-            export LDFLAGS="-L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static -static-libgcc -static-libstdc++"
+            export LDFLAGS="-L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static -static-libgcc -static-libstdc++ -Wl,-Bstatic"
             export CFLAGS="-I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="-I/usr/include/python$PYTHON_VERSION"
             export CRYPTOGRAPHY_RUST=0
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
+            export PYO3_CROSS_LIB_DIR=/usr/lib
+            export RUSTFLAGS="-C target-feature=+crt-static"
 
             # 4. 虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
 
-            # 5. 安装打包工具【已修复 staticx pkg_resources 错误】
+            # 5. 安装打包工具
             pip install --upgrade pip
             pip install --no-cache-dir "setuptools==69.0.0" wheel
             pip install --no-cache-dir pyinstaller
             pip install --no-cache-dir --no-build-isolation staticx
 
-            # 6. 安装 Python 依赖
+            # 6. 安装依赖 + 强制 pydantic_core 静态编译
             pip install --no-cache-dir cryptography==38.0.4
             pip install --no-cache-dir \
               annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
@@ -81,27 +83,29 @@ jobs:
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
             pip install --no-cache-dir .
 
-            # 7. 清理所有 RPATH
+            # 7. 【关键】彻底移除 pydantic_core 对 libgcc_s.so.1 的动态依赖
+            find /opt/venv -name "_pydantic_core*.so" -type f | while read so; do
+              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
+              patchelf --remove-rpath "$so" 2>/dev/null || true
+            done
+
             find /usr/lib /lib /opt/venv -name "*.so*" -type f -exec patchelf --remove-rpath {} \; 2>/dev/null || true
 
-            # 8. 打包入口【已修复缩进错误】
-            LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
+            # 8. 启动入口
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
-            os.environ["LD_LIBRARY_PATH"] = "/data/local/tmp"
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
-            
-            # 9. PyInstaller 打包
+
+            # 9. PyInstaller 打包（不再依赖外部 libgcc_s.so）
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
               --collect-all cryptography \
               --collect-all pydantic_core \
-              --add-binary "$LIBGCC_PATH:." \
               --runtime-tmpdir /data/local/tmp \
               --strip \
               --noupx \
