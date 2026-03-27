@@ -88,24 +88,41 @@ jobs:
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
             pip install --no-cache-dir .
 
-            # 6. 预处理：移除所有库的 RPATH
-            find /usr/lib /lib /opt/venv -name "*.so*" -type f -exec patchelf --remove-rpath {} \; 2>/dev/null || true
+            # ==============================================
+            # 6. 【关键修复区】：设置 RPATH 为相对路径 $ORIGIN
+            # ==============================================
+            echo "===== 处理二进制库搜索路径 ====="
+            # 不再删除 RPATH，而是设置为 $ORIGIN 及其父目录，让它能在 PyInstaller 临时目录里找到自己
+            # 这样 staticx 依然会通过校验，但库文件在运行时能找到依赖
+            find /opt/venv -name "*.so*" | while read -r lib; do
+                patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$lib" || true
+            done
+            # 同时也处理系统库
+            find /usr/lib /lib -name "libsqlite3.so*" -exec patchelf --set-rpath '$ORIGIN' {} \; 2>/dev/null || true
 
-            # 7. 打包
+            # 7. 生成启动脚本
             cat > run.py << 'EOF'
             import os, sys
+            # Android 适配
             os.environ["TMPDIR"] = "/data/local/tmp"
+            os.environ["PYTHONUNBUFFERED"] = "1"
+            # 启动主程序
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
 
+            # 8. 打包
+            echo "===== 开始打包 ====="
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
 
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
               --collect-all cryptography \
+              --collect-all pydantic_core \
+              --collect-all bcrypt \
+              --collect-all rpds \
               --add-binary "$LIBGCC_PATH:." \
               --runtime-tmpdir /data/local/tmp \
               --strip \
@@ -114,13 +131,10 @@ jobs:
             # 执行 staticx 封包
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
-            # ==============================================
-            # 【核心修复】：将 dist 目录所有权交给宿主机用户 (UID 1001)
-            # ==============================================
-            echo "===== 修复权限，防止上传失败 ====="
+            # 修复权限
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
-            echo "✅ 权限已修复"
+            echo "✅ 构建完成"
 
       - name: 上传最终全静态二进制
         uses: actions/upload-artifact@v4
