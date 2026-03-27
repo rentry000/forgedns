@@ -43,10 +43,10 @@ jobs:
               gcc g++ musl-dev linux-headers libffi-dev \
               openssl-dev openssl-libs-static build-base patchelf pkgconf \
               libcap-dev sqlite-dev libgcc sqlite-static libsodium-static \
-              zlib-static libc6-compat scons binutils
+              zlib-static libc6-compat scons binutils git
             apk add --no-cache musl-static || true
 
-            # 3. 关键：强制静态链接 libgcc / libstdc++ / 全静态
+            # 3. 环境变量：强制全静态链接
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
             export LDFLAGS="-L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static -static-libgcc -static-libstdc++"
@@ -55,33 +55,37 @@ jobs:
             export CRYPTOGRAPHY_RUST=0
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
-            export PYO3_CROSS_LIB_DIR=/usr/lib
-            export PYO3_NO_PYTHON=1
 
             # 4. 虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
 
-            # 5. 打包工具
+            # 5. 安装打包工具【已修复 staticx pkg_resources 错误】
             pip install --upgrade pip
-            pip install --no-cache-dir "setuptools<70.0.0" wheel
-            pip install --no-cache-dir pyinstaller staticx
+            pip install --no-cache-dir "setuptools==69.0.0" wheel
+            pip install --no-cache-dir pyinstaller
+            pip install --no-cache-dir --no-build-isolation staticx
 
-            # 6. 安装依赖（锁定版本，避免 pydantic_core 动态依赖）
+            # 6. 安装 Python 依赖
+            pip install --no-cache-dir cryptography==38.0.4
             pip install --no-cache-dir \
-              cryptography==38.0.4 \
-              pydantic==2.12.5 pydantic-core==2.41.5 \
-              fastapi==0.135.2 uvicorn==0.42.0 \
-              dnslib==0.9.26 dnspython==2.8.0
+              annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
+              bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 \
+              charset-normalizer==3.4.6 click==8.3.1 dnslib==0.9.26 \
+              dnspython==2.8.0 docker==7.1.0 fastapi==0.135.2 h11==0.16.0 \
+              idna==3.11 ifaddr==0.2.0 invoke==2.2.1 jsonschema==4.26.0 \
+              jsonschema-specifications==2025.9.1 mysql-connector-python==9.6.0 paho-mqtt==2.1.0 \
+              paramiko==4.0.0 psutil==7.2.2 pycparser==3.0 pydantic==2.12.5 pydantic-core==2.41.5 \
+              pynacl==1.6.2 pyyaml==6.0.3 referencing==0.37.0 requests==2.33.0 rpds-py==0.30.0 \
+              starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 \
+              uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
             pip install --no-cache-dir .
 
-            # 7. 清理所有 RPATH，防止找外部 .so
+            # 7. 清理所有 RPATH
             find /usr/lib /lib /opt/venv -name "*.so*" -type f -exec patchelf --remove-rpath {} \; 2>/dev/null || true
 
-            # 8. 定位 libgcc_s，强制打进包
-            LIBGCC=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
-
-            # 9. 启动入口
+            # 8. 打包入口
+            LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -91,28 +95,28 @@ jobs:
                 main()
             EOF
 
-            # 10. PyInstaller：全静态 + 强制带 libgcc
+            # 9. PyInstaller 打包
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
               --collect-all cryptography \
               --collect-all pydantic_core \
-              --add-binary "$LIBGCC:." \
+              --add-binary "$LIBGCC_PATH:." \
               --runtime-tmpdir /data/local/tmp \
               --strip \
               --noupx \
               run.py
 
-            # 11. Staticx 最终封包（真正不依赖系统任何 .so）
+            # 10. Staticx 封包：真正全静态
             staticx --compression xz \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
-            # 12. 修复权限，保证上传成功
+            # 11. 修复权限
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
 
-      - name: 上传终极全静态二进制
+      - name: 上传最终全静态二进制
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-v8a-终极全静态版
