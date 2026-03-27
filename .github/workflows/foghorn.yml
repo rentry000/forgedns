@@ -84,7 +84,7 @@ jobs:
             # 7. 清理所有 RPATH
             find /usr/lib /lib /opt/venv -name "*.so*" -type f -exec patchelf --remove-rpath {} \; 2>/dev/null || true
 
-            # 8. 打包入口
+            # 8. 打包入口【已修复缩进错误】
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
             cat > run.py << 'EOF'
             import os, sys
@@ -92,9 +92,9 @@ jobs:
             os.environ["LD_LIBRARY_PATH"] = "/data/local/tmp"
             from foghorn.main import main
             if __name__ == "__main__":
-            main()
+                main()
             EOF
-
+            
             # 9. PyInstaller 打包
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
@@ -107,7 +107,7 @@ jobs:
               --noupx \
               run.py
 
-            # 10. Staticx 封包：已移除不支持的压缩参数 ✅
+            # 10. Staticx 封包
             staticx \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
