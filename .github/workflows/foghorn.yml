@@ -63,10 +63,10 @@ jobs:
             # 已修复：修正缩进错误，彻底解决语法报错
             # ==============================================
             cat > run.py << 'EOF'
-from foghorn.main import main
-if __name__ == "__main__":
-    main()
-EOF
+            from foghorn.main import main
+            if __name__ == "__main__":
+            main()
+            EOF
 
             # 校验启动脚本语法（提前拦截语法错误）
             python3 -m py_compile run.py
