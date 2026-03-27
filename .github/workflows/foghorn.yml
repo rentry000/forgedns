@@ -92,7 +92,7 @@ jobs:
             os.environ["LD_LIBRARY_PATH"] = "/data/local/tmp"
             from foghorn.main import main
             if __name__ == "__main__":
-                main()
+            main()
             EOF
 
             # 9. PyInstaller 打包
@@ -107,8 +107,8 @@ jobs:
               --noupx \
               run.py
 
-            # 10. Staticx 封包：真正全静态
-            staticx --compression xz \
+            # 10. Staticx 封包：已移除不支持的压缩参数 ✅
+            staticx \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
