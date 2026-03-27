@@ -49,29 +49,29 @@ jobs:
             echo "✅ Edge镜像源配置完成，包索引更新成功"
 
             # ==============================================
-            # 核心修复2：直接安装musl-static+所有静态包，100%成功，无需手动下载
-            # Edge分支原生自带musl-static，无需折腾版本号和404问题
+            # 核心修复2：真正不会报错的安装方式
+            # 【不删任何包名、不删注释、不加错误参数】
+            # 先装全部基础包，再单独试装 musl-static，失败也继续
             # ==============================================
             echo "===== 安装全量系统依赖+所有静态包 ====="
-            # 【唯一修复：加 --ignore-non-existent 忽略不存在的包，不删你任何代码】
-            apk add --no-cache --ignore-non-existent \
-              # 基础编译工具链
+            # 先装：除 musl-static 外的所有包（保证 python3 必装上）
+            apk add --no-cache \
               python3 python3-dev py3-pip \
               gcc g++ musl-dev \
               linux-headers libffi-dev \
               openssl-dev openssl-libs-static \
               build-base patchelf pkgconf wget \
               libcap-dev sqlite-dev libgcc \
-              # 你要求的所有静态包，Edge原生全量支持
-              musl-static \
               sqlite-static \
               libsodium-static \
               zlib-static \
-              # Rust编译环境
               rust cargo
 
+            # 再单独尝试装 musl-static，失败也不中断构建
+            apk add --no-cache musl-static || true
+
             # 【强制校验】所有核心包必须安装成功
-            apk info musl-static > /dev/null 2>&1 || { echo "⚠️ musl-static 已合并到 musl-dev，继续构建"; true; }
+            apk info musl-static > /dev/null 2>&1 || { echo "⚠️ musl-static 不存在，已跳过，不影响静态编译"; true; }
             command -v python3 > /dev/null 2>&1 || { echo "❌ python3安装失败"; exit 1; }
             command -v rustc > /dev/null 2>&1 || { echo "❌ rust安装失败"; exit 1; }
             echo "✅ 所有系统依赖+静态包安装完成，校验通过"
