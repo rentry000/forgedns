@@ -29,27 +29,23 @@ jobs:
             set -euxo pipefail
 
             # ==============================================
-            # 核心修复1：Edge分支多镜像兜底，彻底解决所有镜像异常/404问题
+            # 1. 配置镜像源
             # ==============================================
-            echo "===== 配置Edge分支稳定镜像源 ====="
+            echo "===== 配置镜像源 ====="
             rm -rf /etc/apk/repositories /var/cache/apk/*
-            
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
             https://mirrors.ustc.edu.cn/alpine/edge/main
             https://mirrors.ustc.edu.cn/alpine/edge/community
-            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
-            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
             EOF
 
-            apk update --no-cache || { echo "❌ 镜像源更新失败"; exit 1; }
-            echo "✅ Edge镜像源配置完成，包索引更新成功"
+            apk update --no-cache
 
             # ==============================================
-            # 核心修复2：安装系统依赖
+            # 2. 安装系统构建依赖 (关键：增加 scons)
             # ==============================================
-            echo "===== 安装全量系统依赖+所有静态包 ====="
+            echo "===== 安装系统依赖 (含 scons) ====="
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev \
@@ -60,69 +56,48 @@ jobs:
               sqlite-static \
               libsodium-static \
               zlib-static \
-              libc6-compat
+              libc6-compat \
+              scons  # <--- 核心修复：添加 scons 解决构建失败
 
             apk add --no-cache musl-static || true
 
-            apk info musl-static > /dev/null 2>&1 || { echo "⚠️ musl-static 不存在，已跳过，不影响静态编译"; true; }
-            command -v python3 > /dev/null 2>&1 || { echo "❌ python3安装失败"; exit 1; }
-            echo "✅ 所有系统依赖+静态包安装完成，校验通过"
-
             # ==============================================
-            # 核心修复3：彻底解决Python符号找不到报错
+            # 3. 环境配置
             # ==============================================
-            echo "===== 配置Python全静态编译环境 ====="
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-            echo "Python版本：$PYTHON_VERSION"
-
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
-
-            LDFLAGS=""
-            CFLAGS=""
-            CPPFLAGS=""
-
-            export LDFLAGS="$LDFLAGS -L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static"
-            export CFLAGS="$CFLAGS -I/usr/include/python$PYTHON_VERSION -fPIC"
-            export CPPFLAGS="$CPPFLAGS -I/usr/include/python$PYTHON_VERSION"
-            
+            export LDFLAGS="-L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static"
+            export CFLAGS="-I/usr/include/python$PYTHON_VERSION -fPIC"
+            export CPPFLAGS="-I/usr/include/python$PYTHON_VERSION"
             export CRYPTOGRAPHY_RUST=0
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
 
-            # 配置Python虚拟环境
+            # 创建虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             
             # ==============================================
-            # 【终极修复区】：降级 setuptools 以兼容 staticx
+            # 4. 安装打包工具 (解决 pkg_resources + scons 编译问题)
             # ==============================================
             echo "===== 安装打包工具 ====="
             pip install --upgrade pip
-            
-            # 1. 强制安装低于 70.0.0 版本的 setuptools，保留 pkg_resources 模块
-            pip install --no-cache-dir "setuptools<70.0.0" wheel
-            
-            # 2. 正常安装 pyinstaller
+            # 必须使用旧版 setuptools 以提供 pkg_resources
+            pip install --no-cache-dir "setuptools<70.0.0" wheel 
             pip install --no-cache-dir pyinstaller
             
-            # 3. 强制关闭构建隔离，让 staticx 必须使用我们刚刚安装的老版本 setuptools 进行构建
+            # 使用 --no-build-isolation 配合系统已装的 scons 编译 staticx
             pip install --no-cache-dir --no-build-isolation staticx
-            echo "✅ 打包工具安装成功"
+            echo "✅ staticx 编译并安装成功"
 
             # ==============================================
-            # 核心修复4：安装无Rust的cryptography与全量依赖
+            # 5. 安装 Python 业务依赖
             # ==============================================
-            echo "===== 安装全量Python依赖 ====="
+            echo "===== 安装业务依赖 ====="
             pip install --no-cache-dir cryptography==38.0.4
 
-            python3 -c "
-            try:
-                import cryptography
-                print('✅ cryptography 加载成功')
-            except Exception as e:
-                print('❌ cryptography 加载失败:', str(e))
-                raise
-            "
+            # 校验 cryptography
+            python3 -c "import cryptography; print('✅ cryptography OK')"
 
             pip install --no-cache-dir \
               annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
@@ -137,80 +112,39 @@ jobs:
               uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
 
             pip install --no-cache-dir .
-            echo "✅ 所有Python依赖安装完成"
 
             # ==============================================
-            # 生成Android适配启动脚本
+            # 6. 打包
             # ==============================================
-            echo "===== 生成启动脚本 ====="
+            echo "===== 生成启动脚本与打包 ====="
             cat > run.py << 'EOF'
-            #!/usr/bin/env python3
-            import os
-            import sys
+            import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
-            os.environ["PYTHONUNBUFFERED"] = "1"
-            if not os.environ.get("FOGHORN_CONFIG"):
-                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-                default_config = os.path.join(exe_dir, "config.yaml")
-                if os.path.exists(default_config):
-                    os.environ["FOGHORN_CONFIG"] = default_config
-                else:
-                    try:
-                        import foghorn
-                        pkg_dir = os.path.dirname(foghorn.__file__)
-                        example_config = os.path.join(pkg_dir, "..", "example_configs", "config.full.yaml")
-                        if os.path.exists(example_config):
-                            os.environ["FOGHORN_CONFIG"] = example_config
-                    except:
-                        pass
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
 
-            python3 -m py_compile run.py
-            echo "✅ 启动脚本语法校验通过"
-
-            # ==============================================
-            # PyInstaller + staticx 双打包
-            # ==============================================
-            echo "===== 全量打包 ====="
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
-            echo "找到libgcc_s路径：$LIBGCC_PATH"
 
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
-              --paths src \
-              --paths /opt/venv/lib/python$PYTHON_VERSION/site-packages \
               --collect-all foghorn \
               --collect-all cryptography \
-              --add-data "example_configs:example_configs" \
-              --add-data "assets:assets" \
               --add-binary "$LIBGCC_PATH:." \
-              --hidden-import dnslib \
-              --hidden-import yaml \
-              --exclude-module mariadb \
-              --exclude-module psycopg2 \
-              --exclude-module influxdb \
-              --exclude-module tests \
               --runtime-tmpdir /data/local/tmp \
               --strip \
               run.py
 
-            # 真正全静态封包
+            # 最终静态化
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
-            chmod +x dist/foghorn-android-arm64-static
-            chmod -R a+rwx dist/
-
-            echo "===== 构建完成，最终产物信息 ====="
+            echo "===== 构建产物 ====="
             ls -lh dist/
             file dist/foghorn-android-arm64-static
-            echo "✅ 全静态构建成功！最终可执行文件：dist/foghorn-android-arm64-static"
 
-      - name: 上传最终全静态二进制
+      - name: 上传
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-v8a-终极全静态版
           path: dist/foghorn-android-arm64-static
-          retention-days: 30
