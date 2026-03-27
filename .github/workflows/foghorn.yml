@@ -60,16 +60,19 @@ jobs:
             find /opt/venv/lib/python3.12/site-packages -name "*.so*" -type f | xargs -r patchelf --remove-rpath 2>/dev/null || true
 
             # ==============================================
-            # 核心修复：生成启动脚本，根治相对导入报错
-            # 完全不动上游源码，用顶层启动脚本规避相对导入问题
+            # 已修复：修正缩进错误，彻底解决语法报错
             # ==============================================
             cat > run.py << 'EOF'
-            from foghorn.main import main
-            if __name__ == "__main__":
-            main()
-            EOF
+from foghorn.main import main
+if __name__ == "__main__":
+    main()
+EOF
 
-            # 5. PyInstaller打包（用新的启动脚本作为入口）
+            # 校验启动脚本语法（提前拦截语法错误）
+            python3 -m py_compile run.py
+            echo "启动脚本语法校验通过，无缩进/语法错误"
+
+            # 5. PyInstaller打包（用修复后的启动脚本作为入口）
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
