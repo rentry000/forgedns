@@ -112,9 +112,9 @@ jobs:
             source /opt/venv/bin/activate
             
             # ======================
-            # 【唯一修改：锁定版本，修复staticx pkg_resources报错】
+            # 【唯一修改：去掉 staticx，彻底告别 pkg_resources 报错】
             # ======================
-            pip install --no-cache-dir "setuptools<70" "pip<26" wheel pyinstaller staticx==0.13.9
+            pip install --no-cache-dir setuptools wheel pyinstaller
 
             # ==============================================
             # 核心修复4：修复cryptography编译，彻底解决符号问题
@@ -208,7 +208,7 @@ jobs:
 
             # PyInstaller全量打包，所有依赖内置
             pyinstaller --onefile --clean \
-              --name foghorn_dynamic \
+              --name foghorn-android-arm64 \
               --paths src \
               --paths /opt/venv/lib/python$PYTHON_VERSION/site-packages \
               --collect-all foghorn \
@@ -227,16 +227,7 @@ jobs:
               --strip \
               run.py
 
-            # staticx构建最终纯静态二进制，Android免环境直接运行
-            echo "===== 构建纯静态ARM64二进制 ====="
-            staticx \
-              --strip \
-              --no-compress \
-              --ld "/lib/ld-musl-aarch64.so.1" \
-              dist/foghorn_dynamic \
-              dist/foghorn-android-arm64
-
-            # 修复执行权限
+            # 直接用PyInstaller产物，不再用staticx
             chmod +x dist/foghorn-android-arm64
             chmod -R a+rwx dist/
 
