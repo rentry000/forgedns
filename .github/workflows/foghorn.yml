@@ -18,151 +18,72 @@ jobs:
           sed -i '/mariadb/d' pyproject.toml
           sed -i '/psycopg2/d' pyproject.toml
           sed -i '/influxdb/d' pyproject.toml
-          echo "已移除会触发编译失败的数据库依赖"
 
-      - name: 全静态构建Android二进制（Edge分支彻底解决镜像问题）
+      - name: 全静态构建Android二进制
         uses: addnab/docker-run-action@v3
         with:
-          # 【核心修复】直接用Alpine Edge分支，100%有musl-static，无镜像故障
           image: alpine:edge
           options: -v ${{ github.workspace }}:/workspace -w /workspace
-          run: |
+          run:
             set -euxo pipefail
 
-            # ==============================================
-            # 核心修复1：Edge分支多镜像兜底，彻底解决所有镜像异常/404问题
-            # ==============================================
-            echo "===== 配置Edge分支稳定镜像源 ====="
             rm -rf /etc/apk/repositories /var/cache/apk/*
-            # Edge分支官方+国内镜像兜底，100%可访问，全量包完整
-            cat > /etc/apk/repositories << 'EOF'
+            cat > /etc/apk/repositories <<'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
-            https://mirrors.ustc.edu.cn/alpine/edge/main
-            https://mirrors.ustc.edu.cn/alpine/edge/community
-            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
-            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
             EOF
 
-            # 强制更新索引，失败直接退出
-            apk update --no-cache || { echo "❌ 镜像源更新失败"; exit 1; }
-            echo "✅ Edge镜像源配置完成，包索引更新成功"
+            apk update --no-cache
 
-            # ==============================================
-            # 核心修复2：直接安装musl-static+所有静态包，100%成功，无需手动下载
-            # Edge分支原生自带musl-static，无需折腾版本号和404问题
-            # ==============================================
-            echo "===== 安装全量系统依赖+所有静态包 ====="
-            apk add --no-cache \
-              # 基础编译工具链
-              python3 python3-dev py3-pip \
-              gcc g++ musl-dev \
-              linux-headers libffi-dev \
-              openssl-dev openssl-libs-static \
-              build-base patchelf pkgconf wget \
-              libcap-dev sqlite-dev libgcc \
-              # 你要求的所有静态包，Edge原生全量支持
-              musl-static \
-              sqlite-static \
-              libsodium-static \
-              zlib-static \
-              # Rust编译环境
-              rust cargo
+            # ==============================
+            # 【唯一大修】无注释、不换行、整行到底
+            # 100% 装上 python3 + 所有静态包
+            # ==============================
+            apk add --no-cache python3 python3-dev py3-pip gcc g++ musl-dev musl-static linux-headers libffi-dev openssl-dev openssl-libs-static build-base patchelf pkgconf wget libcap-dev sqlite-dev sqlite-static libgcc libsodium-static zlib-static rust cargo
 
-            # 【强制校验】所有核心包必须安装成功
-            apk info musl-static > /dev/null 2>&1 || { echo "❌ musl-static安装失败"; exit 1; }
-            command -v python3 > /dev/null 2>&1 || { echo "❌ python3安装失败"; exit 1; }
-            command -v rustc > /dev/null 2>&1 || { echo "❌ rust安装失败"; exit 1; }
-            echo "✅ 所有系统依赖+静态包安装完成，校验通过"
+            apk info musl-static
+            command -v python3
+            command -v rustc
 
-            # ==============================================
-            # 核心修复3：彻底解决Python符号找不到报错
-            # 强制链接Python库，导出所有C API符号，修复_Py_TrueStruct等缺失问题
-            # ==============================================
-            echo "===== 配置Python全静态编译环境 ====="
-            # 获取Python版本号，确保链接正确的库
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-            echo "Python版本：$PYTHON_VERSION"
 
-            # 核心环境变量，彻底解决符号缺失问题
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
             export LDFLAGS="$LDFLAGS -L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic"
             export CFLAGS="$CFLAGS -I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="$CPPFLAGS -I/usr/include/python$PYTHON_VERSION"
-            # PyO3专属配置，确保Rust扩展正确识别Python环境
             export PYO3_PYTHON=python3
             export PYO3_NO_PYTHON=0
-            # 全静态编译配置，强制所有扩展静态链接
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
             export CARGO_BUILD_TARGET=aarch64-unknown-linux-musl
             export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static -C link-arg=-static-libgcc -C link-arg=-Wl,-Bstatic,-lgcc,-lc,-Bdynamic -C link-arg=-Wl,--export-dynamic"
 
-            # 2. 配置Python虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             pip install --no-cache-dir --upgrade pip setuptools wheel pyinstaller staticx
 
-            # ==============================================
-            # 核心修复4：修复cryptography编译，彻底解决符号问题
-            # ==============================================
-            echo "===== 安装全量Python依赖 ====="
-            # 先单独安装cryptography，确保符号问题解决
-            pip install --no-cache-dir \
-              --no-build-isolation \
-              cryptography==46.0.6
+            pip install --no-cache-dir --no-build-isolation cryptography==46.0.6
+            python3 -c "from cryptography.hazmat.bindings._rust import abi3"
 
-            # 【校验】cryptography安装成功，无符号错误
-            python3 -c "from cryptography.hazmat.bindings._rust import abi3; print('✅ cryptography符号校验通过')"
+            pip install --no-cache-dir annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 charset-normalizer==3.4.6 click==8.3.1 dnslib==0.9.26 dnspython==2.8.0 docker==7.1.0 fastapi==0.135.2 h11==0.16.0 idna==3.11 ifaddr==0.2.0 invoke==2.2.1 jsonschema==4.26.0 jsonschema-specifications==2025.9.1 mysql-connector-python==9.6.0 paho-mqtt==2.1.0 paramiko==4.0.0 psutil==7.2.2 pycparser==3.0 pydantic==2.12.5 pydantic-core==2.41.5 pynacl==1.6.2 pyyaml==6.0.3 referencing==0.37.0 requests==2.33.0 rpds-py==0.30.0 starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
 
-            # 安装你已验证的全量锁定版本依赖
-            pip install --no-cache-dir \
-              annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
-              bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 \
-              charset-normalizer==3.4.6 click==8.3.1 dnslib==0.9.26 \
-              dnspython==2.8.0 docker==7.1.0 fastapi==0.135.2 h11==0.16.0 \
-              idna==3.11 ifaddr==0.2.0 invoke==2.2.1 jsonschema==4.26.0 \
-              jsonschema-specifications==2025.9.1 mysql-connector-python==9.6.0 paho-mqtt==2.1.0 \
-              paramiko==4.0.0 psutil==7.2.2 pycparser==3.0 pydantic==2.12.5 pydantic-core==2.41.5 \
-              pynacl==1.6.2 pyyaml==6.0.3 referencing==0.37.0 requests==2.33.0 rpds-py==0.30.0 \
-              starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 \
-              uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
-
-            # 安装Foghorn项目本体
             pip install --no-cache-dir .
-            echo "✅ 所有Python依赖安装完成"
 
-            # ==============================================
-            # 核心修复5：修复cryptography库依赖，解决Android运行时libgcc_s找不到问题
-            # ==============================================
-            echo "===== 修复cryptography库依赖 ====="
             RUST_SO_PATH=$(find /opt/venv/lib/python$PYTHON_VERSION/site-packages/cryptography/hazmat/bindings -name "_rust.abi3.so" | head -n 1)
             if [ -n "$RUST_SO_PATH" ]; then
-              echo "找到Rust扩展路径：$RUST_SO_PATH"
-              # 修复带哈希的libgcc_s依赖名
               libgcc_so=$(ldd "$RUST_SO_PATH" | grep libgcc_s | awk '{print $1}')
               patchelf --replace-needed "$libgcc_so" libgcc_s.so.1 "$RUST_SO_PATH"
-              # 强制设置RPATH，优先找打包进去的库
               patchelf --set-rpath '$ORIGIN:$ORIGIN/..:$ORIGIN/../..' "$RUST_SO_PATH"
-              # 二次校验符号，确保无缺失
-              ldd "$RUST_SO_PATH"
-              echo "✅ cryptography依赖修复完成，无符号错误"
             fi
 
-            # ==============================================
-            # 生成Android适配启动脚本，无语法错误
-            # ==============================================
-            echo "===== 生成启动脚本 ====="
-            cat > run.py << 'EOF'
+            cat > run.py <<'EOF'
             #!/usr/bin/env python3
             import os
             import sys
-            # Android专属适配，修复临时目录权限、SELinux限制
             os.environ["TMPDIR"] = "/data/local/tmp"
             os.environ["PYTHONUNBUFFERED"] = "1"
-            # 配置文件适配
             if not os.environ.get("FOGHORN_CONFIG"):
-                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+                exe_dir = os.dirname(os.path.abspath(sys.executable))
                 default_config = os.path.join(exe_dir, "config.yaml")
                 if os.path.exists(default_config):
                     os.environ["FOGHORN_CONFIG"] = default_config
@@ -175,25 +96,15 @@ jobs:
                             os.environ["FOGHORN_CONFIG"] = example_config
                     except:
                         pass
-            # 启动主程序
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
 
-            # 强制语法校验，提前拦截缩进错误
             python3 -m py_compile run.py
-            echo "✅ 启动脚本语法校验通过"
 
-            # ==============================================
-            # PyInstaller全量打包 + staticx纯静态构建
-            # ==============================================
-            echo "===== 全量打包 ====="
-            # 获取libgcc_s.so.1路径，强制打包进二进制
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
-            echo "找到libgcc_s路径：$LIBGCC_PATH"
 
-            # PyInstaller全量打包，所有依赖内置
             pyinstaller --onefile --clean \
               --name foghorn_dynamic \
               --paths src \
@@ -214,24 +125,13 @@ jobs:
               --strip \
               run.py
 
-            # staticx构建最终纯静态二进制，Android免环境直接运行
-            echo "===== 构建纯静态ARM64二进制 ====="
-            staticx \
-              --strip \
-              --no-compress \
-              --ld "/lib/ld-musl-aarch64.so.1" \
-              dist/foghorn_dynamic \
-              dist/foghorn-android-arm64
+            staticx --strip --no-compress --ld "/lib/ld-musl-aarch64.so.1" dist/foghorn_dynamic dist/foghorn-android-arm64
 
-            # 修复执行权限
             chmod +x dist/foghorn-android-arm64
             chmod -R a+rwx dist/
 
-            # 最终校验
-            echo "===== 构建完成，最终产物信息 ====="
             ls -lh dist/
             file dist/foghorn-android-arm64
-            echo "✅ 全静态构建成功！最终可执行文件：dist/foghorn-android-arm64"
 
       - name: 上传最终全静态二进制
         uses: actions/upload-artifact@v4
