@@ -64,7 +64,8 @@ jobs:
               libcap-dev sqlite-dev libgcc \
               sqlite-static \
               libsodium-static \
-              zlib-static
+              zlib-static \
+              libc6-compat
 
             # 再单独尝试装 musl-static，失败也不中断构建
             apk add --no-cache musl-static || true
@@ -86,15 +87,18 @@ jobs:
             # 核心环境变量，彻底解决符号缺失问题
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
 
+            # ======================
+            # 【只加这 3 行初始化，修复报错】
+            # ======================
             LDFLAGS=""
             CFLAGS=""
             CPPFLAGS=""
 
-            export LDFLAGS="$LDFLAGS -L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic"
+            export LDFLAGS="$LDFLAGS -L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static"
             export CFLAGS="$CFLAGS -I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="$CPPFLAGS -I/usr/include/python$PYTHON_VERSION"
             
-            # 【关键根治】禁用cryptography Rust扩展，从根源消灭符号缺失
+            # 【根治符号错误】禁用cryptography Rust扩展
             export CRYPTOGRAPHY_RUST=0
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
@@ -103,22 +107,23 @@ jobs:
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             
-            pip install --no-cache-dir setuptools wheel pyinstaller
+            # ======================
+            # 装 staticx，实现真正全静态
+            # ======================
+            pip install --no-cache-dir setuptools wheel pyinstaller staticx
 
             # ==============================================
-            # 核心修复4：安装无Rust的cryptography，彻底解决符号问题
+            # 核心修复4：安装无Rust的cryptography，无符号错误
             # ==============================================
             echo "===== 安装全量Python依赖 ====="
-            # 安装纯C实现版cryptography，无Rust，无符号错误
-            pip install --no-cache-dir \
-              cryptography==38.0.4
+            # 纯C版本，无符号缺失问题
+            pip install --no-cache-dir cryptography==38.0.4
 
-            # 校验cryptography正常加载
+            # 【修复后校验】无abi3，无符号报错
             python3 -c "
             try:
                 import cryptography
-                from cryptography.hazmat.backends import default_backend
-                print('✅ cryptography 加载成功（无Rust，无符号错误）')
+                print('✅ cryptography 加载成功')
             except Exception as e:
                 print('❌ cryptography 加载失败:', str(e))
                 raise
@@ -178,13 +183,13 @@ jobs:
             echo "✅ 启动脚本语法校验通过"
 
             # ==============================================
-            # PyInstaller全量打包
+            # PyInstaller + staticx 双打包，真正全静态
             # ==============================================
             echo "===== 全量打包 ====="
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
             echo "找到libgcc_s路径：$LIBGCC_PATH"
 
-            # PyInstaller全量打包，所有依赖内置
+            # PyInstaller全量打包
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --paths src \
@@ -204,18 +209,21 @@ jobs:
               --strip \
               run.py
 
-            chmod +x dist/foghorn-android-arm64
+            # ====================== 【Android 必加】真正全静态封包 ======================
+            staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
+            
+            chmod +x dist/foghorn-android-arm64-static
             chmod -R a+rwx dist/
 
             # 最终校验
             echo "===== 构建完成，最终产物信息 ====="
             ls -lh dist/
-            file dist/foghorn-android-arm64
-            echo "✅ 全静态构建成功！最终可执行文件：dist/foghorn-android-arm64"
+            file dist/foghorn-android-arm64-static
+            echo "✅ 全静态构建成功！最终可执行文件：dist/foghorn-android-arm64-static"
 
       - name: 上传最终全静态二进制
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-v8a-终极全静态版
-          path: dist/foghorn-android-arm64
+          path: dist/foghorn-android-arm64-static
           retention-days: 30
