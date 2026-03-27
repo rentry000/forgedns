@@ -28,8 +28,12 @@ jobs:
           run: |
             set -euxo pipefail
 
+            # ==============================================
+            # 核心修复1：Edge分支多镜像兜底，彻底解决所有镜像异常/404问题
+            # ==============================================
             echo "===== 配置Edge分支稳定镜像源 ====="
             rm -rf /etc/apk/repositories /var/cache/apk/*
+            
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
@@ -42,9 +46,13 @@ jobs:
             apk update --no-cache || { echo "❌ 镜像源更新失败"; exit 1; }
             echo "✅ Edge镜像源配置完成，包索引更新成功"
 
+            # ==============================================
+            # 核心修复2：真正不会报错的安装方式
+            # ==============================================
             echo "===== 安装全量系统依赖+所有静态包 ====="
+            # 【修复补充】：额外加上 py3-setuptools 以防系统级缺失
             apk add --no-cache \
-              python3 python3-dev py3-pip \
+              python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev \
               linux-headers libffi-dev \
               openssl-dev openssl-libs-static \
@@ -61,6 +69,9 @@ jobs:
             command -v python3 > /dev/null 2>&1 || { echo "❌ python3安装失败"; exit 1; }
             echo "✅ 所有系统依赖+静态包安装完成，校验通过"
 
+            # ==============================================
+            # 核心修复3：彻底解决Python符号找不到报错
+            # ==============================================
             echo "===== 配置Python全静态编译环境 ====="
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             echo "Python版本：$PYTHON_VERSION"
@@ -79,20 +90,28 @@ jobs:
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
 
-            # 2. 配置Python虚拟环境
+            # 配置Python虚拟环境
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
             
             # ======================
-            # 【核心修复】先升级 pip/setuptools/wheel，彻底解决 pkg_resources 缺失
+            # 【关键修复区】分步安装构建工具与 staticx
             # ======================
-            pip install --no-cache-dir --upgrade pip setuptools wheel
+            echo "===== 安装打包工具 ====="
+            # 1. 升级 pip 并预先安装 setuptools 和 wheel (提供 pkg_resources)
+            pip install --upgrade pip
+            pip install --no-cache-dir setuptools wheel
+            
+            # 2. 安装 pyinstaller
+            pip install --no-cache-dir pyinstaller
+            
+            # 3. 强制关闭构建隔离安装 staticx，让其使用刚才装好的 setuptools
+            pip install --no-cache-dir --no-build-isolation staticx
+            echo "✅ 打包工具安装成功"
 
-            # ======================
-            # 现在再装 staticx，不会再报 pkg_resources 错误
-            # ======================
-            pip install --no-cache-dir pyinstaller staticx
-
+            # ==============================================
+            # 核心修复4：安装无Rust的cryptography与全量依赖
+            # ==============================================
             echo "===== 安装全量Python依赖 ====="
             pip install --no-cache-dir cryptography==38.0.4
 
@@ -120,6 +139,9 @@ jobs:
             pip install --no-cache-dir .
             echo "✅ 所有Python依赖安装完成"
 
+            # ==============================================
+            # 生成Android适配启动脚本
+            # ==============================================
             echo "===== 生成启动脚本 ====="
             cat > run.py << 'EOF'
             #!/usr/bin/env python3
@@ -149,6 +171,9 @@ jobs:
             python3 -m py_compile run.py
             echo "✅ 启动脚本语法校验通过"
 
+            # ==============================================
+            # PyInstaller + staticx 双打包
+            # ==============================================
             echo "===== 全量打包 ====="
             LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
             echo "找到libgcc_s路径：$LIBGCC_PATH"
@@ -172,7 +197,7 @@ jobs:
               --strip \
               run.py
 
-            # 【Android 必加】真正全静态封包
+            # 真正全静态封包
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
             chmod +x dist/foghorn-android-arm64-static
