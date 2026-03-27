@@ -1,0 +1,106 @@
+name: Build Foghorn Android ARM64 终极全静态版
+on:
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04-arm64
+    steps:
+      - name: Checkout 仅用于构建目录
+        uses: actions/checkout@v4
+
+      - name: 全静态构建Android二进制
+        uses: addnab/docker-run-action@v3
+        with:
+          image: alpine:edge
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
+          run: |
+            set -euxo pipefail
+
+            # 1. 配置镜像源
+            rm -rf /etc/apk/repositories /var/cache/apk/*
+            cat > /etc/apk/repositories << 'EOF'
+            https://dl-cdn.alpinelinux/alpine/edge/main
+            https://dl-cdn.alpinelinux/alpine/edge/community
+            https://mirrors.ustc.edu.cn/alpine/edge/main
+            https://mirrors.ustc.edu.cn/alpine/edge/community
+            EOF
+            apk update --no-cache
+
+            # 2. 安装构建依赖
+            apk add --no-cache \
+              python3 python3-dev py3-pip py3-setuptools \
+              gcc g++ musl-dev linux-headers libffi-dev \
+              openssl-dev openssl-libs-static build-base patchelf pkgconf \
+              libcap-dev sqlite-dev libgcc sqlite-static libsodium-static \
+              zlib-static libc6-compat scons binutils git rust cargo
+
+            # 3. 强制全静态编译环境
+            PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+            export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
+            export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic"
+            export CFLAGS="-I/usr/include/python$PYTHON_VERSION -fPIC"
+            export CPPFLAGS="-I/usr/include/python$PYTHON_VERSION"
+            export CRYPTOGRAPHY_RUST=0
+            export CRYPTOGRAPHY_STATIC=1
+            export OPENSSL_STATIC=1
+            export PYO3_CROSS_LIB_DIR=/usr/lib
+            export RUSTFLAGS="-C target-feature=+crt-static"
+
+            # 4. 虚拟环境
+            python3 -m venv /opt/venv
+            source /opt/venv/bin/activate
+
+            # 5. 安装工具
+            pip install --upgrade pip
+            pip install --no-cache-dir "setuptools==69.0.0" wheel
+            pip install --no-cache-dir pyinstaller
+            pip install --no-cache-dir --no-build-isolation staticx
+
+            # ====================== 核心修复 ======================
+            # 6. 直接安装官方 foghorn，并强制从源码编译 pydantic_core
+            # 不使用预编译wheel，彻底消灭 libgcc_s 依赖
+            pip install --no-cache-dir foghorn
+            pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
+            # ======================================================
+
+            # 7. 清理所有动态依赖
+            find /opt/venv -name "*.so*" -type f | while read so; do
+              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
+              patchelf --remove-rpath "$so" 2>/dev/null || true
+            done
+
+            # 8. 启动入口
+            cat > run.py << 'EOF'
+            import os, sys
+            os.environ["TMPDIR"] = "/data/local/tmp"
+            from foghorn.main import main
+            if __name__ == "__main__":
+                main()
+            EOF
+
+            # 9. PyInstaller 打包
+            pyinstaller --onefile --clean \
+              --name foghorn-android-arm64 \
+              --collect-all foghorn \
+              --collect-all pydantic_core \
+              --runtime-tmpdir /data/local/tmp \
+              --strip \
+              --noupx \
+              run.py
+
+            # 10. Staticx 封包
+            staticx \
+              dist/foghorn-android-arm64 \
+              dist/foghorn-android-arm64-static
+
+            # 11. 权限修复
+            chown -R 1001:1001 dist/
+            chmod -R 755 dist/
+
+      - name: 上传最终全静态二进制
+        uses: actions/upload-artifact@v4
+        with:
+          name: foghorn-android-arm64-v8a-终极全静态版
+          path: dist/foghorn-android-arm64-static
+          retention-days: 30
