@@ -89,32 +89,34 @@ jobs:
             pip install --no-cache-dir .
 
             # ==============================================
-            # 6. 【关键修复区】：设置 RPATH 为相对路径 $ORIGIN
+            # 6. 【核心修复】：物理扁平化依赖 + 移除所有 RPATH
             # ==============================================
-            echo "===== 处理二进制库搜索路径 ====="
-            # 不再删除 RPATH，而是设置为 $ORIGIN 及其父目录，让它能在 PyInstaller 临时目录里找到自己
-            # 这样 staticx 依然会通过校验，但库文件在运行时能找到依赖
-            find /opt/venv -name "*.so*" | while read -r lib; do
-                patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$lib" || true
-            done
-            # 同时也处理系统库
-            find /usr/lib /lib -name "libsqlite3.so*" -exec patchelf --set-rpath '$ORIGIN' {} \; 2>/dev/null || true
+            echo "===== 准备扁平化依赖库 ====="
+            mkdir -p /workspace/extra_libs
+            
+            # 查找所有隐藏在 .libs 目录下的带哈希的库文件，拷贝到统一目录
+            find /opt/venv/lib/python$PYTHON_VERSION/site-packages -path "*/.libs/*.so*" -exec cp -v {} /workspace/extra_libs/ \;
+
+            echo "===== 强制移除所有库的 RPATH (满足 staticx 要求) ====="
+            # 处理虚拟环境、系统库以及我们要额外添加的库
+            find /opt/venv -name "*.so*" -exec patchelf --remove-rpath {} \; 2>/dev/null || true
+            find /usr/lib /lib -name "*.so*" -exec patchelf --remove-rpath {} \; 2>/dev/null || true
+            find /workspace/extra_libs -name "*.so*" -exec patchelf --remove-rpath {} \; 2>/dev/null || true
 
             # 7. 生成启动脚本
             cat > run.py << 'EOF'
             import os, sys
-            # Android 适配
             os.environ["TMPDIR"] = "/data/local/tmp"
             os.environ["PYTHONUNBUFFERED"] = "1"
-            # 启动主程序
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
 
-            # 8. 打包
+            # 8. 打包 (显式将 extra_libs 加入根目录)
             echo "===== 开始打包 ====="
-            LIBGCC_PATH=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
+            # 查找系统 libgcc_s
+            LIBGCC_SYS=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
 
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
@@ -123,12 +125,15 @@ jobs:
               --collect-all pydantic_core \
               --collect-all bcrypt \
               --collect-all rpds \
-              --add-binary "$LIBGCC_PATH:." \
+              --collect-all zeroconf \
+              --add-binary "$LIBGCC_SYS:." \
+              --add-binary "/workspace/extra_libs/*.so*:." \
               --runtime-tmpdir /data/local/tmp \
               --strip \
               run.py
 
             # 执行 staticx 封包
+            echo "===== 执行 staticx 封包 (此时所有库已无 RPATH) ====="
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
             # 修复权限
@@ -141,4 +146,3 @@ jobs:
         with:
           name: foghorn-android-arm64-v8a-终极全静态版
           path: dist/foghorn-android-arm64-static
-          retention-days: 30
