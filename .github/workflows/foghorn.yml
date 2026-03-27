@@ -27,7 +27,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 配置镜像源
+            # 1. 配置镜像源 (使用 Edge 分支以获取最新的静态库支持)
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
@@ -94,16 +94,23 @@ jobs:
             echo "===== 准备扁平化依赖库 ====="
             mkdir -p /workspace/extra_libs
             
-            # 查找所有隐藏在 .libs 目录下的带哈希的库文件，拷贝到统一目录
+            # 找到所有隐藏在 .libs 目录下的动态库（带哈希后缀的 libgcc 等），全部复制出来
             find /opt/venv/lib/python$PYTHON_VERSION/site-packages -path "*/.libs/*.so*" -exec cp -v {} /workspace/extra_libs/ \;
 
             echo "===== 强制移除所有库的 RPATH (满足 staticx 要求) ====="
-            # 处理虚拟环境、系统库以及我们要额外添加的库
+            # 先移除原本库的路径，此时如果直接运行会报错，所以后面打包需要 LD_LIBRARY_PATH 护航
             find /opt/venv -name "*.so*" -exec patchelf --remove-rpath {} \; 2>/dev/null || true
             find /usr/lib /lib -name "*.so*" -exec patchelf --remove-rpath {} \; 2>/dev/null || true
             find /workspace/extra_libs -name "*.so*" -exec patchelf --remove-rpath {} \; 2>/dev/null || true
 
-            # 7. 生成启动脚本
+            # ==============================================
+            # 7. 构建打包辅助环境变量
+            # ==============================================
+            # 将扁平化后的路径加入搜索，确保 PyInstaller 导入分析时能找到库
+            LIBS_DIRS=$(find /opt/venv/lib/python$PYTHON_VERSION/site-packages -type d -name ".libs" | tr '\n' ':')
+            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$LIBS_DIRS:/workspace/extra_libs:/usr/lib:/lib
+
+            # 8. 生成启动脚本
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -113,12 +120,20 @@ jobs:
                 main()
             EOF
 
-            # 8. 打包 (显式将 extra_libs 加入根目录)
+            # 9. 打包
             echo "===== 开始打包 ====="
-            # 查找系统 libgcc_s
+            # 手动构建 --add-binary 列表，防止通配符解析失败
+            ADD_BINARIES=""
+            for f in /workspace/extra_libs/*.so*; do
+                if [ -e "$f" ]; then
+                    ADD_BINARIES="$ADD_BINARIES --add-binary $f:."
+                fi
+            done
+
             LIBGCC_SYS=$(find /usr/lib -name "libgcc_s.so.1" | head -n 1)
 
-            pyinstaller --onefile --clean \
+            # 在打包命令前强制注入 LD_LIBRARY_PATH
+            LD_LIBRARY_PATH=$LD_LIBRARY_PATH pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
               --collect-all cryptography \
@@ -127,16 +142,16 @@ jobs:
               --collect-all rpds \
               --collect-all zeroconf \
               --add-binary "$LIBGCC_SYS:." \
-              --add-binary "/workspace/extra_libs/*.so*:." \
+              $ADD_BINARIES \
               --runtime-tmpdir /data/local/tmp \
               --strip \
               run.py
 
-            # 执行 staticx 封包
-            echo "===== 执行 staticx 封包 (此时所有库已无 RPATH) ====="
+            # 10. 执行 staticx 封包
+            echo "===== 执行 staticx 封包 ====="
             staticx dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             
-            # 修复权限
+            # 修复权限，防止上传失败
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
             echo "✅ 构建完成"
@@ -146,3 +161,4 @@ jobs:
         with:
           name: foghorn-android-arm64-v8a-终极全静态版
           path: dist/foghorn-android-arm64-static
+          retention-days: 30
