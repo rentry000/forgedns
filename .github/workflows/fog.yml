@@ -22,14 +22,10 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 源配置：基于文档有效性修复，彻底解决invalid link报错 ==========
-            # 文档2确认：阿里云alpine edge community源存在invalid link报错，已移除
-            # 文档1/3/4确认：阿里云main源、官方main+community源稳定有效，架构完整支持aarch64
+            # ========== 源配置：稳定有效，无invalid link报错 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
-            # 阿里云alpine edge main源，国内稳定可用，文档1确认有效
             https://mirrors.aliyun.com/alpine/edge/main
-            # 官方源兜底，文档3/4确认main+community均有效，全架构支持
             http://dl-cdn.alpinelinux.org/alpine/edge/main
             http://dl-cdn.alpinelinux.org/alpine/edge/community
             EOF
@@ -38,19 +34,19 @@ jobs:
             echo "nameserver 8.8.8.8" > /etc/resolv.conf
             echo "nameserver 223.5.5.5" >> /etc/resolv.conf
 
-            # 带重试的apk更新，彻底解决网络波动问题
+            # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：所有包均匹配Alpine Edge有效仓库，无无效包 ==========
+            # ========== 依赖安装：新增GNU tar确保解压完整 ==========
             apk add --no-cache \
-              gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
+              gcc g++ musl-dev linux-headers build-base tar patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
-              mariadb-dev mariadb-static wget tar make gdbm-dev sqlite-dev sqlite-static \
+              mariadb-dev mariadb-static wget make gdbm-dev sqlite-dev sqlite-static \
               util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
-            # 静态库校验，确保核心依赖完整（mpdecimal-dev已包含libmpdec.a）
+            # 静态库校验
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -77,9 +73,9 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== Python版本：文档5确认3.14.0正式版存在，源码可追溯 ==========
+            # Python版本配置
             PYTHON_VERSION="3.14.0"
-            # 全静态编译环境变量，适配aarch64-musl目标架构（文档1/3确认架构支持）
+            # 全静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
@@ -88,44 +84,54 @@ jobs:
             export CPPFLAGS="-I/usr/include"
             export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
             export PKG_CONFIG="pkg-config --static"
-            # 加密依赖静态编译配置
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export PYO3_NO_PYTHON=0
-            # Rust全静态编译配置，适配aarch64-musl
             export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== Python源码下载与完整性校验，文档5确认下载地址有效 ==========
-            echo "===== 开始编译全静态Python（内置所有核心模块） ====="
+            # ========== Python源码下载与加固解压校验 ==========
+            echo "===== 开始编译全静态Python ====="
             PYTHON_TAR_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
             
-            # 3次重试下载，避免网络波动导致下载失败
+            # 3次重试下载
             for i in 1 2 3; do
               wget --tries=3 --timeout=30 "$PYTHON_TAR_URL" -O "$PYTHON_TAR_FILE" && break || sleep 5
             done
             
-            # 校验压缩包有效性，避免下载到404页面导致解压残缺
+            # 压缩包完整性校验
             if ! xz -t "$PYTHON_TAR_FILE"; then
-              echo "❌ 下载的Python源码包损坏，URL: $PYTHON_TAR_URL"
+              echo "❌ 下载的Python源码包损坏"
               exit 1
             fi
             
-            # 解压并进入源码目录
+            # 强制使用GNU tar解压，避免busybox tar兼容性问题
+            echo "===== Tar版本确认 ====="
+            tar --version
             tar xf "$PYTHON_TAR_FILE"
+            # 解压结果校验
+            if [ $? -ne 0 ]; then
+              echo "❌ Python源码解压失败"
+              exit 1
+            fi
             cd Python-$PYTHON_VERSION
 
-            # 校验_sqlite目录实际文件，彻底确认源码结构
-            echo "===== 官方Python $PYTHON_VERSION _sqlite模块实际文件列表 ====="
-            ls -la Modules/_sqlite/
-            echo "================================================================="
+            # 源码结构预校验，提前发现文件缺失
+            echo "===== 核心源码文件校验 ====="
+            ls -la Modules/ | head -50
+            if ls Modules/*itertools* 1>/dev/null 2>&1; then
+              echo "✅ 找到itertools相关源码文件："
+              ls -la Modules/*itertools*
+            else
+              echo "❌ 未找到itertools相关源码，源码不完整"
+              exit 1
+            fi
 
-            # 校验Python核心源文件，确保所有文件存在
-            echo "===== 校验Python核心源文件 ====="
-            # 官方Python 3.14.0正式版_sqlite3模块的完整源文件
+            # sqlite3模块文件校验
+            echo "===== sqlite3模块文件校验 ====="
             SQLITE_SOURCE_FILES="
               _sqlite/connection.c
               _sqlite/cursor.c
@@ -141,13 +147,13 @@ jobs:
               if [ -f "$FULL_PATH" ]; then
                 echo "✅ 存在: $FULL_PATH"
               else
-                echo "❌ 缺失: $FULL_PATH，源码不完整，终止构建"
+                echo "❌ 缺失: $FULL_PATH"
                 exit 1
               fi
             done
-            echo "===== 源文件校验完成，所有_sqlite3模块文件均存在 ====="
+            echo "===== 源码校验完成 ====="
 
-            # ========== Python configure配置，适配静态编译 ==========
+            # Python configure配置
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -161,40 +167,11 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== 核心优化：Setup.local全模块静态配置，内置所有核心模块 ==========
+            # ========== 核心修复：精简Setup.local，移除所有核心内置模块的强制配置 ==========
+            # 仅保留需要手动指定静态链接的外部依赖模块，核心模块由Python构建系统自动处理
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
-            # 核心系统模块
-            _posixsubprocess _posixsubprocess.c
-            _random _randommodule.c
-            _collections _collectionsmodule.c
-            _operator _operator.c
-            _itertools _itertoolsmodule.c
-            _functools _functoolsmodule.c
-            _heapq _heapqmodule.c
-            _stat _stat.c
-            _thread _threadmodule.c
-            _locale _localemodule.c
-            _codecs _codecsmodule.c
-            _weakref _weakref.c
-            _io _iomodule.c
-            _abc _abc.c
-            signal signalmodule.c
-            errnomodule.c
-            pwdmodule.c
-            grpmodule.c
-            spwdmodule.c
-            selectmodule.c
-            syslogmodule.c
-            timemodule.c
-            _sre _sre.c
-            _struct _struct.c
-            _bisect _bisectmodule.c
-            _contextvars _contextvarsmodule.c
-            _math _math.c
-            _datetime _datetimemodule.c
-            _zoneinfo _zoneinfo.c
 
             # 加密与安全模块，全静态内置
             _hashlib _hashopenssl.c \
@@ -207,13 +184,13 @@ jobs:
               -lssl -lcrypto -lz -lpthread -lm -ldl
             _crypt _cryptmodule.c -lcrypt
 
-            # 官方标准静态内置_sqlite3模块
+            # sqlite3模块，全静态内置
             _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
               -I/usr/include \
               -L/usr/lib \
               -lsqlite3 -lz -lpthread -lm -ldl
-            
-            # 其他核心扩展模块，全静态内置
+
+            # 其他依赖系统库的扩展模块，全静态内置
             _uuid _uuidmodule.c -luuid
             _zstd _zstdmodule.c -lzstd
             _bz2 _bz2module.c -lbz2
@@ -226,23 +203,23 @@ jobs:
             _decimal _decimal.c -lmpdec -lm
             EOF
 
-            # 预校验Makefile已生成正确的构建规则
+            # Makefile规则校验
             echo "===== 校验Makefile构建规则 ====="
             if grep -q "_sqlite/connection.o" Makefile; then
-              echo "✅ Makefile已生成_sqlite3模块完整构建规则"
+              echo "✅ Makefile已生成_sqlite3模块构建规则"
             else
-              echo "❌ Makefile未生成_sqlite3模块构建规则，配置异常"
+              echo "❌ Makefile未生成_sqlite3模块构建规则"
               exit 1
             fi
             if grep -q "_ssl.o" Makefile; then
-              echo "✅ Makefile已生成_ssl模块完整构建规则"
+              echo "✅ Makefile已生成_ssl模块构建规则"
             else
-              echo "❌ Makefile未生成_ssl模块构建规则，配置异常"
+              echo "❌ Makefile未生成_ssl模块构建规则"
               exit 1
             fi
             echo "===== Makefile校验完成 ====="
 
-            # 编译安装，全核心加速
+            # 编译安装
             make -j$(nproc)
             make install
             cd ..
@@ -254,40 +231,28 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # ========== Python全量校验：确保所有核心模块正常，无动态依赖 ==========
+            # Python编译结果校验
             echo "===== Python编译结果校验 ====="
             python3 --version
-            # 校验所有核心模块导入成功
-            python3 -c "import sys, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2; print('✅ 所有核心模块导入成功：sqlite3、uuid、zstd、ssl、hashlib、decimal等')"
-            # 校验静态编译状态
+            python3 -c "import sys, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, itertools; print('✅ 所有核心模块导入成功，包括itertools')"
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
-            # 校验无动态依赖的扩展模块
-            echo "===== 扩展模块动态依赖校验 ====="
-            find /usr/local/lib/python3* -name "*.so" -type f | while read -r so; do
-              echo "⚠️  发现动态扩展模块: $so"
-              readelf -d "$so" | grep NEEDED || true
-            done
             echo "===== Python校验完成 ====="
 
-            # 安装pip与打包工具，确保全静态适配
+            # 安装打包工具
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
-            pip install --no-cache-dir pyinstaller
-            pip install --no-cache-dir staticx
+            pip install --no-cache-dir pyinstaller staticx
 
-            # ========== 依赖安装优化：确保Rust依赖全静态编译 ==========
-            # 先安装加密依赖，确保静态链接
+            # 依赖安装
             pip install --no-cache-dir \
               --config-setting="--global-option=--static" \
               cryptography
-            # 从源码编译pydantic_core，确保全静态
             pip install --no-cache-dir \
               --no-binary pydantic_core \
               pydantic_core==2.41.5
-            # 安装foghorn主程序
             pip install --no-cache-dir foghorn
 
-            # ========== 全量RUNPATH/RPATH清理，杜绝staticx报错 ==========
+            # 全量RUNPATH/RPATH清理
             echo "===== 全量RUNPATH/RPATH清理 ====="
             find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
@@ -304,10 +269,9 @@ jobs:
             done
             echo "===== 全量清理完成 ====="
 
-            # 生成启动入口脚本，适配Android环境
+            # 生成启动入口脚本
             cat > run.py << 'EOF'
             import os, sys
-            # 适配Android临时目录
             os.environ["TMPDIR"] = "/data/local/tmp"
             os.environ["PYTHONUNBUFFERED"] = "1"
             from foghorn.main import main
@@ -315,7 +279,7 @@ jobs:
                 main()
             EOF
 
-            # ========== 打包优化：移除动态库引入，彻底排除系统依赖 ==========
+            # PyInstaller打包
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -333,7 +297,7 @@ jobs:
               --exclude-binaries "libc.musl-aarch64.so.1" \
               run.py
 
-            # 打包结果校验，确保无动态库残留
+            # 打包结果校验
             echo "===== 打包结果最终校验 ====="
             python3 -c "
             import zipfile
@@ -350,22 +314,21 @@ jobs:
                     if has_forbidden:
                         break
             if not has_forbidden:
-                print('✅ 打包归档内无禁止动态库，彻底根治RUNPATH/动态依赖报错')
+                print('✅ 打包归档内无禁止动态库')
             "
             echo "===== 打包校验完成 ====="
 
-            # ========== 静态封包优化：添加strip减小体积，补充最终全静态校验 ==========
+            # staticx全静态封包
             staticx \
               --strip \
               --loglevel info \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
-            # 最终全静态校验，确保产物符合要求
+            # 最终产物校验
             echo "===== 最终产物全静态校验 ====="
             file dist/foghorn-android-arm64-static
             ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ ldd校验：无动态依赖，符合全静态要求"
-            # 权限修复
             chmod +x dist/foghorn-android-arm64-static
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
