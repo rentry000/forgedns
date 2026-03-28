@@ -40,16 +40,16 @@ jobs:
             # 带重试的apk更新，彻底解决网络波动问题
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖补充：新增缺失的全量静态库，适配Python全模块编译 ==========
+            # ========== 修复包名错误：移除不存在的包，替换为Alpine edge正确包名 ==========
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
-              zlib-static zlib-dev libffi-dev libffi-static openssl-dev openssl-libs-static \
+              zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
-              mariadb-dev mariadb-static wget tar make gdbm-dev gdbm-static sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static libmpdec-dev libmpdec-static
+              mariadb-dev mariadb-static wget tar make gdbm-dev sqlite-dev sqlite-static \
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev mpdecimal-static
 
-            # 静态库校验，确保核心依赖完整
+            # 静态库校验，确保核心依赖完整（适配修正后的包）
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
