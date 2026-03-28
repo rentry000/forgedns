@@ -37,24 +37,46 @@ jobs:
 
             apk update --no-cache
 
-            # ====================== 修复1：补全缺失的依赖包，解决模块编译失败 ======================
-            # 新增util-linux-dev（解决_uuid缺失）、zstd-dev/zstd-static（解决_zstd缺失）
+            # ====================== 修复1：新增util-linux-static，提供libuuid.a静态库 ======================
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget tar make gdbm-dev sqlite-dev sqlite-static \
-              util-linux-dev zstd-dev zstd-static
+              util-linux-dev util-linux-static zstd-dev zstd-static
             # ==========================================================================================
 
-            # 静态库存在性校验，提前规避编译问题
+            # ====================== 修复2：优化静态库校验逻辑，避免单文件缺失直接终止流程 ======================
             echo "===== 依赖静态库校验 ====="
-            ls -la /usr/lib/libffi.a /usr/lib/libgdbm.a /usr/lib/libsqlite3.a /usr/lib/libuuid.a /usr/lib/libzstd.a
-            echo "===== 静态库校验完成 ====="
+            # 定义要校验的静态库列表
+            CHECK_LIBS=(
+              "/usr/lib/libffi.a"
+              "/usr/lib/libgdbm.a"
+              "/usr/lib/libsqlite3.a"
+              "/usr/lib/libuuid.a"
+              "/usr/lib/libzstd.a"
+            )
+            # 循环校验每个库，输出明确结果，不会因单个缺失终止流程
+            ALL_EXIST=true
+            for lib in "${CHECK_LIBS[@]}"; do
+              if [ -f "$lib" ]; then
+                echo "✅ 存在: $lib"
+                ls -la "$lib"
+              else
+                echo "❌ 缺失: $lib"
+                ALL_EXIST=false
+              fi
+            done
+            # 仅当有库缺失时，才终止流程（提前暴露问题）
+            if [ "$ALL_EXIST" = "false" ]; then
+              echo "❌ 核心静态库缺失，终止构建"
+              exit 1
+            fi
+            echo "===== 静态库校验完成，所有核心库均存在 ====="
+            # ==========================================================================================
 
-            # ====================== 修复2：全局环境变量提前定义，确保configure正确识别 ======================
-            # 所有编译环境变量必须在configure之前定义，禁止放在configure参数末尾
+            # 全局编译环境变量提前定义，确保configure正确识别
             PYTHON_VERSION="3.14.3"
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags"
             export CFLAGS="-fPIC -O2"
@@ -65,7 +87,6 @@ jobs:
             export OPENSSL_STATIC=1
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
-            # ==========================================================================================
 
             # ====================== 终极根治核心：重编译Python，静态内置SQLite3 ======================
             echo "===== 开始编译全静态Python（内置SQLite3） ====="
@@ -74,8 +95,7 @@ jobs:
             tar xf python.tar.xz
             cd Python-$PYTHON_VERSION
 
-            # ====================== 修复3：规范configure命令，参数顺序正确，无未识别选项 ======================
-            # 核心修复：环境变量已提前export，configure命令仅保留参数，彻底解决unrecognized options警告
+            # 规范configure命令，参数顺序正确，无未识别选项
             ./configure \
               --prefix=/usr/local \
               --enable-static \
@@ -85,9 +105,8 @@ jobs:
               --with-system-expat \
               --without-ensurepip \
               --disable-optimizations
-            # ==========================================================================================
 
-            # 强制setup.py静态链接SQLite3，不查找动态库，完整修复sed命令
+            # 强制setup.py静态链接SQLite3，不查找动态库
             sed -i 's/sqlite3_defs = \[\]/sqlite3_defs = [("SQLITE_OMIT_LOAD_EXTENSION", "1")]/' setup.py
             sed -i 's/sqlite_libs = \["sqlite3"\]/sqlite_libs = ["sqlite3", "z", "pthread", "m", "dl"]/' setup.py
             sed -i 's/include_dirs.append(sqlite_incdir)/include_dirs.append(sqlite_incdir)\n    library_dirs.append("\/usr\/lib")\n    extra_link_args.append("-static")/' setup.py
@@ -104,33 +123,32 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3 2>/dev/null || true
             ln -sf /usr/local/bin/pip3 /usr/bin/pip 2>/dev/null || true
 
-            # 关键校验1：确认Python版本和所有核心模块正常
+            # 关键校验：确认Python版本和所有核心模块正常
             echo "===== Python编译结果校验 ====="
             python3 --version
-            # 校验之前缺失的模块
             python3 -c "import sqlite3, uuid, zstd; print('✅ 所有核心模块导入成功：sqlite3、uuid、zstd')"
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
 
-            # 关键校验2：确认_sqlite3扩展无libsqlite3.so.0动态依赖
+            # 确认_sqlite3扩展无libsqlite3.so.0动态依赖
             SQLITE3_SO=$(find /usr/local/lib/python3.14 -name "_sqlite3.cpython-*.so")
             echo "SQLite3扩展路径: $SQLITE3_SO"
             readelf -d "$SQLITE3_SO" | grep NEEDED | grep -E 'libsqlite3|RUNPATH|RPATH' || echo "✅ _sqlite3扩展无libsqlite3动态依赖，无RUNPATH/RPATH"
             echo "===== Python编译校验完成 ====="
             # ==========================================================================================
 
-            # 4. 安装pip
+            # 安装pip
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
 
-            # 5. 安装打包工具
+            # 安装打包工具
             pip install --no-cache-dir pyinstaller
             pip install --no-cache-dir --no-build-isolation staticx
 
-            # 6. 安装foghorn及核心依赖
+            # 安装foghorn及核心依赖
             pip install --no-cache-dir foghorn
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
 
-            # ====================== 全量RUNPATH/RPATH清理，彻底杜绝staticx报错 ======================
+            # 全量RUNPATH/RPATH清理，彻底杜绝staticx报错
             echo "===== 全量RUNPATH/RPATH清理 ====="
             find /usr/local/lib/python3.14 -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
@@ -144,9 +162,8 @@ jobs:
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
             done
             echo "===== 全量清理完成 ====="
-            # ==========================================================================================
 
-            # 7. 生成启动入口脚本
+            # 生成启动入口脚本
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -155,7 +172,7 @@ jobs:
                 main()
             EOF
 
-            # 8. PyInstaller 打包（彻底排除libsqlite3.so.0，兜底保障）
+            # PyInstaller 打包（彻底排除libsqlite3.so.0，兜底保障）
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -188,12 +205,12 @@ jobs:
             "
             echo "===== 最终校验完成 ====="
 
-            # 9. Staticx 全静态封包
+            # Staticx 全静态封包
             staticx \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
-            # 10. 权限修复
+            # 权限修复
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
 
