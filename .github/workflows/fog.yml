@@ -4,7 +4,8 @@ on:
 
 jobs:
   build-android:
-    runs-on: ubuntu-24.04-arm64
+    # runs-on: ubuntu-24.04-arm64
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout 仅用于构建目录
         uses: actions/checkout@v4
