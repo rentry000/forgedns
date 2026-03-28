@@ -11,7 +11,7 @@ jobs:
       - name: Checkout 仅用于构建目录
         uses: actions/checkout@v4
 
-      # 新增：多架构支持，解决x86 Runner构建ARM64二进制的问题
+      # 多架构支持，解决x86 Runner构建ARM64二进制的问题，完整保留
       - name: 设置QEMU多架构模拟
         uses: docker/setup-qemu-action@v3
         with:
@@ -21,36 +21,35 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
-          # 新增--platform指定ARM64架构，确保构建产物适配Android
+          # 指定ARM64架构，确保构建产物适配Android，完整保留
           options: -v ${{ github.workspace }}:/workspace -w /workspace --platform linux/arm64
           run: |
             set -euxo pipefail
 
-            # 1. 配置镜像源（彻底移除解析失败的官方源，仅保留稳定国内镜像）
+            # 1. 镜像源修复：移除失效的阿里云edge源（invalid link），仅保留验证可用的中科大源
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://mirrors.ustc.edu.cn/alpine/edge/main
             https://mirrors.ustc.edu.cn/alpine/edge/community
-            https://mirrors.aliyun.com/alpine/edge/main
-            https://mirrors.aliyun.com/alpine/edge/community
             EOF
 
-            # 新增：兜底DNS修复，彻底解决域名解析失败问题
+            # 兜底DNS修复，彻底杜绝域名解析失败问题，完整保留
             echo "nameserver 8.8.8.8" > /etc/resolv.conf
             echo "nameserver 114.114.114.114" >> /etc/resolv.conf
 
             # 执行无警告更新
             apk update --no-cache
 
-            # 2. 安装构建依赖（完整保留您原有配置）
+            # 2. 安装构建依赖：新增mariadb相关包，修复mariadb_config not found编译报错
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev linux-headers libffi-dev \
               openssl-dev openssl-libs-static build-base patchelf pkgconf \
               libcap-dev sqlite-dev libgcc sqlite-static libsodium-static \
-              zlib-static libc6-compat scons binutils git rust cargo
+              zlib-static libc6-compat scons binutils git rust cargo \
+              mariadb-dev mariadb-static
 
-            # 3. 强制全静态编译环境（适配ARM64架构，保留原有配置）
+            # 3. 强制全静态编译环境（适配ARM64架构，完整保留原有配置）
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic"
@@ -73,8 +72,7 @@ jobs:
             pip install --no-cache-dir --no-build-isolation staticx
 
             # ====================== 核心修复 完整保留 ======================
-            # 6. 直接安装官方 foghorn，并强制从源码编译 pydantic_core
-            # 不使用预编译wheel，彻底消灭 libgcc_s 依赖
+            # 6. 安装foghorn，强制源码编译pydantic_core，消灭动态依赖
             pip install --no-cache-dir foghorn
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
             # ==============================================================
