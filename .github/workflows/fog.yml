@@ -37,7 +37,7 @@ jobs:
 
             apk update --no-cache
 
-            # ====================== 修复1：新增util-linux-static，提供libuuid.a静态库 ======================
+            # 全量依赖安装，含所有静态库包
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
@@ -45,21 +45,18 @@ jobs:
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget tar make gdbm-dev sqlite-dev sqlite-static \
               util-linux-dev util-linux-static zstd-dev zstd-static
-            # ==========================================================================================
 
-            # ====================== 修复2：优化静态库校验逻辑，避免单文件缺失直接终止流程 ======================
+            # ====================== 核心修复：Ash兼容的静态库校验，无任何数组语法 ======================
             echo "===== 依赖静态库校验 ====="
-            # 定义要校验的静态库列表
-            CHECK_LIBS=(
-              "/usr/lib/libffi.a"
-              "/usr/lib/libgdbm.a"
-              "/usr/lib/libsqlite3.a"
-              "/usr/lib/libuuid.a"
-              "/usr/lib/libzstd.a"
-            )
-            # 循环校验每个库，输出明确结果，不会因单个缺失终止流程
             ALL_EXIST=true
-            for lib in "${CHECK_LIBS[@]}"; do
+            # 直接在for循环中列出所有校验库，100%兼容Alpine默认Shell
+            for lib in \
+              "/usr/lib/libffi.a" \
+              "/usr/lib/libgdbm.a" \
+              "/usr/lib/libsqlite3.a" \
+              "/usr/lib/libuuid.a" \
+              "/usr/lib/libzstd.a"
+            do
               if [ -f "$lib" ]; then
                 echo "✅ 存在: $lib"
                 ls -la "$lib"
@@ -68,7 +65,7 @@ jobs:
                 ALL_EXIST=false
               fi
             done
-            # 仅当有库缺失时，才终止流程（提前暴露问题）
+            # 仅当有库缺失时终止构建
             if [ "$ALL_EXIST" = "false" ]; then
               echo "❌ 核心静态库缺失，终止构建"
               exit 1
