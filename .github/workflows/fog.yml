@@ -42,14 +42,16 @@ jobs:
             # 执行无警告更新
             apk update --no-cache
 
-            # 2. 安装构建依赖：移除sqlite相关系统包（方案4自主编译），保留其他核心依赖
+            # 2. 安装构建依赖：【方案二合并修改】补充sqlite-libs/sqlite-dev，保留全量核心依赖
+            # 补充sqlite相关包，用于获取打包所需的动态库，同时保留静态编译能力
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev linux-headers libffi-dev \
               openssl-dev openssl-libs-static build-base patchelf pkgconf \
               libcap-dev libgcc libsodium-static \
-              zlib-static libc6-compat scons binutils git rust cargo \
-              mariadb-dev mariadb-static wget tar
+              zlib-static zlib-dev libc6-compat scons binutils git rust cargo \
+              mariadb-dev mariadb-static wget tar \
+              sqlite-dev sqlite-libs sqlite-static
 
             # 3. 强制全静态编译环境（适配ARM64架构，完整保留原有配置）
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
@@ -63,7 +65,7 @@ jobs:
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
 
-            # ====================== 方案4 核心合并：自主编译全静态SQLite 彻底根治RUNPATH报错 ======================
+            # ====================== 原有自主编译全静态SQLite 完整保留，双保险兜底 ======================
             # 仅生成静态库，不生成动态库，从根源消除libsqlite3.so.0的DT_RUNPATH问题
             wget --no-check-certificate https://www.sqlite.org/2024/sqlite-autoconf-3460000.tar.gz -O sqlite.tar.gz
             tar zxf sqlite.tar.gz
@@ -83,8 +85,6 @@ jobs:
             rm -rf sqlite.tar.gz sqlite-autoconf-3460000
             # 验证静态库安装成功
             ls -la /usr/lib/libsqlite3.a
-            # 彻底清理系统残留的sqlite动态库，杜绝被打包
-            find / -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
             # ==========================================================================================================
 
             # 4. 虚拟环境（完整保留）
@@ -123,7 +123,8 @@ jobs:
                 main()
             EOF
 
-            # 9. PyInstaller 打包（完整保留，新增sqlite3静态链接适配）
+            # 9. PyInstaller 打包【方案二核心合并】新增全量--add-binary依赖内置
+            # 自动适配Python版本，把所有核心共享库打包进二进制，运行时自动加载，无需系统依赖
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -131,9 +132,20 @@ jobs:
               --runtime-tmpdir /data/local/tmp \
               --strip \
               --noupx \
+              # 方案二核心：内置所有核心依赖库，彻底根治共享库找不到报错
+              --add-binary "/usr/lib/libsqlite3.so.0:python$PYTHON_VERSION/lib-dynload/" \
+              --add-binary "/usr/lib/libz.so.1:python$PYTHON_VERSION/lib-dynload/" \
+              --add-binary "/usr/lib/libffi.so.8:python$PYTHON_VERSION/lib-dynload/" \
+              --add-binary "/usr/lib/libssl.so.3:python$PYTHON_VERSION/lib-dynload/" \
+              --add-binary "/usr/lib/libcrypto.so.3:python$PYTHON_VERSION/lib-dynload/" \
+              --add-binary "/usr/lib/libgcc_s.so.1:python$PYTHON_VERSION/lib-dynload/" \
+              --add-binary "/usr/lib/libm.so.6:python$PYTHON_VERSION/lib-dynload/" \
               run.py
 
-            # 打包后二次校验：确保无libsqlite3.so.0被打包进产物
+            # 【方案二兼容修改】调整清理顺序：打包完成后再清理系统残留动态库，不影响打包读取
+            # 彻底清理系统残留的sqlite动态库，杜绝被意外打包
+            find / -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
+            # 打包后二次校验：确保无外部动态库残留，仅保留内置打包的内容
             find dist/ -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
 
             # 10. Staticx 封包（完整保留，无RUNPATH拦截风险）
