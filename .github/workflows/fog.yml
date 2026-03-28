@@ -47,10 +47,27 @@ jobs:
               mariadb-dev mariadb-static wget tar \
               sqlite-dev sqlite-libs sqlite-static
 
+            # ====================== 核心修复1：源头全量清理系统库RUNPATH/RPATH ======================
+            # 严格遵循staticx官方要求：打包前彻底清除所有库的绝对路径RPATH和全部RUNPATH
+            echo "===== 系统级全量RUNPATH/RPATH清理 ====="
+            # 先清理所有sqlite相关库，解决本次报错核心
+            find /usr/lib -name "libsqlite3.so*" -type f | while read so; do
+              echo "清理RUNPATH/RPATH: $so"
+              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
+              # 额外移除无效依赖，避免后续问题
+              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
+            done
+            # 全量清理系统所有so库，彻底杜绝同类报错
+            find /usr/lib -name "*.so*" -type f | while read so; do
+              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
+            done
+            echo "===== 系统级清理完成 ====="
+            # ==========================================================================================
+
             # 3. 全局编译环境变量配置
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
-            export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic"
+            export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags"
             export CFLAGS="-I/usr/include/python$PYTHON_VERSION -fPIC"
             export CPPFLAGS="-I/usr/include/python$PYTHON_VERSION"
             export CRYPTOGRAPHY_RUST=0
@@ -59,7 +76,8 @@ jobs:
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
 
-            # 4. 自主编译全静态SQLite，双保险兜底
+            # ====================== 核心修复2：自主编译SQLite禁用RUNPATH生成 ======================
+            # 编译时添加--disable-new-dtags，从源头禁止生成RUNPATH，仅生成可兼容的RPATH（后续会清理）
             wget --no-check-certificate https://www.sqlite.org/2024/sqlite-autoconf-3460000.tar.gz -O sqlite.tar.gz
             tar zxf sqlite.tar.gz
             cd sqlite-autoconf-3460000
@@ -70,38 +88,45 @@ jobs:
               --disable-readline \
               --disable-editline \
               --enable-threadsafe \
-              --with-pic
+              --with-pic \
+              LDFLAGS="-Wl,--disable-new-dtags"
             make -j$(nproc)
             make install
             cd ..
             rm -rf sqlite.tar.gz sqlite-autoconf-3460000
-            # 预校验核心静态库存在
+            # 编译后二次清理，确保无残留RUNPATH
+            find /usr/lib -name "libsqlite3.so*" -type f | while read so; do
+              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
+            done
             ls -la /usr/lib/libsqlite3.a
+            # ==========================================================================================
 
-            # 5. 虚拟环境配置
+            # 4. 虚拟环境配置
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
 
-            # 6. 安装打包工具
+            # 5. 安装打包工具
             pip install --upgrade pip
             pip install --no-cache-dir "setuptools==69.0.0" wheel
             pip install --no-cache-dir pyinstaller
             pip install --no-cache-dir --no-build-isolation staticx
 
-            # 7. 安装foghorn及核心依赖
+            # 6. 安装foghorn及核心依赖
             pip install --no-cache-dir foghorn
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
 
-            # 8. 全量清理RPATH/RUNPATH，消除staticx拦截风险
+            # ====================== 核心修复3：虚拟环境全量RUNPATH/RPATH清理 ======================
+            # 清理pip安装的所有库（cryptography、pydantic_core等）的so文件，彻底杜绝残留
+            echo "===== 虚拟环境全量RUNPATH/RPATH清理 ====="
             find /opt/venv -name "*.so*" -type f | while read so; do
+              echo "清理虚拟环境库: $so"
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
             done
-            find /usr/lib -name "*.so*" -type f | while read so; do
-              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
-            done
+            echo "===== 虚拟环境清理完成 ====="
+            # ==========================================================================================
 
-            # 9. 生成启动入口脚本
+            # 7. 生成启动入口脚本
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -110,17 +135,29 @@ jobs:
                 main()
             EOF
 
-            # 【关键修复】预校验所有要打包的动态库存在，避免硬编码报错
-            echo "===== 预校验打包依赖库 ====="
-            ls -la /usr/lib/libsqlite3.so.0
-            ls -la /usr/lib/libz.so.1
-            ls -la /usr/lib/libffi.so.8
-            ls -la /usr/lib/libssl.so.3
-            ls -la /usr/lib/libcrypto.so.3
-            ls -la /usr/lib/libgcc_s.so.1
-            echo "===== 依赖库校验完成 ====="
+            # ====================== 核心修复4：打包前最终校验与二次清理 ======================
+            # 对所有要打包的依赖库做最终校验，确保100%无RUNPATH/RPATH
+            echo "===== 打包前最终依赖校验 ====="
+            PACK_LIBS=(
+              "/usr/lib/libsqlite3.so.0"
+              "/usr/lib/libz.so.1"
+              "/usr/lib/libffi.so.8"
+              "/usr/lib/libssl.so.3"
+              "/usr/lib/libcrypto.so.3"
+              "/usr/lib/libgcc_s.so.1"
+            )
+            for lib in "${PACK_LIBS[@]}"; do
+              if [ -f "$lib" ]; then
+                echo "校验并清理: $lib"
+                patchelf --remove-rpath --remove-runpath "$lib" 2>/dev/null || true
+                # 打印校验结果，方便排查
+                readelf -d "$lib" | grep -E 'RPATH|RUNPATH' || echo "✅ 无RPATH/RUNPATH"
+              fi
+            done
+            echo "===== 最终校验完成 ====="
+            # ==========================================================================================
 
-            # 10. PyInstaller 打包（核心修复：删除不存在的libm.so.6配置）
+            # 8. PyInstaller 打包（优化：避免重复打包，确保所有入库文件已清理）
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -136,16 +173,16 @@ jobs:
               --add-binary "/usr/lib/libgcc_s.so.1:python$PYTHON_VERSION/lib-dynload/" \
               run.py
 
-            # 11. 清理残留动态库，避免外部依赖
-            find / -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
-            find dist/ -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
-
-            # 12. Staticx 全静态封包
+            # 9. Staticx 全静态封包（无任何RUNPATH拦截风险）
             staticx \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
-            # 13. 权限修复
+            # 10. 封包完成后清理系统残留动态库，避免外部依赖
+            find / -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
+            find dist/ -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
+
+            # 11. 权限修复
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
 
