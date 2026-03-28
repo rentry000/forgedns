@@ -22,19 +22,22 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 镜像源优化，解决apk拉取故障
+            # ========== 修复1：替换为稳定可用的alpine edge源，彻底解决链接报错 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
-            https://mirrors.ustc.edu.cn/alpine/edge/main
-            https://mirrors.ustc.edu.cn/alpine/edge/community
-            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
+            # 阿里云alpine edge源，国内稳定可用，无链接报错
+            https://mirrors.aliyun.com/alpine/edge/main
+            https://mirrors.aliyun.com/alpine/edge/community
+            # 官方源兜底
+            http://dl-cdn.alpinelinux.org/alpine/edge/main
+            http://dl-cdn.alpinelinux.org/alpine/edge/community
             EOF
 
             # 兜底DNS配置
             echo "nameserver 8.8.8.8" > /etc/resolv.conf
-            echo "nameserver 114.114.114.114" >> /etc/resolv.conf
+            echo "nameserver 223.5.5.5" >> /etc/resolv.conf
 
-            # 增加重试机制，避免网络波动导致apk更新失败
+            # 带重试的apk更新，彻底解决网络波动问题
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
             # 全量依赖安装，含Python编译所需的所有静态库
@@ -70,7 +73,7 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== 核心修正：使用官方存在的Python 3.14.0版本 ==========
+            # 官方正式发布的Python 3.14.0，源码结构完整可追溯
             PYTHON_VERSION="3.14.0"
             # 全局编译环境变量，确保configure正确识别
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags"
@@ -83,7 +86,7 @@ jobs:
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
 
-            # 源码完整性全流程校验，彻底解决文件缺失问题
+            # ========== 修复2：源码完整性全流程校验，彻底解决文件缺失问题 ==========
             echo "===== 开始编译全静态Python（内置SQLite3） ====="
             PYTHON_TAR_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
@@ -102,11 +105,16 @@ jobs:
             # 解压并进入源码目录
             tar xf "$PYTHON_TAR_FILE"
             cd Python-$PYTHON_VERSION
-            
-            # 3.14版本完整的_sqlite3源文件列表，包含cache.c
+
+            # ========== 关键调试：列出_sqlite目录实际文件，彻底确认源码结构 ==========
+            echo "===== 官方Python $PYTHON_VERSION _sqlite模块实际文件列表 ====="
+            ls -la Modules/_sqlite/
+            echo "================================================================="
+
+            # ========== 修复3：使用官方正式版真实存在的文件列表，彻底移除不存在的cache.c ==========
             echo "===== 校验Python核心源文件 ====="
+            # 官方Python 3.14.0正式版_sqlite3模块的完整源文件，无任何不存在的文件
             SQLITE_SOURCE_FILES="
-              _sqlite/cache.c
               _sqlite/connection.c
               _sqlite/cursor.c
               _sqlite/microprotocols.c
@@ -137,11 +145,12 @@ jobs:
               --with-system-expat \
               --with-system-libmpdec
 
-            # 3.14版本完整的Setup.local配置，包含cache.c
+            # ========== 修复4：Setup.local适配官方正式版文件列表，移除cache.c ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
-            _sqlite3 _sqlite/cache.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
+            # 官方标准静态内置_sqlite3模块，完整包含所有功能，无不存在的源文件
+            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
               -I/usr/include \
               -L/usr/lib \
               -lsqlite3 -lz -lpthread -lm -ldl
@@ -152,17 +161,17 @@ jobs:
             _lzma _lzmamodule.c -llzma
             EOF
 
-            # 预校验Makefile已生成cache.o的构建规则
+            # 预校验Makefile已生成正确的构建规则
             echo "===== 校验Makefile构建规则 ====="
-            if grep -q "_sqlite/cache.o" Makefile; then
-              echo "✅ Makefile已生成cache.o构建规则"
+            if grep -q "_sqlite/connection.o" Makefile; then
+              echo "✅ Makefile已生成_sqlite3模块完整构建规则"
             else
-              echo "❌ Makefile未生成cache.o构建规则，配置异常"
+              echo "❌ Makefile未生成_sqlite3模块构建规则，配置异常"
               exit 1
             fi
 
-            # 编译安装，增加V=1输出详细日志，方便排查问题
-            make -j$(nproc) V=1
+            # 编译安装，全核心加速
+            make -j$(nproc)
             make install
             cd ..
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
