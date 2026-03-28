@@ -37,7 +37,7 @@ jobs:
 
             apk update --no-cache
 
-            # 全量依赖安装，含所有静态库包
+            # 全量依赖安装，含Python 3.14编译所需的所有静态库
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
@@ -46,10 +46,9 @@ jobs:
               mariadb-dev mariadb-static wget tar make gdbm-dev sqlite-dev sqlite-static \
               util-linux-dev util-linux-static zstd-dev zstd-static
 
-            # ====================== 核心修复：Ash兼容的静态库校验，无任何数组语法 ======================
+            # Ash兼容的静态库校验，无任何数组语法
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
-            # 直接在for循环中列出所有校验库，100%兼容Alpine默认Shell
             for lib in \
               "/usr/lib/libffi.a" \
               "/usr/lib/libgdbm.a" \
@@ -65,13 +64,11 @@ jobs:
                 ALL_EXIST=false
               fi
             done
-            # 仅当有库缺失时终止构建
             if [ "$ALL_EXIST" = "false" ]; then
               echo "❌ 核心静态库缺失，终止构建"
               exit 1
             fi
             echo "===== 静态库校验完成，所有核心库均存在 ====="
-            # ==========================================================================================
 
             # 全局编译环境变量提前定义，确保configure正确识别
             PYTHON_VERSION="3.14.3"
@@ -85,28 +82,38 @@ jobs:
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
 
-            # ====================== 终极根治核心：重编译Python，静态内置SQLite3 ======================
+            # ====================== 终极根治核心：Python 3.14专属静态编译适配 ======================
             echo "===== 开始编译全静态Python（内置SQLite3） ====="
             # 下载对应版本Python源码
             wget --no-check-certificate https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz -O python.tar.xz
             tar xf python.tar.xz
             cd Python-$PYTHON_VERSION
 
-            # 规范configure命令，参数顺序正确，无未识别选项
+            # ====================== 修复1：修正configure命令，移除废弃参数，100%兼容Python 3.14 ======================
+            # 核心修复：移除废弃的--enable-static、--with-system-ffi，仅保留有效参数
             ./configure \
               --prefix=/usr/local \
-              --enable-static \
               --disable-shared \
               --disable-test-modules \
-              --with-system-ffi \
-              --with-system-expat \
               --without-ensurepip \
               --disable-optimizations
+            # ==========================================================================================
 
-            # 强制setup.py静态链接SQLite3，不查找动态库
-            sed -i 's/sqlite3_defs = \[\]/sqlite3_defs = [("SQLITE_OMIT_LOAD_EXTENSION", "1")]/' setup.py
-            sed -i 's/sqlite_libs = \["sqlite3"\]/sqlite_libs = ["sqlite3", "z", "pthread", "m", "dl"]/' setup.py
-            sed -i 's/include_dirs.append(sqlite_incdir)/include_dirs.append(sqlite_incdir)\n    library_dirs.append("\/usr\/lib")\n    extra_link_args.append("-static")/' setup.py
+            # ====================== 修复2：Python 3.14专属静态模块配置，彻底替代setup.py ======================
+            # 官方标准方案：通过Modules/Setup.local强制静态内置_sqlite3模块，完全不依赖动态库
+            cat >> Modules/Setup.local << 'EOF'
+# 强制静态内置SQLite3模块，完整包含所有功能，无外部动态依赖
+*static*
+_sqlite3 _sqlite/cache.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
+  -I/usr/include \
+  -L/usr/lib \
+  -lsqlite3 -lz -lpthread -lm -ldl
+
+# 强制静态内置之前缺失的uuid、zstd模块，确保完整功能
+_uuid _uuidmodule.c -luuid
+_zstd _zstdmodule.c -lzstd
+EOF
+            # ==========================================================================================
 
             # 编译并安装，全核心加速
             make -j$(nproc)
