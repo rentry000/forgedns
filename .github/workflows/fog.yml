@@ -22,8 +22,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 修复1：镜像源优化，解决apk拉取故障 ==========
-            # 移除有link fetch error的清华community源，优先中科大稳定可用源（参考文档1-4）
+            # 镜像源优化，解决apk拉取故障
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://mirrors.ustc.edu.cn/alpine/edge/main
@@ -71,10 +70,8 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== 修复2：版本号修正，彻底解决源码不完整问题 ==========
-            # 原3.14.3版本官方不存在（参考文档5），导致wget下载404、源码残缺，是cache.c找不到的核心根源
-            # 切换为官方稳定版3.13.3（兼容性最佳），如需3.14开发版可改为3.14.0
-            PYTHON_VERSION="3.13.3"
+            # ========== 核心修正：使用官方存在的Python 3.14.0版本 ==========
+            PYTHON_VERSION="3.14.0"
             # 全局编译环境变量，确保configure正确识别
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags"
             export CFLAGS="-fPIC -O2"
@@ -86,7 +83,7 @@ jobs:
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
 
-            # ========== 修复3：源码完整性全流程校验，根治cache.c缺失 ==========
+            # 源码完整性全流程校验，彻底解决文件缺失问题
             echo "===== 开始编译全静态Python（内置SQLite3） ====="
             PYTHON_TAR_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
@@ -106,7 +103,7 @@ jobs:
             tar xf "$PYTHON_TAR_FILE"
             cd Python-$PYTHON_VERSION
             
-            # make前预校验：确认_sqlite3所有源文件（含cache.c）存在，提前拦截报错
+            # 3.14版本完整的_sqlite3源文件列表，包含cache.c
             echo "===== 校验Python核心源文件 ====="
             SQLITE_SOURCE_FILES="
               _sqlite/cache.c
@@ -130,7 +127,7 @@ jobs:
             done
             echo "===== 源文件校验完成，所有_sqlite3模块文件均存在 ====="
 
-            # ========== 修复4：configure优化，确保生成正确的Makefile规则 ==========
+            # configure优化，确保生成正确的Makefile规则
             ./configure \
               --prefix=/usr/local \
               --disable-shared \
@@ -140,8 +137,7 @@ jobs:
               --with-system-expat \
               --with-system-libmpdec
 
-            # ========== 修复5：Setup.local官方标准配置，彻底解决make规则缺失 ==========
-            # 清空原有内容，避免残留配置干扰，强制静态内置核心模块，完整列出所有源文件
+            # 3.14版本完整的Setup.local配置，包含cache.c
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -156,7 +152,7 @@ jobs:
             _lzma _lzmamodule.c -llzma
             EOF
 
-            # 预校验Makefile已生成cache.o的构建规则，提前发现配置问题
+            # 预校验Makefile已生成cache.o的构建规则
             echo "===== 校验Makefile构建规则 ====="
             if grep -q "_sqlite/cache.o" Makefile; then
               echo "✅ Makefile已生成cache.o构建规则"
@@ -225,7 +221,7 @@ jobs:
                 main()
             EOF
 
-            # PyInstaller打包，彻底排除libsqlite3.so.0
+            # PyInstaller打包，适配3.14版本路径
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -234,11 +230,11 @@ jobs:
               --strip \
               --noupx \
               --exclude-binaries "libsqlite3.so.0" \
-              --add-binary "/usr/lib/libz.so.1:python3.13/lib-dynload/" \
-              --add-binary "/usr/lib/libffi.so.8:python3.13/lib-dynload/" \
-              --add-binary "/usr/lib/libssl.so.3:python3.13/lib-dynload/" \
-              --add-binary "/usr/lib/libcrypto.so.3:python3.13/lib-dynload/" \
-              --add-binary "/usr/lib/libgcc_s.so.1:python3.13/lib-dynload/" \
+              --add-binary "/usr/lib/libz.so.1:python3.14/lib-dynload/" \
+              --add-binary "/usr/lib/libffi.so.8:python3.14/lib-dynload/" \
+              --add-binary "/usr/lib/libssl.so.3:python3.14/lib-dynload/" \
+              --add-binary "/usr/lib/libcrypto.so.3:python3.14/lib-dynload/" \
+              --add-binary "/usr/lib/libgcc_s.so.1:python3.14/lib-dynload/" \
               run.py
 
             # 最终打包校验
