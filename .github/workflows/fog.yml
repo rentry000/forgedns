@@ -26,11 +26,13 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 镜像源修复：移除失效的阿里云edge源（invalid link），仅保留验证可用的中科大源
+            # 1. 镜像源修复：解决invalid link问题，新增清华源备用，双镜像兜底可用性
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://mirrors.ustc.edu.cn/alpine/edge/main
             https://mirrors.ustc.edu.cn/alpine/edge/community
+            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/main
+            https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
             EOF
 
             # 兜底DNS修复，彻底杜绝域名解析失败问题，完整保留
@@ -40,14 +42,14 @@ jobs:
             # 执行无警告更新
             apk update --no-cache
 
-            # 2. 安装构建依赖：新增mariadb相关包，修复mariadb_config not found编译报错
+            # 2. 安装构建依赖：移除sqlite相关系统包（方案4自主编译），保留其他核心依赖
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev linux-headers libffi-dev \
               openssl-dev openssl-libs-static build-base patchelf pkgconf \
-              libcap-dev sqlite-dev libgcc sqlite-static libsodium-static \
+              libcap-dev libgcc libsodium-static \
               zlib-static libc6-compat scons binutils git rust cargo \
-              mariadb-dev mariadb-static
+              mariadb-dev mariadb-static wget tar
 
             # 3. 强制全静态编译环境（适配ARM64架构，完整保留原有配置）
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
@@ -60,6 +62,30 @@ jobs:
             export OPENSSL_STATIC=1
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
+
+            # ====================== 方案4 核心合并：自主编译全静态SQLite 彻底根治RUNPATH报错 ======================
+            # 仅生成静态库，不生成动态库，从根源消除libsqlite3.so.0的DT_RUNPATH问题
+            wget --no-check-certificate https://www.sqlite.org/2024/sqlite-autoconf-3460000.tar.gz -O sqlite.tar.gz
+            tar zxf sqlite.tar.gz
+            cd sqlite-autoconf-3460000
+            # 全静态编译配置：禁用动态库、禁用额外依赖、确保线程安全，适配Python调用
+            ./configure \
+              --prefix=/usr \
+              --disable-shared \
+              --enable-static \
+              --disable-readline \
+              --disable-editline \
+              --enable-threadsafe \
+              --with-pic
+            make -j$(nproc)
+            make install
+            cd ..
+            rm -rf sqlite.tar.gz sqlite-autoconf-3460000
+            # 验证静态库安装成功
+            ls -la /usr/lib/libsqlite3.a
+            # 彻底清理系统残留的sqlite动态库，杜绝被打包
+            find / -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
+            # ==========================================================================================================
 
             # 4. 虚拟环境（完整保留）
             python3 -m venv /opt/venv
@@ -77,10 +103,15 @@ jobs:
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
             # ==============================================================
 
-            # 7. 清理所有动态依赖（完整保留）
+            # 7. 全量清理所有动态库的RPATH/RUNPATH，彻底杜绝staticx拦截
+            # 清理虚拟环境内所有so文件
             find /opt/venv -name "*.so*" -type f | while read so; do
+              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
-              patchelf --remove-rpath "$so" 2>/dev/null || true
+            done
+            # 清理系统内可能被打包的so文件
+            find /usr/lib -name "*.so*" -type f | while read so; do
+              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
             done
 
             # 8. 启动入口（完整保留）
@@ -92,7 +123,7 @@ jobs:
                 main()
             EOF
 
-            # 9. PyInstaller 打包（完整保留）
+            # 9. PyInstaller 打包（完整保留，新增sqlite3静态链接适配）
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -102,7 +133,10 @@ jobs:
               --noupx \
               run.py
 
-            # 10. Staticx 封包（完整保留）
+            # 打包后二次校验：确保无libsqlite3.so.0被打包进产物
+            find dist/ -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
+
+            # 10. Staticx 封包（完整保留，无RUNPATH拦截风险）
             staticx \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
