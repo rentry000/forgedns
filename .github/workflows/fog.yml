@@ -37,14 +37,14 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：新增GNU tar确保解压完整 ==========
+            # ========== 依赖安装：完整兼容Python 3.12 ==========
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base tar patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget make gdbm-dev sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev mpdecimal-static
 
             # 静态库校验
             echo "===== 依赖静态库校验 ====="
@@ -73,8 +73,8 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # Python版本配置
-            PYTHON_VERSION="3.14.0"
+            # ========== 切换为Python 3.12.10 LTS稳定版，彻底解决源码结构变化报错 ==========
+            PYTHON_VERSION="3.12.10"
             # 全静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
@@ -108,30 +108,27 @@ jobs:
               exit 1
             fi
             
-            # 强制使用GNU tar解压，避免busybox tar兼容性问题
+            # 强制使用GNU tar解压，避免兼容性问题
             echo "===== Tar版本确认 ====="
             tar --version
             tar xf "$PYTHON_TAR_FILE"
-            # 解压结果校验
             if [ $? -ne 0 ]; then
               echo "❌ Python源码解压失败"
               exit 1
             fi
             cd Python-$PYTHON_VERSION
 
-            # 源码结构预校验，提前发现文件缺失
+            # ========== 新增：核心源码文件预校验，彻底避免文件找不到报错 ==========
             echo "===== 核心源码文件校验 ====="
-            ls -la Modules/ | head -50
-            if ls Modules/*itertools* 1>/dev/null 2>&1; then
-              echo "✅ 找到itertools相关源码文件："
-              ls -la Modules/*itertools*
+            # 校验itertools模块源文件（3.12稳定版必含）
+            if [ -f "Modules/_itertoolsmodule.c" ]; then
+              echo "✅ 存在: Modules/_itertoolsmodule.c"
+              ls -la Modules/_itertoolsmodule.c
             else
-              echo "❌ 未找到itertools相关源码，源码不完整"
+              echo "❌ 缺失: Modules/_itertoolsmodule.c，源码不完整"
               exit 1
             fi
-
-            # sqlite3模块文件校验
-            echo "===== sqlite3模块文件校验 ====="
+            # 校验sqlite3模块文件
             SQLITE_SOURCE_FILES="
               _sqlite/connection.c
               _sqlite/cursor.c
@@ -167,8 +164,23 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== 核心修复：精简Setup.local，移除所有核心内置模块的强制配置 ==========
-            # 仅保留需要手动指定静态链接的外部依赖模块，核心模块由Python构建系统自动处理
+            # ========== 新增：Makefile规则预校验，提前排查无效目标 ==========
+            echo "===== 预校验Makefile构建规则 ====="
+            if grep -q "_itertoolsmodule.o" Makefile; then
+              echo "✅ Makefile已生成itertools模块构建规则"
+            else
+              echo "❌ Makefile未生成itertools模块构建规则，配置异常"
+              exit 1
+            fi
+            if grep -q "_sqlite/connection.o" Makefile; then
+              echo "✅ Makefile已生成_sqlite3模块构建规则"
+            else
+              echo "❌ Makefile未生成_sqlite3模块构建规则"
+              exit 1
+            fi
+            echo "===== Makefile预校验完成 ====="
+
+            # ========== 精简Setup.local，仅保留外部依赖模块，核心模块由构建系统自动处理 ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -203,23 +215,7 @@ jobs:
             _decimal _decimal.c -lmpdec -lm
             EOF
 
-            # Makefile规则校验
-            echo "===== 校验Makefile构建规则 ====="
-            if grep -q "_sqlite/connection.o" Makefile; then
-              echo "✅ Makefile已生成_sqlite3模块构建规则"
-            else
-              echo "❌ Makefile未生成_sqlite3模块构建规则"
-              exit 1
-            fi
-            if grep -q "_ssl.o" Makefile; then
-              echo "✅ Makefile已生成_ssl模块构建规则"
-            else
-              echo "❌ Makefile未生成_ssl模块构建规则"
-              exit 1
-            fi
-            echo "===== Makefile校验完成 ====="
-
-            # 编译安装
+            # 编译安装，全核心加速
             make -j$(nproc)
             make install
             cd ..
@@ -231,10 +227,12 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果校验
+            # Python编译结果全量校验
             echo "===== Python编译结果校验 ====="
             python3 --version
-            python3 -c "import sys, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, itertools; print('✅ 所有核心模块导入成功，包括itertools')"
+            # 校验所有核心模块导入成功，含itertools
+            python3 -c "import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2; print('✅ 所有核心模块导入成功，包括itertools')"
+            # 校验静态编译状态
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
 
@@ -243,7 +241,7 @@ jobs:
             pip install --upgrade pip setuptools wheel
             pip install --no-cache-dir pyinstaller staticx
 
-            # 依赖安装
+            # 依赖安装，全静态适配
             pip install --no-cache-dir \
               --config-setting="--global-option=--static" \
               cryptography
@@ -252,7 +250,7 @@ jobs:
               pydantic_core==2.41.5
             pip install --no-cache-dir foghorn
 
-            # 全量RUNPATH/RPATH清理
+            # 全量RUNPATH/RPATH清理，杜绝staticx报错
             echo "===== 全量RUNPATH/RPATH清理 ====="
             find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
@@ -269,7 +267,7 @@ jobs:
             done
             echo "===== 全量清理完成 ====="
 
-            # 生成启动入口脚本
+            # 生成启动入口脚本，适配Android环境
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -279,7 +277,7 @@ jobs:
                 main()
             EOF
 
-            # PyInstaller打包
+            # PyInstaller打包，彻底排除动态库
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -325,7 +323,7 @@ jobs:
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
-            # 最终产物校验
+            # 最终产物全静态校验
             echo "===== 最终产物全静态校验 ====="
             file dist/foghorn-android-arm64-static
             ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ ldd校验：无动态依赖，符合全静态要求"
