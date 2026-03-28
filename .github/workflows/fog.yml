@@ -51,14 +51,14 @@ jobs:
             # 严格遵循staticx官方要求：打包前彻底清除所有库的绝对路径RPATH和全部RUNPATH
             echo "===== 系统级全量RUNPATH/RPATH清理 ====="
             # 先清理所有sqlite相关库，解决本次报错核心
-            find /usr/lib -name "libsqlite3.so*" -type f | while read so; do
+            find /usr/lib -name "libsqlite3.so*" -type f | while read -r so; do
               echo "清理RUNPATH/RPATH: $so"
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               # 额外移除无效依赖，避免后续问题
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
             done
             # 全量清理系统所有so库，彻底杜绝同类报错
-            find /usr/lib -name "*.so*" -type f | while read so; do
+            find /usr/lib -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
             done
             echo "===== 系统级清理完成 ====="
@@ -95,7 +95,7 @@ jobs:
             cd ..
             rm -rf sqlite.tar.gz sqlite-autoconf-3460000
             # 编译后二次清理，确保无残留RUNPATH
-            find /usr/lib -name "libsqlite3.so*" -type f | while read so; do
+            find /usr/lib -name "libsqlite3.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
             done
             ls -la /usr/lib/libsqlite3.a
@@ -118,7 +118,7 @@ jobs:
             # ====================== 核心修复3：虚拟环境全量RUNPATH/RPATH清理 ======================
             # 清理pip安装的所有库（cryptography、pydantic_core等）的so文件，彻底杜绝残留
             echo "===== 虚拟环境全量RUNPATH/RPATH清理 ====="
-            find /opt/venv -name "*.so*" -type f | while read so; do
+            find /opt/venv -name "*.so*" -type f | while read -r so; do
               echo "清理虚拟环境库: $so"
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
@@ -135,18 +135,17 @@ jobs:
                 main()
             EOF
 
-            # ====================== 核心修复4：打包前最终校验与二次清理 ======================
-            # 对所有要打包的依赖库做最终校验，确保100%无RUNPATH/RPATH
+            # ====================== 核心修复4：打包前最终校验（Ash兼容写法，无数组） ======================
+            # 对所有要打包的依赖库做最终校验，确保100%无RUNPATH/RPATH，完全兼容Alpine默认Shell
             echo "===== 打包前最终依赖校验 ====="
-            PACK_LIBS=(
-              "/usr/lib/libsqlite3.so.0"
-              "/usr/lib/libz.so.1"
-              "/usr/lib/libffi.so.8"
-              "/usr/lib/libssl.so.3"
-              "/usr/lib/libcrypto.so.3"
+            for lib in \
+              "/usr/lib/libsqlite3.so.0" \
+              "/usr/lib/libz.so.1" \
+              "/usr/lib/libffi.so.8" \
+              "/usr/lib/libssl.so.3" \
+              "/usr/lib/libcrypto.so.3" \
               "/usr/lib/libgcc_s.so.1"
-            )
-            for lib in "${PACK_LIBS[@]}"; do
+            do
               if [ -f "$lib" ]; then
                 echo "校验并清理: $lib"
                 patchelf --remove-rpath --remove-runpath "$lib" 2>/dev/null || true
