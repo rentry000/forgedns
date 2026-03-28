@@ -4,14 +4,11 @@ on:
 
 jobs:
   build-android:
-    # 若您有可用的ARM64自建Runner，可取消下面一行注释，注释掉ubuntu-latest
-    # runs-on: ubuntu-24.04-arm64
     runs-on: ubuntu-latest
     steps:
       - name: Checkout 仅用于构建目录
         uses: actions/checkout@v4
 
-      # 多架构支持，解决x86 Runner构建ARM64二进制的问题，完整保留
       - name: 设置QEMU多架构模拟
         uses: docker/setup-qemu-action@v3
         with:
@@ -21,12 +18,11 @@ jobs:
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
-          # 指定ARM64架构，确保构建产物适配Android，完整保留
           options: -v ${{ github.workspace }}:/workspace -w /workspace --platform linux/arm64
           run: |
             set -euxo pipefail
 
-            # 1. 镜像源修复：解决invalid link问题，新增清华源备用，双镜像兜底可用性
+            # 1. 镜像源配置，双镜像兜底可用性
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://mirrors.ustc.edu.cn/alpine/edge/main
@@ -35,15 +31,13 @@ jobs:
             https://mirrors.tuna.tsinghua.edu.cn/alpine/edge/community
             EOF
 
-            # 兜底DNS修复，彻底杜绝域名解析失败问题，完整保留
+            # 兜底DNS配置
             echo "nameserver 8.8.8.8" > /etc/resolv.conf
             echo "nameserver 114.114.114.114" >> /etc/resolv.conf
 
-            # 执行无警告更新
             apk update --no-cache
 
-            # 2. 安装构建依赖：【方案二合并修改】补充sqlite-libs/sqlite-dev，保留全量核心依赖
-            # 补充sqlite相关包，用于获取打包所需的动态库，同时保留静态编译能力
+            # 2. 安装全量构建依赖
             apk add --no-cache \
               python3 python3-dev py3-pip py3-setuptools \
               gcc g++ musl-dev linux-headers libffi-dev \
@@ -53,7 +47,7 @@ jobs:
               mariadb-dev mariadb-static wget tar \
               sqlite-dev sqlite-libs sqlite-static
 
-            # 3. 强制全静态编译环境（适配ARM64架构，完整保留原有配置）
+            # 3. 全局编译环境变量配置
             PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
             export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic"
@@ -65,12 +59,10 @@ jobs:
             export PYO3_CROSS_LIB_DIR=/usr/lib
             export RUSTFLAGS="-C target-feature=+crt-static"
 
-            # ====================== 原有自主编译全静态SQLite 完整保留，双保险兜底 ======================
-            # 仅生成静态库，不生成动态库，从根源消除libsqlite3.so.0的DT_RUNPATH问题
+            # 4. 自主编译全静态SQLite，双保险兜底
             wget --no-check-certificate https://www.sqlite.org/2024/sqlite-autoconf-3460000.tar.gz -O sqlite.tar.gz
             tar zxf sqlite.tar.gz
             cd sqlite-autoconf-3460000
-            # 全静态编译配置：禁用动态库、禁用额外依赖、确保线程安全，适配Python调用
             ./configure \
               --prefix=/usr \
               --disable-shared \
@@ -83,38 +75,32 @@ jobs:
             make install
             cd ..
             rm -rf sqlite.tar.gz sqlite-autoconf-3460000
-            # 验证静态库安装成功
             ls -la /usr/lib/libsqlite3.a
-            # ==========================================================================================================
 
-            # 4. 虚拟环境（完整保留）
+            # 5. 虚拟环境配置
             python3 -m venv /opt/venv
             source /opt/venv/bin/activate
 
-            # 5. 安装工具（完整保留）
+            # 6. 安装打包工具
             pip install --upgrade pip
             pip install --no-cache-dir "setuptools==69.0.0" wheel
             pip install --no-cache-dir pyinstaller
             pip install --no-cache-dir --no-build-isolation staticx
 
-            # ====================== 核心修复 完整保留 ======================
-            # 6. 安装foghorn，强制源码编译pydantic_core，消灭动态依赖
+            # 7. 安装foghorn及核心依赖
             pip install --no-cache-dir foghorn
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
-            # ==============================================================
 
-            # 7. 全量清理所有动态库的RPATH/RUNPATH，彻底杜绝staticx拦截
-            # 清理虚拟环境内所有so文件
+            # 8. 全量清理RPATH/RUNPATH，消除staticx拦截风险
             find /opt/venv -name "*.so*" -type f | while read so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
             done
-            # 清理系统内可能被打包的so文件
             find /usr/lib -name "*.so*" -type f | while read so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
             done
 
-            # 8. 启动入口（完整保留）
+            # 9. 生成启动入口脚本
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -123,8 +109,7 @@ jobs:
                 main()
             EOF
 
-            # 9. PyInstaller 打包【方案二核心合并】新增全量--add-binary依赖内置
-            # 自动适配Python版本，把所有核心共享库打包进二进制，运行时自动加载，无需系统依赖
+            # 10. PyInstaller 打包（核心修复：规范多行命令，移除内联注释，确保run.py在末尾）
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -132,7 +117,6 @@ jobs:
               --runtime-tmpdir /data/local/tmp \
               --strip \
               --noupx \
-              # 方案二核心：内置所有核心依赖库，彻底根治共享库找不到报错
               --add-binary "/usr/lib/libsqlite3.so.0:python$PYTHON_VERSION/lib-dynload/" \
               --add-binary "/usr/lib/libz.so.1:python$PYTHON_VERSION/lib-dynload/" \
               --add-binary "/usr/lib/libffi.so.8:python$PYTHON_VERSION/lib-dynload/" \
@@ -142,18 +126,16 @@ jobs:
               --add-binary "/usr/lib/libm.so.6:python$PYTHON_VERSION/lib-dynload/" \
               run.py
 
-            # 【方案二兼容修改】调整清理顺序：打包完成后再清理系统残留动态库，不影响打包读取
-            # 彻底清理系统残留的sqlite动态库，杜绝被意外打包
+            # 11. 清理残留动态库，避免外部依赖
             find / -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
-            # 打包后二次校验：确保无外部动态库残留，仅保留内置打包的内容
             find dist/ -name "libsqlite3.so*" -type f -delete 2>/dev/null || true
 
-            # 10. Staticx 封包（完整保留，无RUNPATH拦截风险）
+            # 12. Staticx 全静态封包
             staticx \
               dist/foghorn-android-arm64 \
               dist/foghorn-android-arm64-static
 
-            # 11. 权限修复（完整保留）
+            # 13. 权限修复
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
 
