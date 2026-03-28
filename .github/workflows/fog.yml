@@ -22,7 +22,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 源配置优化：优先国内稳定源，官方源兜底，适配edge版本 ==========
+            # ========== 源配置：优先国内稳定源，官方源兜底，适配edge版本 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             # 阿里云alpine edge源，国内稳定可用，无链接报错
@@ -40,16 +40,16 @@ jobs:
             # 带重试的apk更新，彻底解决网络波动问题
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 修复包名错误：移除不存在的包，替换为Alpine edge正确包名 ==========
+            # ========== 修复：移除无效的mpdecimal-static，所有包均为Alpine Edge有效包 ==========
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget tar make gdbm-dev sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev mpdecimal-static
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
-            # 静态库校验，确保核心依赖完整（适配修正后的包）
+            # 静态库校验，确保核心依赖完整（适配修正后的包，mpdecimal-dev已包含libmpdec.a）
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -87,7 +87,7 @@ jobs:
             export CPPFLAGS="-I/usr/include"
             export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
             export PKG_CONFIG="pkg-config --static"
-            # 修复：移除已废弃的CRYPTOGRAPHY_RUST=0，补充静态编译配置
+            # 加密依赖静态编译配置
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
             export PYO3_CROSS_LIB_DIR=/usr/lib
@@ -97,7 +97,7 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== 源码校验优化：移除不安全的证书跳过，完善完整性校验 ==========
+            # ========== Python源码下载与完整性校验 ==========
             echo "===== 开始编译全静态Python（内置所有核心模块） ====="
             PYTHON_TAR_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
@@ -146,7 +146,7 @@ jobs:
             done
             echo "===== 源文件校验完成，所有_sqlite3模块文件均存在 ====="
 
-            # ========== 修复致命错误：移除--without-ensurepip，添加host交叉编译适配 ==========
+            # ========== Python configure配置，适配静态编译 ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -160,7 +160,7 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== 核心优化：Setup.local全模块静态配置，新增ssl/hashlib等核心模块 ==========
+            # ========== 核心优化：Setup.local全模块静态配置，内置所有核心模块 ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
