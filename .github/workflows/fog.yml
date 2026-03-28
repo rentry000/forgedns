@@ -102,17 +102,17 @@ jobs:
             # ====================== 修复2：Python 3.14专属静态模块配置，彻底替代setup.py ======================
             # 官方标准方案：通过Modules/Setup.local强制静态内置_sqlite3模块，完全不依赖动态库
             cat >> Modules/Setup.local << 'EOF'
-# 强制静态内置SQLite3模块，完整包含所有功能，无外部动态依赖
-*static*
-_sqlite3 _sqlite/cache.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
-  -I/usr/include \
-  -L/usr/lib \
-  -lsqlite3 -lz -lpthread -lm -ldl
-
-# 强制静态内置之前缺失的uuid、zstd模块，确保完整功能
-_uuid _uuidmodule.c -luuid
-_zstd _zstdmodule.c -lzstd
-EOF
+            # 强制静态内置SQLite3模块，完整包含所有功能，无外部动态依赖
+            *static*
+            _sqlite3 _sqlite/cache.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
+              -I/usr/include \
+              -L/usr/lib \
+              -lsqlite3 -lz -lpthread -lm -ldl
+            
+            # 强制静态内置之前缺失的uuid、zstd模块，确保完整功能
+            _uuid _uuidmodule.c -luuid
+            _zstd _zstdmodule.c -lzstd
+            EOF
             # ==========================================================================================
 
             # 编译并安装，全核心加速
