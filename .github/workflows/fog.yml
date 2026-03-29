@@ -37,8 +37,7 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【修复1】新增_crypt模块依赖：libxcrypt静态库+开发包 ==========
-            # 修复根源：alpine系统的crypt功能由libxcrypt提供，缺失该包会导致_crypt模块编译失败/规则不生成
+            # ========== 【核心修复】移除不存在的libxcrypt包，保留完整构建依赖 ==========
             apk add --no-cache \
               curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
@@ -46,11 +45,9 @@ jobs:
               bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
               gdbm-dev libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static make sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev \
-              libxcrypt-dev libxcrypt-static
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
-            # ========== 【修复2】新增libcrypt.a静态库校验 ==========
-            # 提前确认静态库存在，避免编译时链接失败
+            # ========== 静态库校验（移除libcrypt.a，musl已内置） ==========
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -66,8 +63,7 @@ jobs:
               "/usr/lib/liblzma.a" \
               "/usr/lib/libbz2.a" \
               "/usr/lib/libncursesw.a" \
-              "/usr/lib/libpanelw.a" \
-              "/usr/lib/libcrypt.a"
+              "/usr/lib/libpanelw.a"
             do
               if [ -f "$lib" ] && [ $(stat -c%s "$lib") -gt 0 ]; then
                 echo "✅ 存在且有效: $lib"
@@ -205,8 +201,7 @@ jobs:
             fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 【修复3】新增_crypt模块源码前置校验 ==========
-            # 提前确认_cryptmodule.c是否存在，避免make阶段才报No rule错误
+            # ========== 核心源码文件校验 ==========
             echo "===== 核心源码文件校验 ====="
             if [ ! -d "Modules" ]; then
               echo "❌ 缺失: Modules目录，源码解压异常"
@@ -225,15 +220,13 @@ jobs:
               exit 1
             fi
 
-            # 新增：_crypt模块源码校验+可用性标记
+            # 【修复】确认_crypt模块源码存在（Python官方源码自带，无需额外安装）
             echo "===== _crypt模块源码校验 ====="
             if [ -f "Modules/_cryptmodule.c" ]; then
               echo "✅ 存在: Modules/_cryptmodule.c（crypt模块核心源码）"
               ls -la Modules/_cryptmodule.c
-              export CRYPT_MODULE_AVAILABLE=true
             else
               echo "⚠️  缺失: Modules/_cryptmodule.c，将自动禁用该模块构建"
-              export CRYPT_MODULE_AVAILABLE=false
             fi
 
             SQLITE_SOURCE_FILES="
@@ -257,7 +250,7 @@ jobs:
             done
             echo "===== 源码校验完成 ====="
 
-            # Python configure配置（完全保留你的原逻辑）
+            # Python configure配置（完全保留你的原逻辑，自动检测crypt功能）
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -271,7 +264,7 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== Makefile规则校验（完全保留你的原逻辑） ==========
+            # ========== Makefile规则预校验（修复_crypt模块报错核心） ==========
             echo "===== 预校验Makefile构建规则 ====="
             if grep -q "itertoolsmodule.o" Makefile; then
               echo "✅ Makefile已生成itertools模块构建规则"
@@ -286,11 +279,19 @@ jobs:
               echo "❌ Makefile未生成_sqlite3模块构建规则，配置异常"
               exit 1
             fi
+
+            # 【关键修复】仅当Makefile已生成_crypt模块规则时，才在Setup.local中添加配置
+            # 彻底避免No rule to make target报错
+            if grep -q "_cryptmodule.o" Makefile; then
+              echo "✅ Makefile已生成_crypt模块构建规则，musl crypt功能检测正常"
+              export CRYPT_MODULE_ENABLED=true
+            else
+              echo "⚠️  Makefile未生成_crypt模块构建规则，将自动禁用该模块，不影响核心功能"
+              export CRYPT_MODULE_ENABLED=false
+            fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== 【修复4】Setup.local 兜底容错配置 ==========
-            # 核心修复：仅当_cryptmodule.c存在时才添加构建规则，彻底解决No rule报错
-            # 同时补充-lcrypt链接参数，修复编译时符号找不到问题
+            # ========== Setup.local 全静态模块配置（容错修复版） ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -306,18 +307,17 @@ jobs:
               -lssl -lcrypto -lz -lpthread -lm -ldl
             EOF
 
-            # 动态判断：仅源码存在时添加_crypt模块构建规则
-            if [ "$CRYPT_MODULE_AVAILABLE" = "true" ]; then
+            # 仅当configure检测通过、Makefile已生成规则时，才添加_crypt模块配置
+            if [ "$CRYPT_MODULE_ENABLED" = "true" ]; then
               cat >> Modules/Setup.local << 'EOF'
             _crypt _cryptmodule.c -lcrypt
             EOF
               echo "✅ 已添加_crypt模块静态构建规则"
             else
               cat >> Modules/Setup.local << 'EOF'
-            # _crypt模块源码缺失，已自动禁用构建
-            # _crypt _cryptmodule.c
+            # _crypt模块未通过系统检测，已自动禁用构建
             EOF
-              echo "⚠️  已注释_crypt模块构建规则，避免编译报错"
+              echo "⚠️  已跳过_crypt模块构建规则添加"
             fi
 
             # 剩余原有模块配置完全保留
@@ -356,7 +356,7 @@ jobs:
             # Python编译结果全量校验
             echo "===== Python编译结果校验 ====="
             python3 --version
-            # 新增：容错校验，仅当模块可用时才导入_crypt
+            # 容错校验，不强制依赖_crypt模块
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2
             print('✅ 核心基础模块导入成功')
@@ -364,7 +364,7 @@ jobs:
                 import crypt
                 print('✅ _crypt模块导入成功')
             except ImportError:
-                print('⚠️  _crypt模块未构建，不影响核心功能')
+                print('⚠️  _crypt模块未构建，不影响Foghorn核心功能')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
