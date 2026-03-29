@@ -37,19 +37,14 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：已修复mpdecimal-static报错，新增GNU tar强制安装 ==========
+            # ========== 依赖安装：移除tar包，彻底避免软链接覆盖故障 ==========
             apk add --no-cache \
-              gcc g++ musl-dev linux-headers build-base tar patchelf pkgconf binutils git \
+              gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget make gdbm-dev sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev coreutils
-
-            # 强制替换BusyBox tar为GNU tar，彻底解决解压不全问题
-            ln -sf /usr/bin/tar /bin/tar
-            echo "===== Tar版本确认（强制GNU Tar） ====="
-            tar --version | head -n 1
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
             # 静态库校验（含libmpdec.a，mpdecimal-dev已自带，无需额外包）
             echo "===== 依赖静态库校验 ====="
@@ -130,7 +125,9 @@ jobs:
             fi
             echo "✅ 哈希校验通过，源码包完整"
 
-            # 3. 强制使用GNU Tar解压，确保所有文件完整释放
+            # 3. 直接使用系统自带BusyBox Tar解压，无兼容性问题
+            echo "===== Tar版本确认（系统原生BusyBox Tar） ====="
+            tar --version
             echo "===== 开始解压Python源码 ====="
             tar --no-same-owner --no-same-permissions -xf "$PYTHON_TAR_FILE"
             if [ $? -ne 0 ]; then
@@ -141,11 +138,13 @@ jobs:
             # 4. 校验解压后的目录是否存在
             if [ ! -d "Python-$PYTHON_VERSION" ]; then
               echo "❌ 解压后未找到Python-$PYTHON_VERSION目录，解压异常"
+              echo "===== 当前目录内容 ====="
+              ls -la
               exit 1
             fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 修复：适配Python 3.12的核心源码校验，新增调试信息 ==========
+            # ========== 适配Python 3.12的核心源码校验，新增调试信息 ==========
             echo "===== 核心源码文件校验 ====="
             # 先校验Modules目录是否存在
             if [ ! -d "Modules" ]; then
@@ -209,7 +208,7 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== 修复：适配Python 3.12的Makefile构建规则校验 ==========
+            # ========== 适配Python 3.12的Makefile构建规则校验 ==========
             echo "===== 预校验Makefile构建规则 ====="
             # 校验itertools模块构建规则：3.12优先校验单文件目标，兼容3.13+
             if grep -q "_itertoolsmodule.o" Makefile; then
