@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -179,7 +179,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 源码文件预校验（新增 _struct + array） ==========
+            # ========== 源码文件预校验（新增 _socket + _asyncio） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -196,6 +196,8 @@ jobs:
               Modules/_gdbmmodule.c
               Modules/arraymodule.c
               Modules/_struct.c
+              Modules/socketmodule.c
+              Modules/_asynciomodule.c
             "
             for file in $CRITICAL_SOURCE_FILES; do
               if [ -f "$file" ]; then
@@ -245,7 +247,9 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（新增 _struct + array） ==========
+            # ========== Setup.local 全静态模块配置（新增 _socket + _asyncio） ==========
+            # 关键修复：_socket 和 _asyncio 被 multiprocessing / concurrent.futures / compileall 引用
+            # 不加入会导致 ModuleNotFoundError: No module named '_socket'
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -266,9 +270,11 @@ jobs:
               -L/usr/lib \
               -lsqlite3 -lz -lpthread -lm -ldl
 
-            # 核心内置模块（新增 _struct + array，解决 compileall 和 sharedinstall 报错）
+            # 核心内置模块（解决 compileall / multiprocessing / socket 报错）
             _struct _struct.c
             array arraymodule.c
+            _socket socketmodule.c
+            _asyncio _asynciomodule.c
 
             # 其他依赖系统库的扩展模块，全静态内置
             _uuid _uuidmodule.c -luuid
@@ -279,37 +285,38 @@ jobs:
             readline readline.c -lreadline -lncursesw
             _gdbm _gdbmmodule.c -lgdbm
             EOF
-            echo "✅ Setup.local 配置完成（已包含 _struct + array）"
+            echo "✅ Setup.local 配置完成（已包含 _struct + array + _socket + _asyncio）"
 
-            # 编译安装（忽略 sharedinstall 非致命错误，静态构建不需要 .so）
+            # 编译安装（忽略 sharedinstall 非致命错误，静态构建不需要 .so 文件）
             make -j$(nproc)
             make install || true
             cd ..
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
 
-            # 替换系统默认Python
+            # 替换系统默认Python（确保二进制存在）
             ln -sf /usr/local/bin/python3 /usr/bin/python3
             ln -sf /usr/local/bin/python3 /usr/bin/python
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果全量校验（新增 struct、array）
+            # Python编译结果全量校验（新增 socket）
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
-            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array
-            print('✅ 所有核心模块（含uuid、zstd、sqlite3、struct、array）导入成功')
+            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
+            print('✅ 所有核心模块（含uuid、zstd、sqlite3、struct、array、socket）导入成功')
             print('ℹ️  decimal 模块使用纯Python回退实现')
             print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
 
-            # 后续打包步骤（完全不变）
+            # 安装打包工具
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
             pip install --no-cache-dir pyinstaller staticx
 
+            # 依赖安装
             pip install --no-cache-dir \
               --config-setting="--global-option=--static" \
               cryptography
