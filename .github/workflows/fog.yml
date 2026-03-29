@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -242,9 +242,9 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（已移除 _expat，避免 No rule to make target 错误） ==========
-            # _expat 模块在 --with-system-expat + Setup.local 组合下经常出现规则缺失问题
-            # foghorn / pydantic_core 不依赖 xml.etree，因此移除不影响使用
+            # ========== Setup.local 全静态模块配置（已移除 _decimal，避免 No rule to make target 错误） ==========
+            # 与 _expat 完全相同的问题：--with-system-libmpdec + Setup.local 强制 _decimal 会导致 Makefile 规则冲突
+            # _decimal 只是 decimal 模块的 C 加速器，纯 Python 实现完全可用，foghorn/pydantic_core 不依赖它
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -273,9 +273,8 @@ jobs:
             _curses_panel _curses_panel.c -lpanelw -lncursesw
             readline readline.c -lreadline -lncursesw
             _gdbm _gdbmmodule.c -lgdbm
-            _decimal _decimal.c -lmpdec -lm
             EOF
-            echo "✅ Setup.local 配置完成（_expat 已移除，避免规则缺失错误）"
+            echo "✅ Setup.local 配置完成（_expat 和 _decimal 已移除，避免规则缺失错误）"
 
             # 编译安装
             make -j$(nproc)
@@ -295,7 +294,8 @@ jobs:
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2
             print('✅ 所有核心模块（含uuid、zstd）导入成功')
-            print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过，不影响 Foghorn 核心功能')
+            print('ℹ️  decimal 模块使用纯Python回退实现（_decimal C加速器已跳过，不影响 Foghorn 核心功能）')
+            print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
