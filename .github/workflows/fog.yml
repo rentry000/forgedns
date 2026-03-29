@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -92,7 +92,6 @@ jobs:
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
-            # 整合改善建议：简化LDFLAGS，清空CPPFLAGS
             export LDFLAGS="-static"
             export CPPFLAGS=""
             export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
@@ -180,7 +179,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 源码文件预校验（新增 _socket + _asyncio） ==========
+            # ========== 源码文件预校验（移除不存在的_multibytecodec相关文件） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -199,6 +198,8 @@ jobs:
               Modules/_struct.c
               Modules/socketmodule.c
               Modules/_asynciomodule.c
+              Modules/_contextvarsmodule.c
+              Modules/unicodedata.c
             "
             for file in $CRITICAL_SOURCE_FILES; do
               if [ -f "$file" ]; then
@@ -210,7 +211,7 @@ jobs:
             done
             echo "===== 核心源码校验完成 ====="
 
-            # ========== configure 配置（整合改善建议：添加--with-static-libpython，精简选项） ==========
+            # ========== configure 配置 ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -245,11 +246,11 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（整合改善建议：修复格式+补充完整模块） ==========
+            # ========== Setup.local 配置（移除不存在的_multibytecodec相关模块） ==========
             cat > Modules/Setup.local << 'EOF'
             *static*
 
-            # 基础数学与系统模块 (解决 math, binascii, zlib 等报错)
+            # 基础数学与系统模块
             math mathmodule.c
             cmath cmathmodule.c
             _struct _struct.c
@@ -274,15 +275,8 @@ jobs:
             _asyncio _asynciomodule.c
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
-            _multibytecodec _multibytecodec.c
-            _codecs_cn _codecs_cn.c
-            _codecs_hk _codecs_hk.c
-            _codecs_iso2022 _codecs_iso2022.c
-            _codecs_jp _codecs_jp.c
-            _codecs_kr _codecs_kr.c
-            _codecs_tw _codecs_tw.c
 
-            # 核心哈希模块 (修复 _sha1, _md5, _blake2 等)
+            # 核心哈希模块
             _md5 md5module.c
             _sha1 sha1module.c
             _sha2 sha256module.c sha512module.c
@@ -292,11 +286,11 @@ jobs:
             # 压缩模块
             zlib zlibmodule.c -lz
 
-            # 加密与安全 (修复格式错误)
+            # 加密与安全
             _hashlib _hashopenssl.c -lssl -lcrypto
             _ssl _ssl.c -lssl -lcrypto
 
-            # 数据库 (修复 sqlite3)
+            # 数据库
             _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c -lsqlite3
 
             # 其他扩展
@@ -306,38 +300,35 @@ jobs:
             _gdbm _gdbmmodule.c -lgdbm
             readline readline.c -lreadline -lncursesw
             EOF
-            echo "✅ Setup.local 配置完成（修复格式+补充完整静态模块）"
+            echo "✅ Setup.local 配置完成（移除不存在的模块）"
 
-            # 编译安装（忽略 sharedinstall 非致命错误，静态构建不需要 .so 文件）
+            # 编译安装
             make -j$(nproc)
             make install || true
             cd ..
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
 
-            # 替换系统默认Python（确保二进制存在）
+            # 替换系统默认Python
             ln -sf /usr/local/bin/python3 /usr/bin/python3
             ln -sf /usr/local/bin/python3 /usr/bin/python
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果全量校验（新增 socket）
+            # Python编译结果校验
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
-            print('✅ 所有核心模块（含uuid、zstd、sqlite3、struct、array、socket）导入成功')
+            print('✅ 所有核心模块导入成功')
             print('ℹ️  decimal 模块使用纯Python回退实现')
-            print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
 
-            # 安装打包工具
+            # 安装打包工具与依赖
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
             pip install --no-cache-dir pyinstaller staticx
-
-            # 依赖安装
             pip install --no-cache-dir \
               --config-setting="--global-option=--static" \
               cryptography
@@ -363,7 +354,7 @@ jobs:
             done
             echo "===== 全量清理完成 ====="
 
-            # 生成启动入口脚本
+            # 生成启动脚本与打包
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -373,7 +364,6 @@ jobs:
                 main()
             EOF
 
-            # PyInstaller打包
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -391,8 +381,8 @@ jobs:
               --exclude-binaries "libc.musl-aarch64.so.1" \
               run.py
 
-            # 打包结果校验
-            echo "===== 打包结果最终校验 ====="
+            # 打包校验与静态封包
+            echo "===== 打包结果校验 ====="
             python3 -c "
             import zipfile
             exe_path = 'dist/foghorn-android-arm64'
@@ -410,21 +400,18 @@ jobs:
             if not has_forbidden:
                 print('✅ 打包归档内无禁止动态库')
             "
-            echo "===== 打包校验完成 ====="
-
-            # staticx全静态封包
             staticx --strip --loglevel info dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
 
-            # 最终产物全静态校验
-            echo "===== 最终产物全静态校验 ====="
+            # 最终产物校验
+            echo "===== 最终产物校验 ====="
             file dist/foghorn-android-arm64-static
-            ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ ldd校验：无动态依赖，符合全静态要求"
+            ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ ldd校验：无动态依赖"
             chmod +x dist/foghorn-android-arm64-static
             chown -R 1001:1001 dist/
             chmod -R 755 dist/
-            echo "===== 全静态校验完成，构建成功 ====="
+            echo "===== 构建成功 ====="
 
-      - name: 上传最终单二进制产物
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-android-arm64-最终稳定版
