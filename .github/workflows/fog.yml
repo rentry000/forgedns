@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -23,7 +23,6 @@ jobs:
             set -euxo pipefail
 
             # ========== 【核心修复1】源配置：优先国内阿里云镜像，兜底官方源，解决网络超时/无效链接 ==========
-            # 参考文档确认：阿里云edge源、官方edge源均有效，且完整支持aarch64架构
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://mirrors.aliyun.com/alpine/edge/main
@@ -39,8 +38,8 @@ jobs:
             # 带重试的apk更新，避免网络波动导致失败
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【核心修复2】完整依赖安装，彻底解决uuid.h缺失、zstd依赖问题 ==========
-            # 新增重试机制，确保所有依赖（含uuid、zstd的开发包+静态库）完整安装
+            # ========== 【核心修复2】完整依赖安装，彻底解决uuid.h缺失等问题 ==========
+            # 保留zstd-static（pip安装的zstd包可能需要静态库），但不再用于Python核心构建
             for i in 1 2 3; do 
               apk add --no-cache \
                 curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
@@ -53,7 +52,7 @@ jobs:
               && break || sleep 5
             done
 
-            # ========== 【强化修复】静态库全量校验，新增uuid、zstd静态库校验 ==========
+            # ========== 【强化修复】静态库全量校验 ==========
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -86,15 +85,14 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== 【核心修复3】Python配置，替换无效华为镜像，用阿里云镜像兜底 ==========
-            # 参考文档确认：Python 3.13.3官方源有效，华为云镜像解析失败，替换为稳定可用的阿里云Python镜像
+            # ========== 【核心修复3】Python配置，优先阿里云镜像 ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL_OFFICIAL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_URL_MIRROR="https://mirrors.aliyun.com/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
 
-            # 全静态编译环境变量，强化静态链接参数
+            # 全静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
@@ -111,7 +109,7 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== 【优化修复】下载逻辑：优先国内阿里云镜像，再官方源，提升成功率 ==========
+            # ========== 下载Python源码（优先国内镜像） ==========
             echo "===== 开始下载Python $PYTHON_VERSION 源码 ====="
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
 
@@ -192,8 +190,6 @@ jobs:
             fi
             echo "✅ 源码包完整性校验通过"
 
-            echo "===== Tar版本确认 ====="
-            tar --version
             echo "===== 开始解压Python源码 ====="
             tar --no-same-owner --no-same-permissions -xf "$PYTHON_TAR_FILE"
             if [ $? -ne 0 ]; then
@@ -209,12 +205,10 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 【核心修复4】源码文件预校验，彻底解决No rule to make target报错 ==========
-            # 提前校验之前报错的_zstdmodule.c、_uuidmodule.c是否存在，避免源码损坏导致的规则缺失
+            # ========== 【核心修复4】源码文件预校验（已移除不存在的_zstdmodule.c） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
-              Modules/_zstdmodule.c
               Modules/itertoolsmodule.c
               Modules/_cryptmodule.c
               Modules/_sqlite/connection.c
@@ -236,8 +230,7 @@ jobs:
             done
             echo "===== 核心源码校验完成 ====="
 
-            # ========== 【核心修复5】configure配置，新增--with-system-libraries，自动生成正确构建规则 ==========
-            # 强制configure检测系统已安装的uuid、zstd、ffi等依赖，生成对应的Makefile构建规则，彻底解决No rule报错
+            # ========== 【核心修复5】configure配置 ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -252,14 +245,13 @@ jobs:
               --with-system-libraries \
               --with-openssl=/usr
 
-            # ========== 【强化修复】Makefile规则预校验，新增uuid、zstd模块规则校验 ==========
+            # ========== 【强化修复】Makefile规则预校验（已移除_zstdmodule.o） ==========
             echo "===== 预校验Makefile构建规则 ====="
             CRITICAL_RULES="
               itertoolsmodule.o
               _sqlite/connection.o
               _cryptmodule.o
               _uuidmodule.o
-              _zstdmodule.o
             "
             ALL_RULES_OK=true
             for rule in $CRITICAL_RULES; do
@@ -285,7 +277,7 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（容错修复版） ==========
+            # ========== Setup.local 全静态模块配置（已移除_zstd） ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -314,7 +306,7 @@ jobs:
               echo "⚠️  已跳过_crypt模块构建规则添加"
             fi
 
-            # 剩余原有模块配置完全保留，确保全静态内置
+            # 剩余模块配置（已移除_zstd，因为它不是Python核心源码模块）
             cat >> Modules/Setup.local << 'EOF'
             # sqlite3模块，全静态内置
             _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
@@ -324,7 +316,6 @@ jobs:
 
             # 其他依赖系统库的扩展模块，全静态内置
             _uuid _uuidmodule.c -luuid
-            _zstd _zstdmodule.c -lzstd
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
             _curses _cursesmodule.c -lncursesw -ltinfo
@@ -335,7 +326,7 @@ jobs:
             _decimal _decimal.c -lmpdec -lm
             EOF
 
-            # 编译安装，新增出错立即终止
+            # 编译安装
             make -j$(nproc)
             make install
             cd ..
@@ -347,13 +338,12 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果全量校验，新增uuid、zstd模块强制校验
+            # Python编译结果全量校验（zstd由pip包提供）
             echo "===== Python编译结果校验 ====="
             python3 --version
-            # 强制校验之前报错的uuid、zstd模块，确保编译成功
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2
-            print('✅ 所有核心模块（含uuid、zstd）导入成功')
+            print('✅ 所有核心模块（含uuid）导入成功')
             try:
                 import crypt
                 print('✅ _crypt模块导入成功')
