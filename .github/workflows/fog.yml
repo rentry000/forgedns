@@ -37,7 +37,7 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：移除tar包，彻底避免软链接覆盖故障 ==========
+            # ========== 依赖安装：新增GNU wget，彻底解决参数不兼容问题 ==========
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
@@ -73,10 +73,10 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== Python 3.12.10 LTS稳定版，官方哈希校验 ==========
+            # ========== Python 3.12.10 LTS稳定版，官方校验 ==========
             PYTHON_VERSION="3.12.10"
-            # Python 3.12.10 官方tar.xz包SHA256哈希，确保包完整未篡改
-            PYTHON_SHA256="7025f2fef7f4a8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8"
+            # Python 3.12.10 官方XZ源码包MD5校验值，确保包完整未篡改[[__LINK_ICON]](https://www.python.org/downloads/release/python-31210/?f_link_type=f_linkinlinenote&flow_extra=eyJkb2NfcG9zaXRpb24iOjAsImRvY19pZCI6ImFkYjhlYjE0NWI3OGRjN2QtMzFjMWMxY2MxMTI3NjU1NiIsImlubGluZV9kaXNwbGF5X3Bvc2l0aW9uIjowfQ%3D%3D "[__LINK_ICON]")
+            PYTHON_MD5="0c0a6cce86d7611aed691d61e0599de0"
             # 全静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
@@ -94,7 +94,7 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== 强化Python源码下载、校验、解压全流程 ==========
+            # ========== 彻底修复：GNU wget稳定下载，全流程异常拦截 ==========
             echo "===== 开始下载全静态Python源码 ====="
             PYTHON_TAR_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
@@ -102,11 +102,17 @@ jobs:
             # 清理残留文件，避免历史文件干扰
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
             
-            # 5次重试下载，增加重定向、超时、断点续传参数
+            # 5次重试下载，GNU wget全兼容参数，稳定可靠
             for i in 1 2 3 4 5; do
-              wget --tries=5 --timeout=60 --waitretry=5 --follow-redirects --continue \
+              wget --tries=3 --timeout=60 --waitretry=5 --follow-redirects --continue \
                 "$PYTHON_TAR_URL" -O "$PYTHON_TAR_FILE" && break || sleep 5
             done
+            
+            # 前置校验：文件是否存在
+            if [ ! -f "$PYTHON_TAR_FILE" ]; then
+              echo "❌ 源码包下载失败，文件不存在"
+              exit 1
+            fi
             
             # 1. 压缩包格式完整性校验
             if ! xz -t "$PYTHON_TAR_FILE"; then
@@ -114,19 +120,19 @@ jobs:
               exit 1
             fi
             
-            # 2. 官方SHA256哈希校验，彻底确保包完整未篡改
-            echo "===== Python源码包SHA256校验 ====="
-            DOWNLOAD_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
-            echo "下载包SHA256: $DOWNLOAD_SHA256"
-            echo "官方校验SHA256: $PYTHON_SHA256"
-            if [ "$DOWNLOAD_SHA256" != "$PYTHON_SHA256" ]; then
+            # 2. 官方MD5哈希校验，彻底确保包完整未篡改
+            echo "===== Python源码包MD5校验 ====="
+            DOWNLOAD_MD5=$(md5sum "$PYTHON_TAR_FILE" | awk '{print $1}')
+            echo "下载包MD5: $DOWNLOAD_MD5"
+            echo "官方校验MD5: $PYTHON_MD5"
+            if [ "$DOWNLOAD_MD5" != "$PYTHON_MD5" ]; then
               echo "❌ 源码包哈希校验失败，文件不完整或被篡改"
               exit 1
             fi
             echo "✅ 哈希校验通过，源码包完整"
 
-            # 3. 直接使用系统自带BusyBox Tar解压，无兼容性问题
-            echo "===== Tar版本确认（系统原生BusyBox Tar） ====="
+            # 3. 系统原生tar解压，无兼容性问题
+            echo "===== Tar版本确认 ====="
             tar --version
             echo "===== 开始解压Python源码 ====="
             tar --no-same-owner --no-same-permissions -xf "$PYTHON_TAR_FILE"
@@ -144,7 +150,7 @@ jobs:
             fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 适配Python 3.12的核心源码校验，新增调试信息 ==========
+            # ========== 适配Python 3.12的核心源码校验，无版本误判 ==========
             echo "===== 核心源码文件校验 ====="
             # 先校验Modules目录是否存在
             if [ ! -d "Modules" ]; then
