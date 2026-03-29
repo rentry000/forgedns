@@ -73,7 +73,7 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== 切换为Python 3.12.10 LTS稳定版，彻底解决源码结构变化报错 ==========
+            # ========== 切换为Python 3.12.10 LTS稳定版 ==========
             PYTHON_VERSION="3.12.10"
             # 全静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
@@ -118,17 +118,23 @@ jobs:
             fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 新增：核心源码文件预校验，彻底避免文件找不到报错 ==========
+            # ========== 修复：适配Python 3.12+ 重构后的核心源码校验 ==========
             echo "===== 核心源码文件校验 ====="
-            # 校验itertools模块源文件（3.12稳定版必含）
-            if [ -f "Modules/_itertoolsmodule.c" ]; then
-              echo "✅ 存在: Modules/_itertoolsmodule.c"
-              ls -la Modules/_itertoolsmodule.c
+            # 校验itertools模块（适配3.12+ 目录结构，兼容旧版单文件）
+            if [ -d "Modules/itertools" ] && [ -f "Modules/itertools/module.c" ]; then
+              echo "✅ 存在: Modules/itertools/ 目录及核心源码（Python 3.12+ 适配）"
+              ls -la Modules/itertools/
             else
-              echo "❌ 缺失: Modules/_itertoolsmodule.c，源码不完整"
-              exit 1
+              if [ -f "Modules/_itertoolsmodule.c" ]; then
+                echo "✅ 存在: Modules/_itertoolsmodule.c"
+                ls -la Modules/_itertoolsmodule.c
+              else
+                echo "❌ 缺失: itertools模块核心源码，源码不完整"
+                exit 1
+              fi
             fi
-            # 校验sqlite3模块文件
+
+            # 校验sqlite3模块文件（3.12结构无变化，保留原有校验）
             SQLITE_SOURCE_FILES="
               _sqlite/connection.c
               _sqlite/cursor.c
@@ -164,23 +170,30 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== 新增：Makefile规则预校验，提前排查无效目标 ==========
+            # ========== 修复：适配Python 3.12+ 的Makefile构建规则校验 ==========
             echo "===== 预校验Makefile构建规则 ====="
-            if grep -q "_itertoolsmodule.o" Makefile; then
-              echo "✅ Makefile已生成itertools模块构建规则"
+            # 校验itertools模块构建规则（适配3.12+ 新路径，兼容旧版）
+            if grep -q "itertools/module.o" Makefile; then
+              echo "✅ Makefile已生成itertools模块构建规则（Python 3.12+ 适配）"
             else
-              echo "❌ Makefile未生成itertools模块构建规则，配置异常"
-              exit 1
+              if grep -q "_itertoolsmodule.o" Makefile; then
+                echo "✅ Makefile已生成itertools模块构建规则"
+              else
+                echo "❌ Makefile未生成itertools模块构建规则，配置异常"
+                exit 1
+              fi
             fi
+
+            # 校验sqlite3模块构建规则（无变化，保留原有校验）
             if grep -q "_sqlite/connection.o" Makefile; then
               echo "✅ Makefile已生成_sqlite3模块构建规则"
             else
-              echo "❌ Makefile未生成_sqlite3模块构建规则"
+              echo "❌ Makefile未生成_sqlite3模块构建规则，配置异常"
               exit 1
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== 精简Setup.local，仅保留外部依赖模块，核心模块由构建系统自动处理 ==========
+            # ========== Setup.local 仅保留外部依赖模块，核心模块由构建系统自动处理 ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
