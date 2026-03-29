@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
 
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【核心修复2】完整依赖安装 ==========
+            # ========== 【核心修复2】完整依赖安装（含 util-linux-dev 提供 uuid 头文件和静态库） ==========
             for i in 1 2 3; do 
               apk add --no-cache \
                 curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
@@ -82,7 +82,7 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== Python 3.13.3 配置（已适配 3.13 crypt 模块被彻底移除） ==========
+            # ========== Python 3.13.3 配置 ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL_OFFICIAL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
@@ -94,7 +94,9 @@ jobs:
             export CXX="g++"
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags -Wl,--as-needed"
             export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
-            export CPPFLAGS="-I/usr/include"
+            # 【关键修复】Alpine 的 uuid 头文件位于 /usr/include/uuid/uuid.h
+            # _uuidmodule.c 使用 #include <uuid.h>，因此必须添加 -I/usr/include/uuid
+            export CPPFLAGS="-I/usr/include -I/usr/include/uuid"
             export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
             export PKG_CONFIG="pkg-config --static"
             export CRYPTOGRAPHY_STATIC=1
@@ -179,8 +181,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 【核心修复3】源码文件预校验（已移除 _cryptmodule.c） ==========
-            # Python 3.13 已按 PEP 594 彻底移除 crypt 模块及其源码文件
+            # ========== 源码文件预校验（crypt 已在 3.13 被 PEP 594 移除） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -219,7 +220,7 @@ jobs:
               --with-system-libraries \
               --with-openssl=/usr
 
-            # ========== Makefile 规则预校验（已移除 _cryptmodule.o） ==========
+            # ========== Makefile 规则预校验 ==========
             echo "===== 预校验Makefile构建规则 ====="
             CRITICAL_RULES="
               itertoolsmodule.o
@@ -241,7 +242,7 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（已移除 _crypt） ==========
+            # ========== Setup.local 全静态模块配置 ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -273,7 +274,7 @@ jobs:
             _expat _expatmodule.c -lexpat
             _decimal _decimal.c -lmpdec -lm
             EOF
-            echo "✅ Setup.local 配置完成（crypt 模块已在 Python 3.13 被移除，不再构建）"
+            echo "✅ Setup.local 配置完成"
 
             # 编译安装
             make -j$(nproc)
@@ -287,7 +288,7 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果全量校验（已移除 crypt 相关校验）
+            # Python编译结果全量校验
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
