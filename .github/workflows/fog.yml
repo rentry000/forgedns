@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -179,7 +179,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 源码文件预校验 ==========
+            # ========== 源码文件预校验（新增 _sqlite/blob.c） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -192,6 +192,7 @@ jobs:
               Modules/_sqlite/row.c
               Modules/_sqlite/statement.c
               Modules/_sqlite/util.c
+              Modules/_sqlite/blob.c
               Modules/_gdbmmodule.c
             "
             for file in $CRITICAL_SOURCE_FILES; do
@@ -242,9 +243,8 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（已移除 _decimal，避免 No rule to make target 错误） ==========
-            # 与 _expat 完全相同的问题：--with-system-libmpdec + Setup.local 强制 _decimal 会导致 Makefile 规则冲突
-            # _decimal 只是 decimal 模块的 C 加速器，纯 Python 实现完全可用，foghorn/pydantic_core 不依赖它
+            # ========== Setup.local 全静态模块配置（新增 _sqlite/blob.c） ==========
+            # 关键修复：_sqlite3 模块必须包含 blob.c，否则会出现 pysqlite_close_all_blobs / pysqlite_blob_setup_types 未定义的链接错误
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -259,8 +259,8 @@ jobs:
               -L/usr/lib \
               -lssl -lcrypto -lz -lpthread -lm -ldl
 
-            # sqlite3模块，全静态内置
-            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
+            # sqlite3模块，全静态内置（必须包含 blob.c）
+            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c \
               -I/usr/include \
               -L/usr/lib \
               -lsqlite3 -lz -lpthread -lm -ldl
@@ -274,7 +274,7 @@ jobs:
             readline readline.c -lreadline -lncursesw
             _gdbm _gdbmmodule.c -lgdbm
             EOF
-            echo "✅ Setup.local 配置完成（_expat 和 _decimal 已移除，避免规则缺失错误）"
+            echo "✅ Setup.local 配置完成（_sqlite3 已完整包含 blob.c）"
 
             # 编译安装
             make -j$(nproc)
@@ -293,8 +293,8 @@ jobs:
             python3 --version
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2
-            print('✅ 所有核心模块（含uuid、zstd）导入成功')
-            print('ℹ️  decimal 模块使用纯Python回退实现（_decimal C加速器已跳过，不影响 Foghorn 核心功能）')
+            print('✅ 所有核心模块（含uuid、zstd、sqlite3）导入成功')
+            print('ℹ️  decimal 模块使用纯Python回退实现（_decimal C加速器已跳过）')
             print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
