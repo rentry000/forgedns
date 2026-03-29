@@ -37,17 +37,17 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【修复】补全所有静态依赖包，零缺失 ==========
+            # ========== 【精准修复】删除不存在的gdbm-static，保留gdbm-dev（已含静态库） ==========
             apk add --no-cache \
               curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static \
               bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
-              gdbm-dev gdbm-static libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
+              gdbm-dev libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static make sqlite-dev sqlite-static \
               util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
-            # ========== 【修复】严谨的静态库校验，去掉无效项，修正软链接问题 ==========
+            # ========== 静态库校验（完全保留你的原逻辑，libgdbm.a由gdbm-dev提供） ==========
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -65,7 +65,6 @@ jobs:
               "/usr/lib/libncursesw.a" \
               "/usr/lib/libpanelw.a"
             do
-              # 【修复】不仅判断文件存在，还要判断是有效文件（大小>0），兼容软链接
               if [ -f "$lib" ] && [ $(stat -c%s "$lib") -gt 0 ]; then
                 echo "✅ 存在且有效: $lib"
                 ls -la "$lib"
@@ -80,7 +79,7 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== Python 3.13.3 官方最新稳定版，100%有效地址+正确哈希 ==========
+            # ========== Python 3.13.3 配置（完全保留你的原逻辑） ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL_OFFICIAL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
@@ -104,7 +103,7 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== 四重兜底下载逻辑：100%成功，零报错 ==========
+            # ========== 四重兜底下载逻辑（完全保留你的原逻辑） ==========
             echo "===== 开始下载Python $PYTHON_VERSION 源码 ====="
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
 
@@ -202,7 +201,7 @@ jobs:
             fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 核心源码文件校验 ==========
+            # ========== 核心源码文件校验（完全保留你的原逻辑） ==========
             echo "===== 核心源码文件校验 ====="
             if [ ! -d "Modules" ]; then
               echo "❌ 缺失: Modules目录，源码解压异常"
@@ -242,7 +241,7 @@ jobs:
             done
             echo "===== 源码校验完成 ====="
 
-            # Python configure配置
+            # Python configure配置（完全保留你的原逻辑）
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -256,7 +255,7 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== Makefile规则校验 ==========
+            # ========== Makefile规则校验（完全保留你的原逻辑） ==========
             echo "===== 预校验Makefile构建规则 ====="
             if grep -q "itertoolsmodule.o" Makefile; then
               echo "✅ Makefile已生成itertools模块构建规则"
@@ -273,7 +272,7 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== 【修复】Setup.local 去掉无效的-lcrypt，适配musl ==========
+            # ========== Setup.local 全静态模块配置（完全保留你的原逻辑） ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
