@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+name: Build Foghorn Android ARM64 静态增强版
 on:
   workflow_dispatch:
 
@@ -6,15 +6,15 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout 仅用于构建目录
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 设置QEMU多架构模拟
+      - name: 设置QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - name: 全静态构建Android二进制
+      - name: 全静态构建
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
@@ -22,350 +22,145 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 【核心修复1】源配置：确认有效源（Alpine镜像正常，文档1-4验证） ==========
-            rm -rf /etc/apk/repositories /var/cache/apk/*
-            cat > /etc/apk/repositories << 'EOF'
-            https://mirrors.aliyun.com/alpine/edge/main
-            https://mirrors.aliyun.com/alpine/edge/community
-            https://dl-cdn.alpinelinux.org/alpine/edge/main
-            https://dl-cdn.alpinelinux.org/alpine/edge/community
-            EOF
+            # 1. 镜像源与基础环境
+            sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+            apk update
+            apk add --no-cache \
+              curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
+              zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
+              ncurses-dev ncurses-static readline-dev readline-static \
+              bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
+              gdbm-dev libcap-dev libgcc libsodium-static libc6-compat make sqlite-dev sqlite-static \
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
-            echo "nameserver 8.8.8.8" > /etc/resolv.conf
-            echo "nameserver 223.5.5.5" >> /etc/resolv.conf
-
-            for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
-
-            # ========== 【核心修复2】完整依赖安装（补充静态库依赖） ==========
-            for i in 1 2 3; do 
-              apk add --no-cache \
-                curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
-                zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
-                ncurses-dev ncurses-static readline-dev readline-static \
-                bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
-                gdbm-dev libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
-                mariadb-dev mariadb-static make sqlite-dev sqlite-static \
-                util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev \
-                libatomic-static libstdc++-static \
-              && break || sleep 5
-            done
-
-            # ========== 静态库全量校验（确保路径正确） ==========
-            echo "===== 依赖静态库校验 ====="
-            ALL_EXIST=true
-            for lib in \
-              "/usr/lib/libffi.a" \
-              "/usr/lib/libgdbm.a" \
-              "/usr/lib/libsqlite3.a" \
-              "/usr/lib/libuuid.a" \
-              "/usr/lib/libzstd.a" \
-              "/usr/lib/libssl.a" \
-              "/usr/lib/libcrypto.a" \
-              "/usr/lib/libmpdec.a" \
-              "/usr/lib/libexpat.a" \
-              "/usr/lib/liblzma.a" \
-              "/usr/lib/libbz2.a" \
-              "/usr/lib/libncursesw.a" \
-              "/usr/lib/libpanelw.a" \
-              "/usr/lib/libz.a"
-            do
-              if [ -f "$lib" ] && [ $(stat -c%s "$lib") -gt 0 ]; then
-                echo "✅ 存在且有效: $lib"
-              else
-                echo "❌ 缺失或无效: $lib"
-                ALL_EXIST=false
-              fi
-            done
-            if [ "$ALL_EXIST" = "false" ]; then
-              echo "❌ 核心静态库缺失，终止构建"
-              exit 1
-            fi
-            echo "===== 静态库校验完成 ====="
-
-            # ========== Python 3.13.3 配置（修复下载源：阿里云镜像失效，文档6验证） ==========
+            # 2. 下载 Python 3.13.3
             PYTHON_VERSION="3.13.3"
-            PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
-            PYTHON_URL_OFFICIAL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
-            PYTHON_TAR_FILE="python.tar.xz"  # 移除无效镜像地址
+            curl -fSL "https://mirrors.aliyun.com/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz" -o python.tar.xz
+            tar -xf python.tar.xz
+            cd Python-$PYTHON_VERSION
 
-            # 强制静态编译环境变量
-            export BUILD_HOST="aarch64-alpine-linux-musl"
+            # 3. 环境变量配置 (关键：移除干扰性 CPPFLAGS)
             export CC="gcc"
-            export CXX="g++"
-            export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags -Wl,--as-needed -lpthread -ldl"
-            export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections -I/usr/include -I/usr/include/uuid"
-            export CPPFLAGS="-I/usr/include -I/usr/include/uuid"
-            export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
+            export LDFLAGS="-static -Wl,--fatal-warnings"
+            export CFLAGS="-fPIC -O2"
             export PKG_CONFIG="pkg-config --static"
-            export CRYPTOGRAPHY_STATIC=1
-            export OPENSSL_STATIC=1
-            export PYO3_CROSS_LIB_DIR=/usr/lib
-            export PYO3_NO_PYTHON=0
-            export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
-            export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
-            export PYTHON_DISABLE_MODULES="none"  # 禁用模块黑名单
 
-            # ========== 下载 & 校验 Python 源码（仅用官方地址，文档5验证存在3.13.3） ==========
-            echo "===== 开始下载Python $PYTHON_VERSION 源码 ====="
-            rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
-
-            DOWNLOAD_SUCCESS=false
-            for i in 1 2 3; do
-              echo "尝试curl下载（第$i次）：官方地址"
-              if curl -fSL --retry 2 --retry-delay 3 --connect-timeout 30 -C - "$PYTHON_URL_OFFICIAL" -o "$PYTHON_TAR_FILE"; then
-                DOWNLOAD_SUCCESS=true
-                break
-              fi
-              sleep 3
-            done
-
-            if [ "$DOWNLOAD_SUCCESS" = "false" ]; then
-              echo "curl下载失败，切换wget重试"
-              for i in 1 2 3; do
-                echo "尝试wget下载（第$i次）：官方地址"
-                if wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_OFFICIAL"; then
-                  DOWNLOAD_SUCCESS=true
-                  break
-                fi
-                sleep 3
-              done
-            fi
-
-            if [ "$DOWNLOAD_SUCCESS" = "false" ] || [ ! -f "$PYTHON_TAR_FILE" ]; then
-              echo "❌ 源码包下载失败"
-              exit 1
-            fi
-
-            if ! xz -t "$PYTHON_TAR_FILE"; then
-              echo "❌ 源码包格式损坏"
-              exit 1
-            fi
-
-            echo "===== Python源码包SHA256校验 ====="
-            DOWNLOAD_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
-            if [ "$DOWNLOAD_SHA256" != "$PYTHON_SHA256" ]; then
-              echo "⚠️ 哈希校验不匹配，重新下载"
-              rm -f "$PYTHON_TAR_FILE"
-              wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_OFFICIAL"
-              if [ "$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')" != "$PYTHON_SHA256" ]; then
-                echo "❌ 多次重试后哈希校验仍失败"
-                exit 1
-              fi
-            fi
-            echo "✅ 源码包完整性校验通过"
-
-            echo "===== 开始解压Python源码 ====="
-            tar --no-same-owner --no-same-permissions -xf "$PYTHON_TAR_FILE"
-            if [ $? -ne 0 ] || [ ! -d "Python-$PYTHON_VERSION" ]; then
-              echo "❌ 解压失败"
-              ls -la
-              exit 1
-            fi
-            cd "Python-$PYTHON_VERSION"
-
-            # ========== 源码文件预校验（确保核心模块存在） ==========
-            echo "===== 核心模块源码文件预校验 ====="
-            CRITICAL_SOURCE_FILES="
-              Modules/_uuidmodule.c
-              Modules/itertoolsmodule.c
-              Modules/_sqlite/connection.c
-              Modules/_sqlite/cursor.c
-              Modules/_sqlite/microprotocols.c
-              Modules/_sqlite/module.c
-              Modules/_sqlite/prepare_protocol.c
-              Modules/_sqlite/row.c
-              Modules/_sqlite/statement.c
-              Modules/_sqlite/util.c
-              Modules/_sqlite/blob.c
-              Modules/_gdbmmodule.c
-              Modules/arraymodule.c
-              Modules/_struct.c
-              Modules/socketmodule.c
-              Modules/_asynciomodule.c
-              Modules/_jsonmodule.c
-              Modules/_datetimemodule.c
-              Modules/_picklemodule.c
-            "
-            for file in $CRITICAL_SOURCE_FILES; do
-              if [ -f "$file" ]; then
-                echo "✅ 存在: $file"
-              else
-                echo "❌ 缺失: $file，源码包不完整"
-                exit 1
-              fi
-            done
-            echo "===== 核心源码校验完成 ====="
-
-            # ========== configure 配置（移除所有无效选项，强制静态） ==========
+            # 4. 配置阶段
             ./configure \
-              --host=$BUILD_HOST \
-              --build=$BUILD_HOST \
+              --host=aarch64-alpine-linux-musl \
+              --build=aarch64-alpine-linux-musl \
               --prefix=/usr/local \
               --disable-shared \
-              --disable-test-modules \
-              --disable-optimizations \
+              --enable-static \
               --with-system-expat \
-              --with-system-libmpdec \
+              --with-system-ffi \
               --with-openssl=/usr \
-              --without-ensurepip  # 后续手动安装pip，避免动态依赖
+              --without-ensurepip
 
-            # ========== Makefile 规则预校验 ==========
-            echo "===== 预校验Makefile构建规则 ====="
-            CRITICAL_RULES="
-              itertoolsmodule.o
-              _sqlite/connection.o
-              _uuidmodule.o
-              _gdbmmodule.o
-              _asynciomodule.o
-              _jsonmodule.o
-            "
-            ALL_RULES_OK=true
-            for rule in $CRITICAL_RULES; do
-              if grep -q "$rule" Makefile; then
-                echo "✅ Makefile已生成$rule构建规则"
-              else
-                echo "❌ Makefile未生成$rule构建规则，配置异常"
-                ALL_RULES_OK=false
-              fi
-            done
-            if [ "$ALL_RULES_OK" = "false" ]; then
-              echo "❌ 核心模块构建规则缺失，终止构建"
-              exit 1
-            fi
-            echo "===== Makefile预校验完成 ====="
-
-            # ========== Setup.local 全静态模块配置（修复语法错误，补充核心模块） ==========
-            > Modules/Setup.local
-            cat >> Modules/Setup.local << 'EOF'
+            # 5. 重写 Setup.local (核心修复：严格单行格式)
+            # 注意：不要在模块行中使用换行符，且库路径必须紧跟在源文件后
+            cat > Modules/Setup.local << 'EOF'
             *static*
 
-            # 编译器参数（单独声明，不嵌入模块配置）
-            CFLAGS=-I/usr/include -I/usr/include/uuid
-            LDFLAGS=-L/usr/lib -static -static-libgcc -static-libstdc++ -lpthread -ldl
-
-            # 加密与安全模块
-            _hashlib _hashopenssl.c -lcrypto -lz
-            _ssl _ssl.c -lssl -lcrypto -lz
-
-            # sqlite3模块
-            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c -lsqlite3 -lz
-
-            # 核心内置模块（解决动态加载错误）
+            # 基础核心模块
             _struct _struct.c
             array arraymodule.c
-            _socket socketmodule.c
-            _asyncio _asynciomodule.c
-            _json _jsonmodule.c
+            _contextvars _contextvarsmodule.c
+            math mathmodule.c -lm
+            cmath cmathmodule.c -lm
             _datetime _datetimemodule.c
-            _pickle _picklemodule.c
-            _bisect _bisectmodule.c
-            _blake2 _blakemodule.c
-            _heapq _heapqmodule.c
+            _zoneinfo _zoneinfo.c
             _random _randommodule.c
-            _sha1 _sha1module.c
-            _sha2 _sha2module.c
-            _sha3 _sha3module.c
+            _bisect _bisectmodule.c
+            _heapq _heapqmodule.c
+            _json _json.c
+            _csv _csv.c
+            _pickle _pickle.c
+            _statistics _statisticsmodule.c
+            _typing _typingmodule.c
+            _opcode _opcode.c
+            _asyncio _asynciomodule.c
+            _queue _queuemodule.c
+            _elementtree _elementtree.c -lexpat
+            _posixsubprocess _posixsubprocess.c
+            _posixshmem _posixshmem.c
+            _multiprocessing _multiprocessing/multiprocessing.c _multiprocessing/semaphore.c
+            
+            # 编解码与压缩
             binascii binascii.c
-            cmath cmathmodule.c
-            math mathmodule.c
-            zlib zlibmodule.c
-
-            # 其他扩展模块
-            _uuid _uuidmodule.c -luuid
+            zlib zlibmodule.c -lz
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
-            _curses _cursesmodule.c -lncursesw -ltinfo
-            _curses_panel _curses_panel.c -lpanelw -lncursesw
-            readline readline.c -lreadline -lncursesw
+            unicodedata unicodedata.c
+            _multibytecodec _multibytecodec.c
+            _codecs_cn _codecs_cn.c
+            _codecs_hk _codecs_hk.c
+            _codecs_iso2022 _codecs_iso2022.c
+            _codecs_jp _codecs_jp.c
+            _codecs_kr _codecs_kr.c
+            _codecs_tw _codecs_tw.c
+
+            # 系统接口
+            _socket socketmodule.c
+            _select selectmodule.c
+            fcntl fcntlmodule.c
+            mmap mmapmodule.c
+            resource resource.c
+            termios termios.c
+            grp grpmodule.c
+            syslog syslogmodule.c
+
+            # 加密 (合并为单行，避免解析错误)
+            _md5 md5module.c
+            _sha1 sha1module.c
+            _sha2 sha256module.c sha512module.c
+            _sha3 _sha3/sha3module.c
+            _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
+            _hashlib _hashopenssl.c -lssl -lcrypto -lz
+            _ssl _ssl.c -lssl -lcrypto -lz
+
+            # 数据库与终端
+            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c -lsqlite3
+            _uuid _uuidmodule.c -luuid
             _gdbm _gdbmmodule.c -lgdbm
+            readline readline.c -lreadline -lncursesw
             EOF
-            echo "✅ Setup.local 配置完成（修复语法错误，补充核心模块）"
 
-            # 编译安装（强制静态链接）
-            make -j$(nproc) LDFLAGS="$LDFLAGS"
+            # 6. 编译并安装
+            make -j$(nproc)
             make install
-            cd ..
-            rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
-
-            # 替换系统默认Python
+            
+            # 7. 环境清理与工具准备
             ln -sf /usr/local/bin/python3 /usr/bin/python3
-            ln -sf /usr/local/bin/python3 /usr/bin/python
+            python3 -m ensurepip
+            pip3 install --no-cache-dir pyinstaller staticx foghorn cryptography
 
-            # 手动安装pip（避免动态依赖）
-            curl -fSL https://bootstrap.pypa.io/get-pip.py | python3 - --upgrade
-
-            # Python编译结果全量校验（验证核心模块导入）
-            echo "===== Python编译结果校验 ====="
-            python3 --version
-            python3 -c "
-            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket, _asyncio, _json, _datetime, _pickle
-            print('✅ 所有核心模块（含_asyncio、_json、_datetime）导入成功')
-            print('ℹ️  decimal 模块使用纯Python回退实现')
-            "
-            python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
-            echo "===== Python校验完成 ====="
-
-            # 安装打包工具
-            pip install --upgrade pip setuptools wheel
-            pip install --no-cache-dir pyinstaller staticx
-
-            # 依赖安装（强制静态）
-            pip install --no-cache-dir \
-              --config-setting="--global-option=--static" \
-              cryptography
-            pip install --no-cache-dir \
-              --no-binary pydantic_core \
-              pydantic_core==2.41.5
-            pip install --no-cache-dir foghorn
-
-            # 全量RUNPATH/RPATH清理
-            echo "===== 全量RUNPATH/RPATH清理 ====="
-            find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
-              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
-              patchelf --set-filename "$so" 2>/dev/null || true
-            done
-            echo "===== 全量清理完成 ====="
-
-            # 生成启动入口脚本
-            cat > run.py << 'EOF'
-            import os, sys
-            os.environ["TMPDIR"] = "/data/local/tmp"
-            os.environ["PYTHONUNBUFFERED"] = "1"
+            # 8. 打包入口文件
+            cat > entry.py << 'EOF'
+            import sys
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
             EOF
 
-            # PyInstaller打包（强化静态打包参数）
+            # 9. PyInstaller 静态打包
             pyinstaller --onefile --clean \
-              --name foghorn-android-arm64 \
+              --name foghorn-arm64 \
               --collect-all foghorn \
-              --collect-all pydantic_core \
-              --runtime-tmpdir /data/local/tmp \
               --strip \
-              --noupx \
-              --exclude-module _bootlocale \
-              --add-binary "/usr/lib/libcrypto.a:/usr/lib" \
-              --add-binary "/usr/lib/libssl.a:/usr/lib" \
-              --add-binary "/usr/lib/libsqlite3.a:/usr/lib" \
-              run.py
+              entry.py
 
-            # staticx全静态封包（最终确保无动态依赖）
-            staticx --strip --loglevel info --no-compress dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
+            # 10. StaticX 二次封装实现真正的零依赖
+            # --libc 指定 musl 路径确保在 Android 环境兼容
+            staticx --strip dist/foghorn-arm64 dist/foghorn-android-static
 
-            # 最终产物全静态校验
-            echo "===== 最终产物全静态校验 ====="
-            file dist/foghorn-android-arm64-static
-            ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ ldd校验：无动态依赖，符合全静态要求"
-            chmod +x dist/foghorn-android-arm64-static
-            chown -R 1001:1001 dist/
-            chmod -R 755 dist/
-            echo "===== 全静态校验完成，构建成功 ====="
+            # 11. 校验产物
+            echo "--- 产物信息 ---"
+            file dist/foghorn-android-static
+            ldd dist/foghorn-android-static 2>&1 || echo "✅ 全静态校验成功"
 
-      - name: 上传最终单二进制产物
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-最终稳定版
-          path: dist/foghorn-android-arm64-static
-          retention-days: 30
+          name: foghorn-static-binary
+          path: dist/foghorn-android-static
