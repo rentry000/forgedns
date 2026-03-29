@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -179,7 +179,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 源码文件预校验（移除不存在的_multibytecodec相关文件） ==========
+            # ========== 源码文件预校验（移除不存在的sha256/sha512模块文件） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -200,6 +200,9 @@ jobs:
               Modules/_asynciomodule.c
               Modules/_contextvarsmodule.c
               Modules/unicodedata.c
+              Modules/md5module.c
+              Modules/sha1module.c
+              Modules/_hashopenssl.c
             "
             for file in $CRITICAL_SOURCE_FILES; do
               if [ -f "$file" ]; then
@@ -246,7 +249,7 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 配置（移除不存在的_multibytecodec相关模块） ==========
+            # ========== Setup.local 配置（修复哈希模块：移除不存在的sha256/sha512文件） ==========
             cat > Modules/Setup.local << 'EOF'
             *static*
 
@@ -276,18 +279,17 @@ jobs:
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
 
-            # 核心哈希模块
+            # 核心哈希模块（修复：移除不存在的sha256module.c/sha512module.c，依赖_hashopenssl）
             _md5 md5module.c
             _sha1 sha1module.c
-            _sha2 sha256module.c sha512module.c
             _sha3 _sha3/sha3module.c
             _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
+            _hashlib _hashopenssl.c -lssl -lcrypto  # 包含sha256/sha512功能
 
             # 压缩模块
             zlib zlibmodule.c -lz
 
             # 加密与安全
-            _hashlib _hashopenssl.c -lssl -lcrypto
             _ssl _ssl.c -lssl -lcrypto
 
             # 数据库
@@ -300,7 +302,7 @@ jobs:
             _gdbm _gdbmmodule.c -lgdbm
             readline readline.c -lreadline -lncursesw
             EOF
-            echo "✅ Setup.local 配置完成（移除不存在的模块）"
+            echo "✅ Setup.local 配置完成（修复哈希模块依赖）"
 
             # 编译安装
             make -j$(nproc)
@@ -314,12 +316,15 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果校验
+            # Python编译结果校验（新增sha256/sha512功能验证）
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
-            print('✅ 所有核心模块导入成功')
+            # 验证sha256/sha512功能（通过_hashlib实现）
+            hashlib.sha256(b'test')
+            hashlib.sha512(b'test')
+            print('✅ 所有核心模块（含sha256/sha512功能）导入成功')
             print('ℹ️  decimal 模块使用纯Python回退实现')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
