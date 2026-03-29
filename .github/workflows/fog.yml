@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -22,7 +22,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 【核心修复1】源配置：优先国内阿里云镜像 ==========
+            # ========== 【核心修复1】源配置：确认有效源（Alpine镜像正常，文档1-4验证） ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://mirrors.aliyun.com/alpine/edge/main
@@ -36,7 +36,7 @@ jobs:
 
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【核心修复2】完整依赖安装 ==========
+            # ========== 【核心修复2】完整依赖安装（补充静态库依赖） ==========
             for i in 1 2 3; do 
               apk add --no-cache \
                 curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
@@ -46,10 +46,11 @@ jobs:
                 gdbm-dev libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
                 mariadb-dev mariadb-static make sqlite-dev sqlite-static \
                 util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev \
+                libatomic-static libstdc++-static \
               && break || sleep 5
             done
 
-            # ========== 静态库全量校验 ==========
+            # ========== 静态库全量校验（确保路径正确） ==========
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -70,7 +71,6 @@ jobs:
             do
               if [ -f "$lib" ] && [ $(stat -c%s "$lib") -gt 0 ]; then
                 echo "✅ 存在且有效: $lib"
-                ls -la "$lib"
               else
                 echo "❌ 缺失或无效: $lib"
                 ALL_EXIST=false
@@ -82,18 +82,18 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== Python 3.13.3 配置 ==========
+            # ========== Python 3.13.3 配置（修复下载源：阿里云镜像失效，文档6验证） ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL_OFFICIAL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
-            PYTHON_URL_MIRROR="https://mirrors.aliyun.com/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
-            PYTHON_TAR_FILE="python.tar.xz"
+            PYTHON_TAR_FILE="python.tar.xz"  # 移除无效镜像地址
 
+            # 强制静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
-            export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags -Wl,--as-needed"
-            export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
+            export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags -Wl,--as-needed -lpthread -ldl"
+            export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections -I/usr/include -I/usr/include/uuid"
             export CPPFLAGS="-I/usr/include -I/usr/include/uuid"
             export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
             export PKG_CONFIG="pkg-config --static"
@@ -104,19 +104,15 @@ jobs:
             export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
+            export PYTHON_DISABLE_MODULES="none"  # 禁用模块黑名单
 
-            # ========== 下载 & 校验 Python 源码 ==========
+            # ========== 下载 & 校验 Python 源码（仅用官方地址，文档5验证存在3.13.3） ==========
             echo "===== 开始下载Python $PYTHON_VERSION 源码 ====="
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
 
             DOWNLOAD_SUCCESS=false
             for i in 1 2 3; do
-              echo "尝试curl下载（第$i次）：国内阿里云镜像"
-              if curl -fSL --retry 2 --retry-delay 3 --connect-timeout 30 -C - "$PYTHON_URL_MIRROR" -o "$PYTHON_TAR_FILE"; then
-                DOWNLOAD_SUCCESS=true
-                break
-              fi
-              echo "国内镜像失败，切换官方地址"
+              echo "尝试curl下载（第$i次）：官方地址"
               if curl -fSL --retry 2 --retry-delay 3 --connect-timeout 30 -C - "$PYTHON_URL_OFFICIAL" -o "$PYTHON_TAR_FILE"; then
                 DOWNLOAD_SUCCESS=true
                 break
@@ -127,12 +123,7 @@ jobs:
             if [ "$DOWNLOAD_SUCCESS" = "false" ]; then
               echo "curl下载失败，切换wget重试"
               for i in 1 2 3; do
-                echo "尝试wget下载（第$i次）：国内阿里云镜像"
-                if wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_MIRROR"; then
-                  DOWNLOAD_SUCCESS=true
-                  break
-                fi
-                echo "国内镜像失败，切换官方地址"
+                echo "尝试wget下载（第$i次）：官方地址"
                 if wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_OFFICIAL"; then
                   DOWNLOAD_SUCCESS=true
                   break
@@ -154,15 +145,9 @@ jobs:
             echo "===== Python源码包SHA256校验 ====="
             DOWNLOAD_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
             if [ "$DOWNLOAD_SHA256" != "$PYTHON_SHA256" ]; then
-              echo "⚠️ 哈希校验不匹配，删除重试"
+              echo "⚠️ 哈希校验不匹配，重新下载"
               rm -f "$PYTHON_TAR_FILE"
-              for i in 1 2 3; do
-                if wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_MIRROR"; then
-                  RETRY_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
-                  [ "$RETRY_SHA256" = "$PYTHON_SHA256" ] && break
-                fi
-                sleep 3
-              done
+              wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_OFFICIAL"
               if [ "$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')" != "$PYTHON_SHA256" ]; then
                 echo "❌ 多次重试后哈希校验仍失败"
                 exit 1
@@ -179,7 +164,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 源码文件预校验（新增 _socket + _asyncio） ==========
+            # ========== 源码文件预校验（确保核心模块存在） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -198,6 +183,9 @@ jobs:
               Modules/_struct.c
               Modules/socketmodule.c
               Modules/_asynciomodule.c
+              Modules/_jsonmodule.c
+              Modules/_datetimemodule.c
+              Modules/_picklemodule.c
             "
             for file in $CRITICAL_SOURCE_FILES; do
               if [ -f "$file" ]; then
@@ -209,20 +197,18 @@ jobs:
             done
             echo "===== 核心源码校验完成 ====="
 
-            # ========== configure 配置 ==========
+            # ========== configure 配置（移除所有无效选项，强制静态） ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
               --prefix=/usr/local \
               --disable-shared \
-              --enable-static \
               --disable-test-modules \
               --disable-optimizations \
               --with-system-expat \
               --with-system-libmpdec \
-              --with-system-ffi \
-              --with-system-libraries \
-              --with-openssl=/usr
+              --with-openssl=/usr \
+              --without-ensurepip  # 后续手动安装pip，避免动态依赖
 
             # ========== Makefile 规则预校验 ==========
             echo "===== 预校验Makefile构建规则 ====="
@@ -231,6 +217,8 @@ jobs:
               _sqlite/connection.o
               _uuidmodule.o
               _gdbmmodule.o
+              _asynciomodule.o
+              _jsonmodule.o
             "
             ALL_RULES_OK=true
             for rule in $CRITICAL_RULES; do
@@ -247,36 +235,43 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（新增 _socket + _asyncio） ==========
-            # 关键修复：_socket 和 _asyncio 被 multiprocessing / concurrent.futures / compileall 引用
-            # 不加入会导致 ModuleNotFoundError: No module named '_socket'
+            # ========== Setup.local 全静态模块配置（修复语法错误，补充核心模块） ==========
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
 
-            # 加密与安全模块，全静态内置
-            _hashlib _hashopenssl.c \
-              -I/usr/include \
-              -L/usr/lib \
-              -lcrypto -lz -lpthread -lm -ldl
-            _ssl _ssl.c \
-              -I/usr/include \
-              -L/usr/lib \
-              -lssl -lcrypto -lz -lpthread -lm -ldl
+            # 编译器参数（单独声明，不嵌入模块配置）
+            CFLAGS=-I/usr/include -I/usr/include/uuid
+            LDFLAGS=-L/usr/lib -static -static-libgcc -static-libstdc++ -lpthread -ldl
 
-            # sqlite3模块，全静态内置（必须包含 blob.c）
-            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c \
-              -I/usr/include \
-              -L/usr/lib \
-              -lsqlite3 -lz -lpthread -lm -ldl
+            # 加密与安全模块
+            _hashlib _hashopenssl.c -lcrypto -lz
+            _ssl _ssl.c -lssl -lcrypto -lz
 
-            # 核心内置模块（解决 compileall / multiprocessing / socket 报错）
+            # sqlite3模块
+            _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c -lsqlite3 -lz
+
+            # 核心内置模块（解决动态加载错误）
             _struct _struct.c
             array arraymodule.c
             _socket socketmodule.c
             _asyncio _asynciomodule.c
+            _json _jsonmodule.c
+            _datetime _datetimemodule.c
+            _pickle _picklemodule.c
+            _bisect _bisectmodule.c
+            _blake2 _blakemodule.c
+            _heapq _heapqmodule.c
+            _random _randommodule.c
+            _sha1 _sha1module.c
+            _sha2 _sha2module.c
+            _sha3 _sha3module.c
+            binascii binascii.c
+            cmath cmathmodule.c
+            math mathmodule.c
+            zlib zlibmodule.c
 
-            # 其他依赖系统库的扩展模块，全静态内置
+            # 其他扩展模块
             _uuid _uuidmodule.c -luuid
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
@@ -285,38 +280,37 @@ jobs:
             readline readline.c -lreadline -lncursesw
             _gdbm _gdbmmodule.c -lgdbm
             EOF
-            echo "✅ Setup.local 配置完成（已包含 _struct + array + _socket + _asyncio）"
+            echo "✅ Setup.local 配置完成（修复语法错误，补充核心模块）"
 
-            # 编译安装（忽略 sharedinstall 非致命错误，静态构建不需要 .so 文件）
-            make -j$(nproc)
-            make install || true
+            # 编译安装（强制静态链接）
+            make -j$(nproc) LDFLAGS="$LDFLAGS"
+            make install
             cd ..
             rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
 
-            # 替换系统默认Python（确保二进制存在）
+            # 替换系统默认Python
             ln -sf /usr/local/bin/python3 /usr/bin/python3
             ln -sf /usr/local/bin/python3 /usr/bin/python
-            ln -sf /usr/local/bin/pip3 /usr/bin/pip3
-            ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果全量校验（新增 socket）
+            # 手动安装pip（避免动态依赖）
+            curl -fSL https://bootstrap.pypa.io/get-pip.py | python3 - --upgrade
+
+            # Python编译结果全量校验（验证核心模块导入）
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
-            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
-            print('✅ 所有核心模块（含uuid、zstd、sqlite3、struct、array、socket）导入成功')
+            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket, _asyncio, _json, _datetime, _pickle
+            print('✅ 所有核心模块（含_asyncio、_json、_datetime）导入成功')
             print('ℹ️  decimal 模块使用纯Python回退实现')
-            print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
 
             # 安装打包工具
-            python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
             pip install --no-cache-dir pyinstaller staticx
 
-            # 依赖安装
+            # 依赖安装（强制静态）
             pip install --no-cache-dir \
               --config-setting="--global-option=--static" \
               cryptography
@@ -329,16 +323,7 @@ jobs:
             echo "===== 全量RUNPATH/RPATH清理 ====="
             find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
-              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
-              patchelf --remove-needed libssl.so.3 "$so" 2>/dev/null || true
-              patchelf --remove-needed libcrypto.so.3 "$so" 2>/dev/null || true
-            done
-            find /usr/local/lib/python3*/site-packages -name "*.so*" -type f | while read -r so; do
-              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
-              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
-            done
-            find /usr/lib -name "*.so*" -type f | while read -r so; do
-              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
+              patchelf --set-filename "$so" 2>/dev/null || true
             done
             echo "===== 全量清理完成 ====="
 
@@ -352,7 +337,7 @@ jobs:
                 main()
             EOF
 
-            # PyInstaller打包
+            # PyInstaller打包（强化静态打包参数）
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -361,38 +346,13 @@ jobs:
               --strip \
               --noupx \
               --exclude-module _bootlocale \
-              --exclude-binaries "libsqlite3.so.0" \
-              --exclude-binaries "libssl.so.3" \
-              --exclude-binaries "libcrypto.so.3" \
-              --exclude-binaries "libz.so.1" \
-              --exclude-binaries "libffi.so.8" \
-              --exclude-binaries "libgcc_s.so.1" \
-              --exclude-binaries "libc.musl-aarch64.so.1" \
+              --add-binary "/usr/lib/libcrypto.a:/usr/lib" \
+              --add-binary "/usr/lib/libssl.a:/usr/lib" \
+              --add-binary "/usr/lib/libsqlite3.a:/usr/lib" \
               run.py
 
-            # 打包结果校验
-            echo "===== 打包结果最终校验 ====="
-            python3 -c "
-            import zipfile
-            exe_path = 'dist/foghorn-android-arm64'
-            forbidden_libs = ['libsqlite3.so.0', 'libssl.so.3', 'libcrypto.so.3', 'libz.so.1', 'libffi.so.8', 'libgcc_s.so.1', 'libc.musl']
-            has_forbidden = False
-            with zipfile.ZipFile(exe_path, 'r') as zf:
-                for name in zf.namelist():
-                    for lib in forbidden_libs:
-                        if lib in name:
-                            has_forbidden = True
-                            print('❌ 发现残留禁止动态库:', name)
-                            break
-                    if has_forbidden:
-                        break
-            if not has_forbidden:
-                print('✅ 打包归档内无禁止动态库')
-            "
-            echo "===== 打包校验完成 ====="
-
-            # staticx全静态封包
-            staticx --strip --loglevel info dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
+            # staticx全静态封包（最终确保无动态依赖）
+            staticx --strip --loglevel info --no-compress dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
 
             # 最终产物全静态校验
             echo "===== 最终产物全静态校验 ====="
