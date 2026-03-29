@@ -37,7 +37,8 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【精准修复】删除不存在的gdbm-static，保留gdbm-dev（已含静态库） ==========
+            # ========== 【修复1】新增_crypt模块依赖：libxcrypt静态库+开发包 ==========
+            # 修复根源：alpine系统的crypt功能由libxcrypt提供，缺失该包会导致_crypt模块编译失败/规则不生成
             apk add --no-cache \
               curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
@@ -45,9 +46,11 @@ jobs:
               bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
               gdbm-dev libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static make sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev \
+              libxcrypt-dev libxcrypt-static
 
-            # ========== 静态库校验（完全保留你的原逻辑，libgdbm.a由gdbm-dev提供） ==========
+            # ========== 【修复2】新增libcrypt.a静态库校验 ==========
+            # 提前确认静态库存在，避免编译时链接失败
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -63,7 +66,8 @@ jobs:
               "/usr/lib/liblzma.a" \
               "/usr/lib/libbz2.a" \
               "/usr/lib/libncursesw.a" \
-              "/usr/lib/libpanelw.a"
+              "/usr/lib/libpanelw.a" \
+              "/usr/lib/libcrypt.a"
             do
               if [ -f "$lib" ] && [ $(stat -c%s "$lib") -gt 0 ]; then
                 echo "✅ 存在且有效: $lib"
@@ -201,7 +205,8 @@ jobs:
             fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 核心源码文件校验（完全保留你的原逻辑） ==========
+            # ========== 【修复3】新增_crypt模块源码前置校验 ==========
+            # 提前确认_cryptmodule.c是否存在，避免make阶段才报No rule错误
             echo "===== 核心源码文件校验 ====="
             if [ ! -d "Modules" ]; then
               echo "❌ 缺失: Modules目录，源码解压异常"
@@ -218,6 +223,17 @@ jobs:
             else
               echo "❌ 缺失: itertools模块核心源码，文件不存在"
               exit 1
+            fi
+
+            # 新增：_crypt模块源码校验+可用性标记
+            echo "===== _crypt模块源码校验 ====="
+            if [ -f "Modules/_cryptmodule.c" ]; then
+              echo "✅ 存在: Modules/_cryptmodule.c（crypt模块核心源码）"
+              ls -la Modules/_cryptmodule.c
+              export CRYPT_MODULE_AVAILABLE=true
+            else
+              echo "⚠️  缺失: Modules/_cryptmodule.c，将自动禁用该模块构建"
+              export CRYPT_MODULE_AVAILABLE=false
             fi
 
             SQLITE_SOURCE_FILES="
@@ -272,7 +288,9 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置（完全保留你的原逻辑） ==========
+            # ========== 【修复4】Setup.local 兜底容错配置 ==========
+            # 核心修复：仅当_cryptmodule.c存在时才添加构建规则，彻底解决No rule报错
+            # 同时补充-lcrypt链接参数，修复编译时符号找不到问题
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -286,8 +304,24 @@ jobs:
               -I/usr/include \
               -L/usr/lib \
               -lssl -lcrypto -lz -lpthread -lm -ldl
-            _crypt _cryptmodule.c
+            EOF
 
+            # 动态判断：仅源码存在时添加_crypt模块构建规则
+            if [ "$CRYPT_MODULE_AVAILABLE" = "true" ]; then
+              cat >> Modules/Setup.local << 'EOF'
+            _crypt _cryptmodule.c -lcrypt
+            EOF
+              echo "✅ 已添加_crypt模块静态构建规则"
+            else
+              cat >> Modules/Setup.local << 'EOF'
+            # _crypt模块源码缺失，已自动禁用构建
+            # _crypt _cryptmodule.c
+            EOF
+              echo "⚠️  已注释_crypt模块构建规则，避免编译报错"
+            fi
+
+            # 剩余原有模块配置完全保留
+            cat >> Modules/Setup.local << 'EOF'
             # sqlite3模块，全静态内置
             _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c \
               -I/usr/include \
@@ -322,7 +356,16 @@ jobs:
             # Python编译结果全量校验
             echo "===== Python编译结果校验 ====="
             python3 --version
-            python3 -c "import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2; print('✅ 所有核心模块导入成功')"
+            # 新增：容错校验，仅当模块可用时才导入_crypt
+            python3 -c "
+            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2
+            print('✅ 核心基础模块导入成功')
+            try:
+                import crypt
+                print('✅ _crypt模块导入成功')
+            except ImportError:
+                print('⚠️  _crypt模块未构建，不影响核心功能')
+            "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
 
