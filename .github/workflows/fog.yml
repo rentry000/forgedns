@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
 
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 【核心修复2】完整依赖安装（含 util-linux-dev 提供 uuid 头文件和静态库） ==========
+            # ========== 【核心修复2】完整依赖安装 ==========
             for i in 1 2 3; do 
               apk add --no-cache \
                 curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
@@ -94,8 +94,6 @@ jobs:
             export CXX="g++"
             export LDFLAGS="-static -static-libgcc -static-libstdc++ -Wl,-Bstatic -Wl,--disable-new-dtags -Wl,--as-needed"
             export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
-            # 【关键修复】Alpine 的 uuid 头文件位于 /usr/include/uuid/uuid.h
-            # _uuidmodule.c 使用 #include <uuid.h>，因此必须添加 -I/usr/include/uuid
             export CPPFLAGS="-I/usr/include -I/usr/include/uuid"
             export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
             export PKG_CONFIG="pkg-config --static"
@@ -181,7 +179,7 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 源码文件预校验（crypt 已在 3.13 被 PEP 594 移除） ==========
+            # ========== 源码文件预校验 ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
@@ -194,6 +192,7 @@ jobs:
               Modules/_sqlite/row.c
               Modules/_sqlite/statement.c
               Modules/_sqlite/util.c
+              Modules/_gdbmmodule.c
             "
             for file in $CRITICAL_SOURCE_FILES; do
               if [ -f "$file" ]; then
@@ -226,6 +225,7 @@ jobs:
               itertoolsmodule.o
               _sqlite/connection.o
               _uuidmodule.o
+              _gdbmmodule.o
             "
             ALL_RULES_OK=true
             for rule in $CRITICAL_RULES; do
@@ -242,7 +242,9 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 全静态模块配置 ==========
+            # ========== Setup.local 全静态模块配置（已移除 _expat，避免 No rule to make target 错误） ==========
+            # _expat 模块在 --with-system-expat + Setup.local 组合下经常出现规则缺失问题
+            # foghorn / pydantic_core 不依赖 xml.etree，因此移除不影响使用
             > Modules/Setup.local
             cat >> Modules/Setup.local << 'EOF'
             *static*
@@ -271,10 +273,9 @@ jobs:
             _curses_panel _curses_panel.c -lpanelw -lncursesw
             readline readline.c -lreadline -lncursesw
             _gdbm _gdbmmodule.c -lgdbm
-            _expat _expatmodule.c -lexpat
             _decimal _decimal.c -lmpdec -lm
             EOF
-            echo "✅ Setup.local 配置完成"
+            echo "✅ Setup.local 配置完成（_expat 已移除，避免规则缺失错误）"
 
             # 编译安装
             make -j$(nproc)
@@ -294,7 +295,7 @@ jobs:
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2
             print('✅ 所有核心模块（含uuid、zstd）导入成功')
-            print('ℹ️  crypt 模块已在 Python 3.13 被 PEP 594 移除，不影响 Foghorn 核心功能')
+            print('ℹ️  crypt / expat 模块已在 Python 3.13 被移除或主动跳过，不影响 Foghorn 核心功能')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
