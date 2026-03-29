@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制终极零报错版
+name: Build Foghorn Android ARM64 单二进制终极稳定版
 on:
   workflow_dispatch:
 
@@ -37,7 +37,7 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：提前装curl，所有工具全兼容，零缺失 ==========
+            # ========== 依赖安装：提前装curl，所有工具零缺失 ==========
             apk add --no-cache \
               curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
@@ -73,11 +73,11 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== 官方最新稳定版Python 3.13.3，100%有效地址 ==========
+            # ========== Python 3.13.3 官方最新稳定版，100%有效地址+正确哈希 ==========
             PYTHON_VERSION="3.13.3"
-            # 官方公布的3.13.3 tar.xz包SHA256校验值，确保包完整
-            PYTHON_SHA256="3911c122574839335d4f03d775c528f948a9d40a305d89a8f04f3a8f3f382c3"
-            # 双地址兜底：官方+国内华为镜像（淘宝镜像已升级为npmmirror，避免旧域名失效）
+            # 【已纠正】Python 3.13.3 官方tar.xz包真实SHA256校验值，和官方发布完全一致
+            PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
+            # 双地址兜底：官方+国内华为镜像，避免旧域名失效
             PYTHON_URL_OFFICIAL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_URL_MIRROR="https://mirrors.huaweicloud.com/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
@@ -151,14 +151,42 @@ jobs:
               exit 1
             fi
 
-            # 2. 官方哈希校验，确保包完整未篡改
+            # ========== 【优化】智能哈希校验+自动重试，无误判 ==========
             echo "===== Python源码包SHA256校验 ====="
             DOWNLOAD_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
             echo "下载包SHA256: $DOWNLOAD_SHA256"
             echo "官方校验SHA256: $PYTHON_SHA256"
+
+            # 哈希不匹配时自动重试，避免单次下载损坏/镜像同步延迟
             if [ "$DOWNLOAD_SHA256" != "$PYTHON_SHA256" ]; then
-              echo "❌ 源码包哈希校验失败，文件不完整或被篡改"
-              exit 1
+              echo "⚠️  哈希校验不匹配，删除损坏包，切换镜像重试"
+              rm -f "$PYTHON_TAR_FILE"
+              RETRY_SUCCESS=false
+
+              # 重试下载3次
+              for i in 1 2 3; do
+                echo "重试下载第$i次：华为镜像"
+                if wget -c -T 30 -O "$PYTHON_TAR_FILE" "$PYTHON_URL_MIRROR"; then
+                  # 重新校验
+                  RETRY_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
+                  if [ "$RETRY_SHA256" = "$PYTHON_SHA256" ]; then
+                    echo "✅ 重试下载后哈希校验通过"
+                    RETRY_SUCCESS=true
+                    DOWNLOAD_SHA256=$RETRY_SHA256
+                    break
+                  fi
+                fi
+                sleep 3
+              done
+
+              # 最终校验，仍不匹配才终止
+              if [ "$RETRY_SUCCESS" = "false" ]; then
+                FINAL_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
+                if [ "$FINAL_SHA256" != "$PYTHON_SHA256" ]; then
+                  echo "❌ 多次重试后哈希校验仍失败，文件不完整或被篡改"
+                  exit 1
+                fi
+              fi
             fi
             echo "✅ 源码包完整性校验通过"
 
@@ -419,6 +447,6 @@ jobs:
       - name: 上传最终单二进制产物
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-终极零报错版
+          name: foghorn-android-arm64-终极稳定版
           path: dist/foghorn-android-arm64-static
           retention-days: 30
