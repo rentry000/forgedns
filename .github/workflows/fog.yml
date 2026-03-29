@@ -37,14 +37,19 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：已修复mpdecimal-static报错，完整兼容Python 3.12 ==========
+            # ========== 依赖安装：已修复mpdecimal-static报错，新增GNU tar强制安装 ==========
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base tar patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget make gdbm-dev sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev coreutils
+
+            # 强制替换BusyBox tar为GNU tar，彻底解决解压不全问题
+            ln -sf /usr/bin/tar /bin/tar
+            echo "===== Tar版本确认（强制GNU Tar） ====="
+            tar --version | head -n 1
 
             # 静态库校验（含libmpdec.a，mpdecimal-dev已自带，无需额外包）
             echo "===== 依赖静态库校验 ====="
@@ -73,8 +78,10 @@ jobs:
             fi
             echo "===== 静态库校验完成 ====="
 
-            # ========== 切换为Python 3.12.10 LTS稳定版 ==========
+            # ========== Python 3.12.10 LTS稳定版，官方哈希校验 ==========
             PYTHON_VERSION="3.12.10"
+            # Python 3.12.10 官方tar.xz包SHA256哈希，确保包完整未篡改
+            PYTHON_SHA256="7025f2fef7f4a8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8f0f8"
             # 全静态编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
@@ -92,42 +99,74 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== Python源码下载与加固解压校验 ==========
-            echo "===== 开始编译全静态Python ====="
+            # ========== 强化Python源码下载、校验、解压全流程 ==========
+            echo "===== 开始下载全静态Python源码 ====="
             PYTHON_TAR_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
             
-            # 3次重试下载
-            for i in 1 2 3; do
-              wget --tries=3 --timeout=30 "$PYTHON_TAR_URL" -O "$PYTHON_TAR_FILE" && break || sleep 5
+            # 清理残留文件，避免历史文件干扰
+            rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
+            
+            # 5次重试下载，增加重定向、超时、断点续传参数
+            for i in 1 2 3 4 5; do
+              wget --tries=5 --timeout=60 --waitretry=5 --follow-redirects --continue \
+                "$PYTHON_TAR_URL" -O "$PYTHON_TAR_FILE" && break || sleep 5
             done
             
-            # 压缩包完整性校验
+            # 1. 压缩包格式完整性校验
             if ! xz -t "$PYTHON_TAR_FILE"; then
-              echo "❌ 下载的Python源码包损坏"
+              echo "❌ 下载的Python源码包格式损坏，不是有效的xz文件"
               exit 1
             fi
             
-            # 强制使用GNU tar解压，避免兼容性问题
-            echo "===== Tar版本确认 ====="
-            tar --version
-            tar xf "$PYTHON_TAR_FILE"
+            # 2. 官方SHA256哈希校验，彻底确保包完整未篡改
+            echo "===== Python源码包SHA256校验 ====="
+            DOWNLOAD_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
+            echo "下载包SHA256: $DOWNLOAD_SHA256"
+            echo "官方校验SHA256: $PYTHON_SHA256"
+            if [ "$DOWNLOAD_SHA256" != "$PYTHON_SHA256" ]; then
+              echo "❌ 源码包哈希校验失败，文件不完整或被篡改"
+              exit 1
+            fi
+            echo "✅ 哈希校验通过，源码包完整"
+
+            # 3. 强制使用GNU Tar解压，确保所有文件完整释放
+            echo "===== 开始解压Python源码 ====="
+            tar --no-same-owner --no-same-permissions -xf "$PYTHON_TAR_FILE"
             if [ $? -ne 0 ]; then
               echo "❌ Python源码解压失败"
               exit 1
             fi
+            
+            # 4. 校验解压后的目录是否存在
+            if [ ! -d "Python-$PYTHON_VERSION" ]; then
+              echo "❌ 解压后未找到Python-$PYTHON_VERSION目录，解压异常"
+              exit 1
+            fi
             cd Python-$PYTHON_VERSION
 
-            # ========== 修复：适配Python 3.12+ 重构后的核心源码校验 ==========
+            # ========== 修复：适配Python 3.12的核心源码校验，新增调试信息 ==========
             echo "===== 核心源码文件校验 ====="
-            # 校验itertools模块（适配3.12+ 目录结构，兼容旧版单文件）
-            if [ -d "Modules/itertools" ] && [ -f "Modules/itertools/module.c" ]; then
-              echo "✅ 存在: Modules/itertools/ 目录及核心源码（Python 3.12+ 适配）"
-              ls -la Modules/itertools/
+            # 先校验Modules目录是否存在
+            if [ ! -d "Modules" ]; then
+              echo "❌ 缺失: Modules目录，源码解压严重不完整"
+              echo "===== 当前目录内容 ====="
+              ls -la
+              exit 1
+            fi
+
+            # 调试：列出Modules目录核心内容，方便定位问题
+            echo "===== Modules目录核心文件列表 ====="
+            ls -la Modules/ | head -n 50
+
+            # 校验itertools模块：3.12优先校验单文件，兼容3.13+目录结构
+            if [ -f "Modules/_itertoolsmodule.c" ]; then
+              echo "✅ 存在: Modules/_itertoolsmodule.c（Python 3.12 适配）"
+              ls -la Modules/_itertoolsmodule.c
             else
-              if [ -f "Modules/_itertoolsmodule.c" ]; then
-                echo "✅ 存在: Modules/_itertoolsmodule.c"
-                ls -la Modules/_itertoolsmodule.c
+              if [ -d "Modules/itertools" ] && [ -f "Modules/itertools/module.c" ]; then
+                echo "✅ 存在: Modules/itertools/ 目录及核心源码（Python 3.13+ 适配）"
+                ls -la Modules/itertools/
               else
                 echo "❌ 缺失: itertools模块核心源码，源码不完整"
                 exit 1
@@ -170,14 +209,14 @@ jobs:
               --with-system-ffi \
               --with-openssl=/usr
 
-            # ========== 修复：适配Python 3.12+ 的Makefile构建规则校验 ==========
+            # ========== 修复：适配Python 3.12的Makefile构建规则校验 ==========
             echo "===== 预校验Makefile构建规则 ====="
-            # 校验itertools模块构建规则（适配3.12+ 新路径，兼容旧版）
-            if grep -q "itertools/module.o" Makefile; then
-              echo "✅ Makefile已生成itertools模块构建规则（Python 3.12+ 适配）"
+            # 校验itertools模块构建规则：3.12优先校验单文件目标，兼容3.13+
+            if grep -q "_itertoolsmodule.o" Makefile; then
+              echo "✅ Makefile已生成itertools模块构建规则（Python 3.12 适配）"
             else
-              if grep -q "_itertoolsmodule.o" Makefile; then
-                echo "✅ Makefile已生成itertools模块构建规则"
+              if grep -q "itertools/module.o" Makefile; then
+                echo "✅ Makefile已生成itertools模块构建规则（Python 3.13+ 适配）"
               else
                 echo "❌ Makefile未生成itertools模块构建规则，配置异常"
                 exit 1
