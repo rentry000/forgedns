@@ -37,16 +37,16 @@ jobs:
             # 带重试的apk更新
             for i in 1 2 3; do apk update --no-cache && break || sleep 5; done
 
-            # ========== 依赖安装：完整兼容Python 3.12 ==========
+            # ========== 依赖安装：已修复mpdecimal-static报错，完整兼容Python 3.12 ==========
             apk add --no-cache \
               gcc g++ musl-dev linux-headers build-base tar patchelf pkgconf binutils git \
               zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
               ncurses-dev ncurses-static readline-dev readline-static bzip2-dev xz-dev expat-dev expat-static \
               libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
               mariadb-dev mariadb-static wget make gdbm-dev sqlite-dev sqlite-static \
-              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev mpdecimal-static
+              util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev
 
-            # 静态库校验
+            # 静态库校验（含libmpdec.a，mpdecimal-dev已自带，无需额外包）
             echo "===== 依赖静态库校验 ====="
             ALL_EXIST=true
             for lib in \
@@ -230,8 +230,8 @@ jobs:
             # Python编译结果全量校验
             echo "===== Python编译结果校验 ====="
             python3 --version
-            # 校验所有核心模块导入成功，含itertools
-            python3 -c "import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2; print('✅ 所有核心模块导入成功，包括itertools')"
+            # 校验所有核心模块导入成功，含itertools、decimal
+            python3 -c "import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2; print('✅ 所有核心模块导入成功，包括itertools、decimal')"
             # 校验静态编译状态
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
