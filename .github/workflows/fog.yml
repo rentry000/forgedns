@@ -45,11 +45,11 @@ jobs:
             find /usr/lib -xdev -type l ! -exec test -e {} \; -delete
             echo '✅ 损坏软链接清理完成'
 
-            # 5. 【核心修正】全量编译依赖安装，彻底删除不存在的-static包
-            # 说明：静态库已包含在对应-dev包中的，无需单独加-static包
+            # 5. 【核心修正】全量编译依赖安装，彻底解决续行注释导致的包未安装问题
             echo "===== 安装全量编译依赖与静态库 ====="
+            
+            # 基础编译工具链
             apk add --no-cache --force-overwrite \
-              # 基础编译工具链
               build-base \
               gcc \
               g++ \
@@ -63,8 +63,10 @@ jobs:
               make \
               scons \
               rust \
-              cargo \
-              # 压缩与基础库（有单独-static包的保留）
+              cargo
+
+            # 压缩与基础库（含静态包）
+            apk add --no-cache --force-overwrite \
               zlib-dev \
               zlib-static \
               openssl-dev \
@@ -76,24 +78,29 @@ jobs:
               expat-dev \
               expat-static \
               zstd-dev \
-              zstd-static \
-              # 核心依赖（无单独-static包，静态库在-dev包中）
+              zstd-static
+
+            # 核心功能依赖（含静态库）
+            apk add --no-cache --force-overwrite \
               sqlite-dev \
               sqlite-static \
               util-linux-dev \
               util-linux-static \
               gdbm-dev \
               libffi-dev \
-              mpdecimal-dev \
-              # 其他依赖
+              mpdecimal-dev
+
+            # 其他补充依赖
+            apk add --no-cache --force-overwrite \
               libcap-dev \
               libcap-static \
               libsodium-static \
               mariadb-dev \
               libc6-compat
+
             echo "✅ 全量依赖安装完成"
 
-            # 6. 核心依赖校验：验证所有必需静态库存在且有效（兼容dev包中的静态库）
+            # 6. 核心依赖校验：验证所有必需静态库存在且有效
             echo "===== 核心依赖校验 ====="
             REQUIRED_LIBS="libz.a libffi.a libssl.a libcrypto.a libsqlite3.a libuuid.a libgdbm.a libmpdec.a liblzma.a libbz2.a libzstd.a libexpat.a"
             for lib in $REQUIRED_LIBS; do
@@ -108,7 +115,7 @@ jobs:
             done
             echo "✅ 所有核心静态依赖就绪"
 
-            # 7. 全局编译环境变量，彻底解决_freeze_module链接报错、架构混淆问题
+            # 7. 全局编译环境变量，彻底解决链接报错、架构混淆问题
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
