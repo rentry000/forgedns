@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -22,11 +22,12 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 【修复1】源配置：移除无效阿里云community源，避免update失败 ==========
+            # ========== 源配置：使用参考文档内有效镜像源，确保网络稳定性 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
-            # 优先国内可用阿里云main源，无效community源已移除
+            # 优先国内阿里云镜像源（参考文档有效地址）
             https://mirrors.aliyun.com/alpine/edge/main
+            https://mirrors.aliyun.com/alpine/edge/community
             # 备用官方源兜底
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
@@ -43,16 +44,25 @@ jobs:
               exit 1
             fi
 
-            # ========== 【修复2】完整依赖安装：确保uuid头文件/静态库完整安装 ==========
+            # ========== 【核心修复】完整依赖安装：补全所有静态库+开发包，解决.a文件缺失 ==========
             for i in 1 2 3; do 
               apk add --no-cache \
                 curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
-                zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
-                ncurses-dev ncurses-static readline-dev readline-static \
-                bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
-                gdbm-dev gdbm-static libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
-                mariadb-dev mariadb-static make sqlite-dev sqlite-static \
-                util-linux-dev util-linux-static zstd-dev zstd-static mpdecimal-dev \
+                zlib-static zlib-dev \
+                libffi-dev libffi-static \
+                openssl-dev openssl-libs-static \
+                ncurses-dev ncurses-static \
+                readline-dev readline-static \
+                bzip2-dev bzip2-static \
+                xz-dev xz-static \
+                expat-dev expat-static \
+                gdbm-dev gdbm-static \
+                mpdecimal-dev mpdecimal-static \
+                util-linux-dev util-linux-static \
+                zstd-dev zstd-static \
+                sqlite-dev sqlite-static \
+                libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
+                mariadb-dev mariadb-static make \
               && break || sleep 5
             done
             if [ $? -ne 0 ]; then
@@ -60,10 +70,10 @@ jobs:
               exit 1
             fi
 
-            # ========== 【修复3】全量校验：新增头文件校验，解决uuid.h缺失问题 ==========
+            # ========== 全量校验：静态库+头文件全量校验，提前拦截缺失问题 ==========
             echo "===== 依赖静态库+头文件全量校验 ====="
             ALL_EXIST=true
-            # 静态库校验
+            # 静态库校验（覆盖所有报错缺失的文件）
             for lib in \
               "/usr/lib/libffi.a" \
               "/usr/lib/libgdbm.a" \
@@ -87,12 +97,14 @@ jobs:
                 ALL_EXIST=false
               fi
             done
-            # 新增核心头文件校验（重点修复uuid.h）
+            # 核心头文件校验（覆盖所有报错缺失的头文件）
             for header in \
               "/usr/include/uuid/uuid.h" \
               "/usr/include/ffi.h" \
               "/usr/include/sqlite3.h" \
-              "/usr/include/openssl/ssl.h"
+              "/usr/include/openssl/ssl.h" \
+              "/usr/include/zstd.h" \
+              "/usr/include/mpdecimal.h"
             do
               if [ -f "$header" ] && [ $(stat -c%s "$header") -gt 0 ]; then
                 echo "✅ 头文件有效: $header"
@@ -107,10 +119,9 @@ jobs:
             fi
             echo "===== 全量校验完成 ====="
 
-            # ========== Python 3.13.3 配置 ==========
+            # ========== Python 3.13.3 配置（参考文档有效版本地址） ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
-            # 【修复4】移除无效阿里云Python镜像，直接用官方稳定地址
             PYTHON_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
 
@@ -118,10 +129,11 @@ jobs:
             export CC="gcc"
             export CXX="g++"
             export LDFLAGS="-static"
-            # 【修复5】新增uuid头文件路径，强制编译器找到uuid.h
-            export CPPFLAGS="-I/usr/include/uuid"
+            # 【优化】完善头文件路径，确保编译器找到所有依赖头文件
+            export CPPFLAGS="-I/usr/include -I/usr/include/uuid"
             export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
-            export PKG_CONFIG_PATH="/usr/lib/pkgconfig"
+            # 【优化】完善pkgconfig路径，避免库文件找不到
+            export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
             export PKG_CONFIG="pkg-config --static"
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
@@ -183,10 +195,11 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 核心模块源码文件预校验 ==========
+            # ========== 核心模块源码文件预校验（新增zstd模块校验） ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
+              Modules/_zstdmodule.c
               Modules/itertoolsmodule.c
               Modules/_sqlite/connection.c
               Modules/_sqlite/cursor.c
@@ -218,7 +231,7 @@ jobs:
             done
             echo "===== 核心源码校验完成 ====="
 
-            # ========== configure 配置（优化系统库检测） ==========
+            # ========== configure 配置（优化系统库检测，强制使用系统静态库） ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -228,6 +241,10 @@ jobs:
               --with-openssl=/usr \
               --with-system-expat \
               --with-system-ffi \
+              --with-system-zlib \
+              --with-system-lzma \
+              --with-system-libmpdec \
+              --with-system-sqlite3 \
               --with-static-libpython
 
             # ========== Makefile 规则预校验 ==========
@@ -236,6 +253,7 @@ jobs:
               itertoolsmodule.o
               _sqlite/connection.o
               _uuidmodule.o
+              _zstdmodule.o
               _gdbmmodule.o
             "
             ALL_RULES_OK=true
@@ -253,7 +271,7 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 配置 ==========
+            # ========== Setup.local 配置（新增zstd模块静态编译） ==========
             cat > Modules/Setup.local << 'EOF'
             *static*
 
@@ -291,6 +309,9 @@ jobs:
 
             # 压缩模块
             zlib zlibmodule.c -lz
+            _zstd _zstdmodule.c -lzstd
+            _bz2 _bz2module.c -lbz2
+            _lzma _lzmamodule.c -llzma
 
             # 加密与安全
             _ssl _ssl.c -lssl -lcrypto
@@ -300,8 +321,6 @@ jobs:
 
             # 其他扩展
             _uuid _uuidmodule.c -luuid
-            _bz2 _bz2module.c -lbz2
-            _lzma _lzmamodule.c -llzma
             _gdbm _gdbmmodule.c -lgdbm
             readline readline.c -lreadline -lncursesw
             EOF
@@ -319,17 +338,18 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果校验
+            # Python编译结果全量校验
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
-            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
+            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket, expat, ffi
             # 验证全模块功能
             hashlib.sha256(b'test')
             hashlib.sha512(b'test')
             hashlib.sha3_256(b'test')
             uuid.uuid4()
-            print('✅ 所有核心模块导入成功，uuid/sha3功能正常')
+            decimal.Decimal('1.000000000000000000')
+            print('✅ 所有核心模块导入成功，uuid/sha3/zstd/decimal功能正常')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
