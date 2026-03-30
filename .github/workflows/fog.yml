@@ -25,9 +25,9 @@ jobs:
             # 1. 源配置：完全对齐参考文档官方Edge源，aarch64架构全量可用
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
-https://dl-cdn.alpinelinux.org/alpine/edge/main
-https://dl-cdn.alpinelinux.org/alpine/edge/community
-EOF
+            https://dl-cdn.alpinelinux.org/alpine/edge/main
+            https://dl-cdn.alpinelinux.org/alpine/edge/community
+            EOF
 
             # 2. 固定DNS，避免构建过程网络波动
             echo "nameserver 223.5.5.5" > /etc/resolv.conf
