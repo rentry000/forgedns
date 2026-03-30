@@ -169,69 +169,69 @@ jobs:
             # 10. Setup.local 静态模块全量配置，完全适配3.13源码结构，无动态依赖
             echo "===== 配置静态模块 ====="
             cat > Modules/Setup.local << 'EOF'
-*static*
-
-# 基础核心模块
-math mathmodule.c
-cmath cmathmodule.c
-_struct _struct.c
-array arraymodule.c
-binascii binascii.c
-_random _randommodule.c
-_bisect _bisectmodule.c
-_heapq _heapqmodule.c
-_json _json.c
-_datetime _datetimemodule.c
-_elementtree _elementtree.c -lexpat
-_pickle _pickle.c
-_queue _queuemodule.c
-_statistics _statisticsmodule.c
-_posixsubprocess _posixsubprocess.c
-_csv _csv.c
-_fcntl fcntlmodule.c
-_mmap mmapmodule.c
-_resource resource.c
-_select selectmodule.c
-_socket socketmodule.c
-_asyncio _asynciomodule.c
-_contextvars _contextvarsmodule.c
-unicodedata unicodedata.c
-
-# 哈希加密模块
-_md5 md5module.c
-_sha1 sha1module.c
-_sha256 sha256module.c
-_sha512 sha512module.c
-_sha3 _sha3module.c
-_blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
-_hashlib _hashopenssl.c -lssl -lcrypto
-_ssl _ssl.c -lssl -lcrypto
-
-# 压缩模块
-zlib zlibmodule.c -lz
-_bz2 _bz2module.c -lbz2
-_lzma _lzmamodule.c -llzma
-_zstd _zstdmodule.c -lzstd
-
-# sqlite3模块：完全适配Python 3.13源码结构，静态链接
-_sqlite3 \
-  _sqlite/module.c \
-  _sqlite/connection.c \
-  _sqlite/cursor.c \
-  _sqlite/statement.c \
-  _sqlite/row.c \
-  _sqlite/blob.c \
-  _sqlite/prepare_protocol.c \
-  _sqlite/microprotocols.c \
-  _sqlite/util.c \
-  -lsqlite3
-
-# 其他必需扩展模块，解决ld链接报错
-_gdbm _gdbmmodule.c -lgdbm
-_uuid _uuidmodule.c -luuid
-_decimal _decimal/_decimal.c -lmpdec
-_ctypes _ctypes/_ctypes.c _ctypes/callbacks.c _ctypes/callproc.c _ctypes/stgdict.c _ctypes/cfield.c -lffi
-EOF
+            *static*
+            
+            # 基础核心模块
+            math mathmodule.c
+            cmath cmathmodule.c
+            _struct _struct.c
+            array arraymodule.c
+            binascii binascii.c
+            _random _randommodule.c
+            _bisect _bisectmodule.c
+            _heapq _heapqmodule.c
+            _json _json.c
+            _datetime _datetimemodule.c
+            _elementtree _elementtree.c -lexpat
+            _pickle _pickle.c
+            _queue _queuemodule.c
+            _statistics _statisticsmodule.c
+            _posixsubprocess _posixsubprocess.c
+            _csv _csv.c
+            _fcntl fcntlmodule.c
+            _mmap mmapmodule.c
+            _resource resource.c
+            _select selectmodule.c
+            _socket socketmodule.c
+            _asyncio _asynciomodule.c
+            _contextvars _contextvarsmodule.c
+            unicodedata unicodedata.c
+            
+            # 哈希加密模块
+            _md5 md5module.c
+            _sha1 sha1module.c
+            _sha256 sha256module.c
+            _sha512 sha512module.c
+            _sha3 _sha3module.c
+            _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
+            _hashlib _hashopenssl.c -lssl -lcrypto
+            _ssl _ssl.c -lssl -lcrypto
+            
+            # 压缩模块
+            zlib zlibmodule.c -lz
+            _bz2 _bz2module.c -lbz2
+            _lzma _lzmamodule.c -llzma
+            _zstd _zstdmodule.c -lzstd
+            
+            # sqlite3模块：完全适配Python 3.13源码结构，静态链接
+            _sqlite3 \
+              _sqlite/module.c \
+              _sqlite/connection.c \
+              _sqlite/cursor.c \
+              _sqlite/statement.c \
+              _sqlite/row.c \
+              _sqlite/blob.c \
+              _sqlite/prepare_protocol.c \
+              _sqlite/microprotocols.c \
+              _sqlite/util.c \
+              -lsqlite3
+            
+            # 其他必需扩展模块，解决ld链接报错
+            _gdbm _gdbmmodule.c -lgdbm
+            _uuid _uuidmodule.c -luuid
+            _decimal _decimal/_decimal.c -lmpdec
+            _ctypes _ctypes/_ctypes.c _ctypes/callbacks.c _ctypes/callproc.c _ctypes/stgdict.c _ctypes/cfield.c -lffi
+            EOF
             echo "✅ Setup.local 静态模块配置完成"
 
             # 11. 并行编译安装Python，适配GitHub Actions构建环境
@@ -292,7 +292,7 @@ EOF
             from foghorn.main import main
             if __name__ == "__main__":
                 main()
-EOF
+            EOF
 
             # 17. PyInstaller打包单文件二进制，适配Android运行环境
             echo "===== 打包单文件二进制 ====="
