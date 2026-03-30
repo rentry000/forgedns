@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+Name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
@@ -22,7 +22,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 源配置：优先官方稳定源 ==========
+            # ========== 源配置：优先官方稳定源，兜底阿里云镜像 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
@@ -35,7 +35,7 @@ jobs:
             echo "nameserver 223.5.5.5" > /etc/resolv.conf
             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-            # 强制更新源，失败直接终止
+            # 强制更新源，3次重试避免网络波动
             echo "===== 强制更新APK源 ====="
             for i in 1 2 3; do apk update --no-cache --allow-untrusted && break || sleep 5; done
             if [ $? -ne 0 ]; then
@@ -44,7 +44,7 @@ jobs:
             fi
             echo "✅ APK源更新成功"
 
-            # ========== 依赖安装：无注释打断，避免语法错误 ==========
+            # ========== 依赖安装：无语法错误，完整覆盖构建所需 ==========
             echo "===== 安装全量构建依赖 ====="
             for i in 1 2 3; do
               apk add --no-cache --allow-untrusted \
@@ -63,11 +63,11 @@ jobs:
             fi
             echo "✅ 所有依赖安装完成"
 
-            # ========== 【核心修复】依赖校验：彻底解决路径搜索导致的脚本终止 ==========
+            # ========== 依赖校验：容错优化，不会因无效路径终止脚本 ==========
             echo "===== 依赖静态库+头文件全量校验 ====="
             ALL_EXIST=true
 
-            # 1. 预处理库搜索路径：只保留真实存在的目录，避免find无效路径报错
+            # 预处理库搜索路径：只保留真实存在的目录，避免find报错
             RAW_LIB_PATHS="/usr/lib /usr/local/lib /lib /usr/lib/*-linux-musl /usr/local/lib/*-linux-musl"
             VALID_LIB_PATHS=""
             for path in $RAW_LIB_PATHS; do
@@ -78,10 +78,9 @@ jobs:
             VALID_LIB_PATHS=$(echo "$VALID_LIB_PATHS" | xargs)
             echo "✅ 有效库搜索路径: $VALID_LIB_PATHS"
 
-            # 2. 静态库校验：容错优化，不会因find报错终止脚本
+            # 静态库校验：容错处理，不会因单文件缺失提前终止
             REQUIRED_LIBS="libffi.a libgdbm.a libsqlite3.a libuuid.a libzstd.a libssl.a libcrypto.a libmpdec.a libexpat.a liblzma.a libbz2.a libncursesw.a libpanelw.a libz.a"
             for lib_name in $REQUIRED_LIBS; do
-              # 关闭set -e，避免find返回非0终止脚本，执行完恢复
               set +e
               lib_path=$(find $VALID_LIB_PATHS -name "$lib_name" -type f 2>/dev/null | head -n 1)
               set -e
@@ -95,7 +94,7 @@ jobs:
               fi
             done
 
-            # 3. 预处理头文件搜索路径：同样只保留存在的目录
+            # 预处理头文件搜索路径：只保留真实存在的目录
             RAW_HEADER_PATHS="/usr/include /usr/local/include"
             VALID_HEADER_PATHS=""
             for path in $RAW_HEADER_PATHS; do
@@ -106,7 +105,7 @@ jobs:
             VALID_HEADER_PATHS=$(echo "$VALID_HEADER_PATHS" | xargs)
             echo "✅ 有效头文件搜索路径: $VALID_HEADER_PATHS"
 
-            # 4. 头文件校验：同样容错优化
+            # 头文件校验：容错处理
             REQUIRED_HEADERS="uuid/uuid.h ffi.h sqlite3.h openssl/ssl.h zstd.h mpdecimal.h"
             for header_rel in $REQUIRED_HEADERS; do
               set +e
@@ -128,13 +127,13 @@ jobs:
             fi
             echo "===== 全量校验通过，所有依赖正常 ====="
 
-            # ========== Python 3.13.3 配置 ==========
+            # ========== Python 3.13.3 配置（官方稳定版，无兼容性问题） ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
 
-            # 完善编译环境变量
+            # 完善编译环境变量，确保编译器找到所有依赖
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
@@ -203,11 +202,10 @@ jobs:
             fi
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 核心模块源码文件预校验 ==========
+            # ========== 【核心修复】核心模块源码预校验：移除不存在的_zstdmodule.c ==========
             echo "===== 核心模块源码文件预校验 ====="
             CRITICAL_SOURCE_FILES="
               Modules/_uuidmodule.c
-              Modules/_zstdmodule.c
               Modules/itertoolsmodule.c
               Modules/_sqlite/connection.c
               Modules/_sqlite/cursor.c
@@ -239,7 +237,7 @@ jobs:
             done
             echo "===== 核心源码校验完成 ====="
 
-            # ========== configure 配置 ==========
+            # ========== configure 配置：静态编译优化 ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -256,13 +254,12 @@ jobs:
               --with-static-libpython \
               --disable-test-modules
 
-            # ========== Makefile 规则预校验 ==========
+            # ========== 【核心修复】Makefile规则预校验：移除不存在的_zstdmodule.o ==========
             echo "===== 预校验Makefile构建规则 ====="
             CRITICAL_RULES="
               itertoolsmodule.o
               _sqlite/connection.o
               _uuidmodule.o
-              _zstdmodule.o
               _gdbmmodule.o
             "
             ALL_RULES_OK=true
@@ -280,7 +277,7 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 配置 ==========
+            # ========== 【核心修复】Setup.local配置：移除不存在的_zstd模块 ==========
             cat > Modules/Setup.local << 'EOF'
             *static*
 
@@ -315,7 +312,6 @@ jobs:
             _hashlib _hashopenssl.c -lssl -lcrypto
 
             zlib zlibmodule.c -lz
-            _zstd _zstdmodule.c -lzstd
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
 
@@ -341,25 +337,25 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # Python编译结果全量校验
+            # ========== 【核心修复】Python模块校验：移除不存在的zstd模块导入 ==========
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
-            import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
+            import sys, itertools, sqlite3, uuid, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
             hashlib.sha256(b'test')
             hashlib.sha512(b'test')
             hashlib.sha3_256(b'test')
             uuid.uuid4()
             decimal.Decimal('1.000000000000000000')
-            print('✅ 所有核心模块导入成功，uuid/sha3/zstd/decimal功能正常')
+            print('✅ 所有核心模块导入成功，uuid/sha3功能正常')
             "
             python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
             echo "===== Python校验完成 ====="
 
-            # 安装打包工具与依赖
+            # 安装打包工具与依赖（自动安装zstd第三方库，满足foghorn需求）
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
-            pip install --no-cache-dir pyinstaller staticx
+            pip install --no-cache-dir pyinstaller staticx zstandard
             pip install --no-cache-dir \
               --config-setting="--global-option=--static" \
               cryptography
@@ -368,7 +364,7 @@ jobs:
               pydantic_core==2.41.5
             pip install --no-cache-dir foghorn
 
-            # 全量RUNPATH/RPATH清理
+            # 全量RUNPATH/RPATH清理，避免动态库残留
             echo "===== 全量RUNPATH/RPATH清理 ====="
             find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
@@ -399,6 +395,7 @@ jobs:
               --name foghorn-android-arm64 \
               --collect-all foghorn \
               --collect-all pydantic_core \
+              --collect-all zstandard \
               --runtime-tmpdir /data/local/tmp \
               --strip \
               --noupx \
