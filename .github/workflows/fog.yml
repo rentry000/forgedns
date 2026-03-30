@@ -145,9 +145,9 @@ jobs:
             tar -xf "$PYTHON_TAR"
             cd "Python-$PYTHON_VERSION"
 
-            # 清理旧编译残留，避免构建干扰
+            # 清理旧编译残留，避免构建干扰（必做，否则旧缓存会导致报错）
             make clean distclean || true
-            rm -rf build/
+            rm -rf build/ Modules/Setup.local
             echo "✅ Python源码准备完成"
 
             # 10. Python静态编译配置，彻底禁用动态库，适配Android无动态依赖需求
@@ -176,7 +176,7 @@ jobs:
               ac_cv_file__dev_ptc=no
             echo "✅ Python配置完成"
 
-            # 11. Setup.local 静态模块全量配置，完全适配3.13源码结构
+            # 11. Setup.local 静态模块全量配置【核心修复】适配3.13源码结构，解决sha模块找不到报错
             echo "===== 配置静态模块 ====="
             cat > Modules/Setup.local << 'EOF'
             *static*
@@ -207,11 +207,10 @@ jobs:
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
             
-            # 哈希加密模块
+            # 哈希加密模块（Python 3.12+ 专属修复，解决sha1/sha256/sha512源码找不到报错）
             _md5 md5module.c
-            _sha1 sha1module.c
-            _sha256 sha256module.c
-            _sha512 sha512module.c
+            # SHA1/SHA2系列统一模块，替代3.11及之前的独立模块，完全适配3.13源码结构
+            _sha2 _sha2/module.c _sha2/sha1.c _sha2/sha256.c _sha2/sha512.c
             _sha3 _sha3module.c
             _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
             _hashlib _hashopenssl.c -lssl -lcrypto
@@ -267,6 +266,8 @@ jobs:
             conn.execute('CREATE TABLE test (id INT)')
             conn.close()
             hashlib.sha256(b'test')
+            hashlib.sha1(b'test')
+            hashlib.sha512(b'test')
             uuid.uuid4()
             print('✅ 所有核心模块导入成功，功能完全正常')
             "
