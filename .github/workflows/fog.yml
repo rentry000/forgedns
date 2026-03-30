@@ -22,45 +22,37 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 源配置：完全匹配你提供的官方Edge源，aarch64架构可用
+            # 1. 源配置：完全匹配官方Edge源，aarch64架构可用
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
             EOF
 
-            # 固定DNS，避免网络波动
+            # 2. 固定DNS，避免网络波动
             echo "nameserver 223.5.5.5" > /etc/resolv.conf
             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-            # 更新源，确保包列表同步
+            # 3. 更新源+依赖安装：无任何中间注释、续行绝对合规
             apk update --no-cache
-
-            # 【核心修复】依赖安装：无任何中间注释、续行符绝对合规、所有包完整传入apk add
-            # 说明：Alpine Edge中libffi/gdbm/mpdecimal的静态库已合并到dev包，无需单独安装static包
             apk add --no-cache \
               build-base gcc g++ musl-dev linux-headers \
               curl binutils git patchelf pkgconf make scons rust cargo \
-              zlib-dev zlib-static \
-              openssl-dev openssl-libs-static \
-              ncurses-dev ncurses-static \
-              readline-dev readline-static \
-              bzip2-dev bzip2-static \
-              xz-dev xz-static \
-              expat-dev expat-static \
-              util-linux-dev util-linux-static \
-              zstd-dev zstd-static \
-              sqlite-dev sqlite-static \
-              libffi-dev gdbm-dev mpdecimal-dev \
-              libcap-dev libgcc libsodium-static libc6-compat mariadb-dev mariadb-static
+              zlib-dev zlib-static openssl-dev openssl-libs-static \
+              ncurses-dev ncurses-static readline-dev readline-static \
+              bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
+              util-linux-dev util-linux-static zstd-dev zstd-static sqlite-dev sqlite-static \
+              libffi-dev gdbm-dev mpdecimal-dev libcap-dev libgcc libsodium-static \
+              libc6-compat mariadb-dev mariadb-static
 
-            # 核心依赖校验：仅验证静态库存在，无多余逻辑
+            # 4. 核心依赖校验：仅验证静态库存在
             echo "===== 核心依赖校验 ====="
-            REQUIRED_LIBS="libz.a libffi.a libssl.a libcrypto.a libsqlite3.a libuuid.a libgdbm.a libmpdec.a"
+            REQUIRED_LIBS="libz.a libffi.a libssl.a libcrypto.a libsqlite3.a libuuid.a libgdbm.a libmpdec.a liblzma.a"
             for lib in $REQUIRED_LIBS; do
               LIB_PATH=$(find /usr/lib -name "$lib" -type f | head -n 1)
               if [ -n "$LIB_PATH" ] && [ -s "$LIB_PATH" ]; then
                 echo "✅ 有效: $LIB_PATH"
+                ln -sf "$LIB_PATH" "/usr/lib/$lib" 2>/dev/null || true
               else
                 echo "❌ 缺失: $lib"
                 exit 1
@@ -68,12 +60,13 @@ jobs:
             done
             echo "✅ 所有核心依赖就绪"
 
-            # Python编译环境配置
+            # 5. Python 3.13.3 配置（官方稳定版）
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR="python.tar.xz"
 
+            # 编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
@@ -87,13 +80,13 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # 下载并校验Python源码
+            # 6. 下载并校验Python源码
             curl -fSL "$PYTHON_URL" -o "$PYTHON_TAR"
             echo "$PYTHON_SHA256  $PYTHON_TAR" | sha256sum -c - || { echo "❌ 源码校验失败"; exit 1; }
             tar -xf "$PYTHON_TAR"
             cd "Python-$PYTHON_VERSION"
 
-            # Python静态编译配置
+            # 7. Python配置，强制静态编译
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -104,12 +97,17 @@ jobs:
               --with-system-expat \
               --with-system-ffi \
               --with-system-zlib \
+              --with-system-lzma \
+              --with-system-libmpdec \
+              --with-system-sqlite \
               --with-static-libpython \
               --disable-test-modules
 
-            # 静态模块配置，无错误写法
+            # 8. 【核心修复】Setup.local：完全适配Python 3.13源码结构，修复sqlite3编译报错
             cat > Modules/Setup.local << 'EOF'
             *static*
+
+            # 基础核心模块
             math mathmodule.c
             cmath cmathmodule.c
             _struct _struct.c
@@ -123,30 +121,51 @@ jobs:
             _elementtree _elementtree.c
             _pickle _pickle.c
             _queue _queuemodule.c
+            _statistics _statisticsmodule.c
             _posixsubprocess _posixsubprocess.c
             _csv _csv.c
             _fcntl fcntlmodule.c
             _mmap mmapmodule.c
+            _resource resource.c
             _select selectmodule.c
             _socket socketmodule.c
             _asyncio _asynciomodule.c
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
+
+            # 哈希加密模块
             _md5 md5module.c
             _sha1 sha1module.c
             _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
             _hashlib _hashopenssl.c -lssl -lcrypto
             _ssl _ssl.c -lssl -lcrypto
+
+            # 压缩模块
             zlib zlibmodule.c -lz
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
-            _sqlite3 _sqlite3module.c -lsqlite3
+
+            # 【修复】sqlite3模块：完全适配Python 3.13子目录源码结构
+            _sqlite3 \
+              _sqlite/module.c \
+              _sqlite/connection.c \
+              _sqlite/cursor.c \
+              _sqlite/statement.c \
+              _sqlite/row.c \
+              _sqlite/blob.c \
+              _sqlite/prepare_protocol.c \
+              _sqlite/microprotocols.c \
+              _sqlite/util.c \
+              -lsqlite3
+
+            # 其他扩展模块
             _gdbm _gdbmmodule.c -lgdbm
             _uuid _uuidmodule.c -luuid
             readline readline.c -lreadline -lncursesw
             EOF
+            echo "✅ Setup.local 配置完成，适配Python 3.13结构"
 
-            # 编译安装Python
+            # 9. 编译安装Python
             make -j$(nproc)
             make install
             cd ..
@@ -158,11 +177,20 @@ jobs:
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # 验证Python核心模块
+            # 10. 验证Python核心模块，编译失败直接终止
+            echo "===== Python编译结果校验 ====="
             python3 --version
-            python3 -c "import sqlite3, uuid, ssl, hashlib, gdbm, lzma, bz2; print('✅ Python所有核心模块正常')"
+            python3 -c "
+            import sqlite3, uuid, ssl, hashlib, gdbm, lzma, bz2
+            # 实测sqlite3功能
+            conn = sqlite3.connect(':memory:')
+            conn.execute('CREATE TABLE test (id INT)')
+            conn.close()
+            print('✅ 所有核心模块导入成功，sqlite3功能完全正常')
+            "
+            echo "✅ Python校验完成"
 
-            # 安装Python依赖与打包工具
+            # 11. 安装Python依赖与打包工具
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
             pip install --no-cache-dir pyinstaller staticx zstandard
@@ -170,7 +198,7 @@ jobs:
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
             pip install --no-cache-dir foghorn
 
-            # 清理动态库依赖，避免打包残留
+            # 12. 清理动态库依赖，避免打包残留
             find /usr/local/lib/python3* -name "*.so*" -type f | while read so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
@@ -178,7 +206,7 @@ jobs:
               patchelf --remove-needed libcrypto.so.3 "$so" 2>/dev/null || true
             done
 
-            # 生成启动脚本
+            # 13. 生成启动脚本
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -188,7 +216,7 @@ jobs:
                 main()
             EOF
 
-            # 打包单文件二进制
+            # 14. 打包单文件二进制
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -200,7 +228,7 @@ jobs:
               --exclude-module _bootlocale \
               run.py
 
-            # 静态封包与最终校验
+            # 15. 静态封包与最终校验
             staticx --strip dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             chmod +x dist/foghorn-android-arm64-static
 
