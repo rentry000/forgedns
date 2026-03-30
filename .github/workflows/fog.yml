@@ -22,13 +22,11 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 【核心修复1】源配置：优先官方有效源，解决invalid link/包找不到问题 ==========
+            # ========== 源配置：优先官方稳定源，解决包找不到问题 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
-            # 优先官方稳定源（参考文档确认有效，无invalid link问题）
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
-            # 备用阿里云源，仅兜底
             https://mirrors.aliyun.com/alpine/edge/main
             https://mirrors.aliyun.com/alpine/edge/community
             EOF
@@ -37,40 +35,40 @@ jobs:
             echo "nameserver 223.5.5.5" > /etc/resolv.conf
             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-            # 强制更新源，失败直接终止，避免无效包列表
+            # 强制更新源，失败直接终止
             echo "===== 强制更新APK源 ====="
-            apk update --no-cache --allow-untrusted || { echo "❌ APK源更新失败"; exit 1; }
+            for i in 1 2 3; do apk update --no-cache --allow-untrusted && break || sleep 5; done
+            if [ $? -ne 0 ]; then
+              echo "❌ APK源更新失败"
+              exit 1
+            fi
             echo "✅ APK源更新成功"
 
-            # ========== 【核心修复2】依赖安装：移除不存在的static包，确保所有包可正常安装 ==========
+            # ========== 【核心修复】依赖安装：彻底修复注释续行语法错误 ==========
             echo "===== 安装全量构建依赖 ====="
-            apk add --no-cache --allow-untrusted \
-              curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
-              # 基础压缩与系统库（保留确认存在的static包，移除报错的3个无效static包）
-              zlib-static zlib-dev \
-              libffi-dev \
-              openssl-dev openssl-libs-static \
-              ncurses-dev ncurses-static \
-              readline-dev readline-static \
-              bzip2-dev bzip2-static \
-              xz-dev xz-static \
-              expat-dev expat-static \
-              gdbm-dev \
-              mpdecimal-dev \
-              util-linux-dev util-linux-static \
-              zstd-dev zstd-static \
-              sqlite-dev sqlite-static \
-              # 其他构建依赖
-              libcap-dev libgcc libsodium-static libc6-compat scons rust cargo \
-              mariadb-dev mariadb-static make \
-            || { echo "❌ 依赖安装失败"; exit 1; }
+            # 所有包统一放在同一续行命令中，无中间注释打断
+            for i in 1 2 3; do
+              apk add --no-cache --allow-untrusted \
+                curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
+                zlib-static zlib-dev libffi-dev openssl-dev openssl-libs-static \
+                ncurses-dev ncurses-static readline-dev readline-static \
+                bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
+                gdbm-dev mpdecimal-dev util-linux-dev util-linux-static \
+                zstd-dev zstd-static sqlite-dev sqlite-static libcap-dev libgcc \
+                libsodium-static libc6-compat scons rust cargo mariadb-dev mariadb-static make \
+              && break || sleep 5
+            done
+            if [ $? -ne 0 ]; then
+              echo "❌ 依赖安装失败"
+              exit 1
+            fi
             echo "✅ 所有依赖安装完成"
 
-            # ========== 【核心修复3】全量校验：自动搜索库/头文件路径，解决硬编码路径校验失败 ==========
+            # ========== 全量校验：自动搜索库/头文件路径，兼容多架构目录 ==========
             echo "===== 依赖静态库+头文件全量校验 ====="
             ALL_EXIST=true
 
-            # 1. 静态库校验：自动搜索系统所有库路径，无需硬编码/usr/lib
+            # 静态库校验：自动搜索全系统路径，自动创建软链接
             REQUIRED_LIBS="
               libffi.a
               libgdbm.a
@@ -93,7 +91,6 @@ jobs:
               lib_path=$(find $LIB_SEARCH_PATHS -name "$lib_name" -type f 2>/dev/null | head -n 1)
               if [ -n "$lib_path" ] && [ $(stat -c%s "$lib_path") -gt 0 ]; then
                 echo "✅ 存在且有效: $lib_path"
-                # 自动创建软链接到/usr/lib，确保后续编译100%能找到
                 ln -sf "$lib_path" "/usr/lib/$lib_name" 2>/dev/null || true
               else
                 echo "❌ 缺失或无效: $lib_name"
@@ -101,7 +98,7 @@ jobs:
               fi
             done
 
-            # 2. 头文件校验：自动搜索系统所有头文件路径，解决uuid.h等找不到问题
+            # 头文件校验：自动搜索全系统路径
             REQUIRED_HEADERS="
               uuid/uuid.h
               ffi.h
@@ -122,20 +119,19 @@ jobs:
               fi
             done
 
-            # 校验不通过直接终止
             if [ "$ALL_EXIST" = "false" ]; then
               echo "❌ 核心依赖/头文件缺失，终止构建"
               exit 1
             fi
             echo "===== 全量校验通过，所有依赖正常 ====="
 
-            # ========== Python 3.13.3 配置（参考文档官方有效地址） ==========
+            # ========== Python 3.13.3 配置 ==========
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_TAR_FILE="python.tar.xz"
 
-            # 【优化】完善编译环境变量，确保编译器能找到所有库和头文件
+            # 完善编译环境变量
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
@@ -240,7 +236,7 @@ jobs:
             done
             echo "===== 核心源码校验完成 ====="
 
-            # ========== configure 配置（强制静态编译，优先系统库） ==========
+            # ========== configure 配置 ==========
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -281,11 +277,10 @@ jobs:
             fi
             echo "===== Makefile预校验完成 ====="
 
-            # ========== Setup.local 配置（全模块静态编译） ==========
+            # ========== Setup.local 配置 ==========
             cat > Modules/Setup.local << 'EOF'
             *static*
 
-            # 基础数学与系统模块
             math mathmodule.c
             cmath cmathmodule.c
             _struct _struct.c
@@ -311,25 +306,20 @@ jobs:
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
 
-            # 核心哈希模块
             _md5 md5module.c
             _sha1 sha1module.c
             _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
             _hashlib _hashopenssl.c -lssl -lcrypto
 
-            # 压缩模块
             zlib zlibmodule.c -lz
             _zstd _zstdmodule.c -lzstd
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
 
-            # 加密与安全
             _ssl _ssl.c -lssl -lcrypto
 
-            # 数据库
             _sqlite3 _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c _sqlite/blob.c -lsqlite3
 
-            # 其他扩展
             _uuid _uuidmodule.c -luuid
             _gdbm _gdbmmodule.c -lgdbm
             readline readline.c -lreadline -lncursesw
@@ -353,7 +343,6 @@ jobs:
             python3 --version
             python3 -c "
             import sys, itertools, sqlite3, uuid, zstd, ssl, hashlib, decimal, curses, readline, gdbm, lzma, bz2, struct, array, socket
-            # 验证全模块功能
             hashlib.sha256(b'test')
             hashlib.sha512(b'test')
             hashlib.sha3_256(b'test')
@@ -376,7 +365,7 @@ jobs:
               pydantic_core==2.41.5
             pip install --no-cache-dir foghorn
 
-            # 全量RUNPATH/RPATH清理，避免动态库残留
+            # 全量RUNPATH/RPATH清理
             echo "===== 全量RUNPATH/RPATH清理 ====="
             find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
