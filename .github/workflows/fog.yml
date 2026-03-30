@@ -176,7 +176,7 @@ jobs:
               ac_cv_file__dev_ptc=no
             echo "✅ Python配置完成"
 
-            # 11. Setup.local 静态模块全量配置【核心修复】适配3.13源码结构，解决sha模块找不到报错
+            # 11. Setup.local 静态模块全量配置【最终修复】完全适配3.13.3源码结构
             echo "===== 配置静态模块 ====="
             cat > Modules/Setup.local << 'EOF'
             *static*
@@ -207,10 +207,9 @@ jobs:
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
             
-            # 哈希加密模块（Python 3.12+ 专属修复，解决sha1/sha256/sha512源码找不到报错）
+            # 哈希加密模块【Python 3.13 专属正确配置】
+            # 3.13已移除所有独立SHA1/SHA2系列模块，全部整合到_hashlib（基于OpenSSL）
             _md5 md5module.c
-            # SHA1/SHA2系列统一模块，替代3.11及之前的独立模块，完全适配3.13源码结构
-            _sha2 _sha2/module.c _sha2/sha1.c _sha2/sha256.c _sha2/sha512.c
             _sha3 _sha3module.c
             _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
             _hashlib _hashopenssl.c -lssl -lcrypto
@@ -262,14 +261,21 @@ jobs:
             python3 --version
             python3 -c "
             import sqlite3, uuid, ssl, hashlib, gdbm, lzma, bz2, json, socket, asyncio, ctypes, decimal, zstd
+            # 验证所有哈希算法功能正常
             conn = sqlite3.connect(':memory:')
             conn.execute('CREATE TABLE test (id INT)')
             conn.close()
-            hashlib.sha256(b'test')
+            # 完整验证SHA系列算法
+            hashlib.md5(b'test')
             hashlib.sha1(b'test')
+            hashlib.sha224(b'test')
+            hashlib.sha256(b'test')
+            hashlib.sha384(b'test')
             hashlib.sha512(b'test')
+            hashlib.sha3_256(b'test')
+            hashlib.blake2b(b'test')
             uuid.uuid4()
-            print('✅ 所有核心模块导入成功，功能完全正常')
+            print('✅ 所有核心模块导入成功，哈希功能完全正常')
             "
             echo "✅ Python校验完成"
 
