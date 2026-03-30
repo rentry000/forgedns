@@ -1,4 +1,4 @@
-Name: Build Foghorn Android ARM64 单二进制最终稳定版
+name: Build Foghorn Android ARM64 单二进制最终稳定版
 on:
   workflow_dispatch:
 
