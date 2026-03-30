@@ -22,7 +22,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # 1. 源配置：完全对齐参考文档官方Edge源，aarch64架构全量可用
+            # 1. 源配置：完全对齐官方Edge源，aarch64架构全量可用
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
@@ -33,19 +33,23 @@ jobs:
             echo "nameserver 223.5.5.5" > /etc/resolv.conf
             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-            # 3. 根治符号链接循环+包系统损坏问题
+            # 3. 【强制更新源索引】Edge滚动版必须先更新索引，否则会出现包找不到
+            echo "===== 更新Alpine源索引 ====="
+            apk update --force --no-cache
+            echo "✅ 源索引更新完成"
+
+            # 4. 根治符号链接循环+包系统损坏问题
             echo "===== 修复包系统与循环软链接 ====="
-            apk update --force
             apk fix --force-overwrite --force-broken-world
-            # 强制清理有循环/损坏问题的动态库软链接，从根源解决ld链接报错
-            find /usr/lib -type l ! -exec test -e {} \; -delete
-            rm -f /usr/lib/libgdbm.so* /usr/lib/libuuid.so* /usr/lib/libsqlite3.so* /usr/lib/libffi.so* /usr/lib/libmpdec.so*
+            # 仅清理损坏的软链接，不删除正常文件
+            find /usr/lib -xdev -type l ! -exec test -e {} \; -delete
             echo '✅ 损坏软链接清理完成'
 
-            # 4. 【核心修复】全量编译依赖安装，彻底解决build-base not found报错
-            # 修复点：续行符\确保所有包名属于同一apk add指令，无换行拆分导致的命令识别错误
+            # 5. 【核心修正】全量编译依赖安装，彻底删除不存在的-static包
+            # 说明：静态库已包含在对应-dev包中的，无需单独加-static包
             echo "===== 安装全量编译依赖与静态库 ====="
             apk add --no-cache --force-overwrite \
+              # 基础编译工具链
               build-base \
               gcc \
               g++ \
@@ -60,6 +64,7 @@ jobs:
               scons \
               rust \
               cargo \
+              # 压缩与基础库（有单独-static包的保留）
               zlib-dev \
               zlib-static \
               openssl-dev \
@@ -72,29 +77,27 @@ jobs:
               expat-static \
               zstd-dev \
               zstd-static \
+              # 核心依赖（无单独-static包，静态库在-dev包中）
               sqlite-dev \
               sqlite-static \
               util-linux-dev \
               util-linux-static \
               gdbm-dev \
-              gdbm-static \
               libffi-dev \
-              libffi-static \
               mpdecimal-dev \
-              mpdecimal-static \
+              # 其他依赖
               libcap-dev \
               libcap-static \
               libsodium-static \
               mariadb-dev \
-              mariadb-static \
               libc6-compat
             echo "✅ 全量依赖安装完成"
 
-            # 5. 核心依赖校验：验证所有必需静态库存在且有效，避免编译缺失
+            # 6. 核心依赖校验：验证所有必需静态库存在且有效（兼容dev包中的静态库）
             echo "===== 核心依赖校验 ====="
             REQUIRED_LIBS="libz.a libffi.a libssl.a libcrypto.a libsqlite3.a libuuid.a libgdbm.a libmpdec.a liblzma.a libbz2.a libzstd.a libexpat.a"
             for lib in $REQUIRED_LIBS; do
-              LIB_PATH=$(find /usr/lib -name "$lib" -type f | head -n 1)
+              LIB_PATH=$(find /usr/lib /usr/local/lib -name "$lib" -type f | head -n 1)
               if [ -n "$LIB_PATH" ] && [ -s "$LIB_PATH" ]; then
                 echo "✅ 有效: $LIB_PATH"
                 ln -sf "$LIB_PATH" "/usr/lib/$lib" 2>/dev/null || true
@@ -105,7 +108,7 @@ jobs:
             done
             echo "✅ 所有核心静态依赖就绪"
 
-            # 6. 全局编译环境变量，彻底解决_freeze_module链接报错、架构混淆问题
+            # 7. 全局编译环境变量，彻底解决_freeze_module链接报错、架构混淆问题
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
@@ -122,13 +125,13 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # 7. Python 版本配置：完全对齐参考文档Python官方FTP地址，版本稳定可用
+            # 8. Python 版本配置：完全对齐官方FTP地址，稳定可用
             PYTHON_VERSION="3.13.3"
             PYTHON_TAR="python.tar.xz"
             PYTHON_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
 
-            # 8. 下载并校验Python源码，确保完整性
+            # 9. 下载并校验Python源码，确保完整性
             echo "===== 下载Python源码 ====="
             curl -fSL "$PYTHON_URL" -o "$PYTHON_TAR"
             echo "$PYTHON_SHA256  $PYTHON_TAR" | sha256sum -c - || { echo "❌ 源码校验失败"; exit 1; }
@@ -140,7 +143,7 @@ jobs:
             rm -rf build/
             echo "✅ Python源码准备完成"
 
-            # 9. Python静态编译配置，彻底禁用动态库，适配Android无动态依赖需求
+            # 10. Python静态编译配置，彻底禁用动态库，适配Android无动态依赖需求
             echo "===== 配置Python静态编译 ====="
             ./configure \
               --host=$BUILD_HOST \
@@ -166,7 +169,7 @@ jobs:
               ac_cv_file__dev_ptc=no
             echo "✅ Python配置完成"
 
-            # 10. Setup.local 静态模块全量配置，完全适配3.13源码结构，无动态依赖
+            # 11. Setup.local 静态模块全量配置，完全适配3.13源码结构
             echo "===== 配置静态模块 ====="
             cat > Modules/Setup.local << 'EOF'
             *static*
@@ -234,7 +237,7 @@ jobs:
             EOF
             echo "✅ Setup.local 静态模块配置完成"
 
-            # 11. 并行编译安装Python，适配GitHub Actions构建环境
+            # 12. 并行编译安装Python，适配GitHub Actions构建环境
             echo "===== 编译安装Python ====="
             make -j$(nproc)
             make install
@@ -242,13 +245,13 @@ jobs:
             rm -rf "$PYTHON_TAR" Python-$PYTHON_VERSION
             echo "✅ Python编译安装完成"
 
-            # 12. 替换系统默认Python，确保全局生效
+            # 13. 替换系统默认Python，确保全局生效
             ln -sf /usr/local/bin/python3 /usr/bin/python3
             ln -sf /usr/local/bin/python3 /usr/bin/python
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3 2>/dev/null || true
             ln -sf /usr/local/bin/pip3 /usr/bin/pip 2>/dev/null || true
 
-            # 13. 验证Python核心模块与功能，确保无导入报错、功能正常
+            # 14. 验证Python核心模块与功能，确保无导入报错
             echo "===== Python编译结果校验 ====="
             python3 --version
             python3 -c "
@@ -262,7 +265,7 @@ jobs:
             "
             echo "✅ Python校验完成"
 
-            # 14. 安装Python依赖与打包工具，全量静态编译无动态依赖
+            # 15. 安装Python依赖与打包工具，全量静态编译
             echo "===== 安装Python依赖 ====="
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
@@ -272,7 +275,7 @@ jobs:
             pip install --no-cache-dir foghorn
             echo "✅ Python依赖安装完成"
 
-            # 15. 清理动态库依赖残留，避免打包引入动态链接
+            # 16. 清理动态库依赖残留，避免打包引入动态链接
             echo "===== 清理动态库残留 ====="
             find /usr/local/lib/python3* -name "*.so*" -type f | while read so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
@@ -284,7 +287,7 @@ jobs:
             done
             echo "✅ 动态库清理完成"
 
-            # 16. 生成Foghorn启动入口脚本
+            # 17. 生成Foghorn启动入口脚本
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -294,7 +297,7 @@ jobs:
                 main()
             EOF
 
-            # 17. PyInstaller打包单文件二进制，适配Android运行环境
+            # 18. PyInstaller打包单文件二进制，适配Android运行环境
             echo "===== 打包单文件二进制 ====="
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
@@ -312,12 +315,12 @@ jobs:
               --exclude-module venv \
               run.py
 
-            # 18. staticx 最终静态封包，确保纯静态无依赖，兼容Android ARM64
+            # 19. staticx 最终静态封包，确保纯静态无依赖
             echo "===== 最终静态封包 ====="
             staticx --strip dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             chmod +x dist/foghorn-android-arm64-static
 
-            # 19. 最终产物校验，确认纯静态无动态依赖
+            # 20. 最终产物校验，确认纯静态无动态依赖
             echo "===== 最终产物校验 ====="
             file dist/foghorn-android-arm64-static
             ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ 纯静态二进制，无动态依赖"
