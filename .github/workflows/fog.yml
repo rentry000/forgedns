@@ -22,7 +22,7 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 源配置：优先官方稳定源，解决包找不到问题 ==========
+            # ========== 源配置：优先官方稳定源 ==========
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
             https://dl-cdn.alpinelinux.org/alpine/edge/main
@@ -44,9 +44,8 @@ jobs:
             fi
             echo "✅ APK源更新成功"
 
-            # ========== 【核心修复】依赖安装：彻底修复注释续行语法错误 ==========
+            # ========== 依赖安装：无注释打断，避免语法错误 ==========
             echo "===== 安装全量构建依赖 ====="
-            # 所有包统一放在同一续行命令中，无中间注释打断
             for i in 1 2 3; do
               apk add --no-cache --allow-untrusted \
                 curl gcc g++ musl-dev linux-headers build-base patchelf pkgconf binutils git \
@@ -64,32 +63,30 @@ jobs:
             fi
             echo "✅ 所有依赖安装完成"
 
-            # ========== 全量校验：自动搜索库/头文件路径，兼容多架构目录 ==========
+            # ========== 【核心修复】依赖校验：彻底解决路径搜索导致的脚本终止 ==========
             echo "===== 依赖静态库+头文件全量校验 ====="
             ALL_EXIST=true
 
-            # 静态库校验：自动搜索全系统路径，自动创建软链接
-            REQUIRED_LIBS="
-              libffi.a
-              libgdbm.a
-              libsqlite3.a
-              libuuid.a
-              libzstd.a
-              libssl.a
-              libcrypto.a
-              libmpdec.a
-              libexpat.a
-              liblzma.a
-              libbz2.a
-              libncursesw.a
-              libpanelw.a
-              libz.a
-            "
-            LIB_SEARCH_PATHS="/usr/lib /usr/local/lib /lib /usr/lib/*-linux-musl /usr/local/lib/*-linux-musl"
+            # 1. 预处理库搜索路径：只保留真实存在的目录，避免find无效路径报错
+            RAW_LIB_PATHS="/usr/lib /usr/local/lib /lib /usr/lib/*-linux-musl /usr/local/lib/*-linux-musl"
+            VALID_LIB_PATHS=""
+            for path in $RAW_LIB_PATHS; do
+              if [ -d "$path" ]; then
+                VALID_LIB_PATHS="$VALID_LIB_PATHS $path"
+              fi
+            done
+            VALID_LIB_PATHS=$(echo "$VALID_LIB_PATHS" | xargs)
+            echo "✅ 有效库搜索路径: $VALID_LIB_PATHS"
 
+            # 2. 静态库校验：容错优化，不会因find报错终止脚本
+            REQUIRED_LIBS="libffi.a libgdbm.a libsqlite3.a libuuid.a libzstd.a libssl.a libcrypto.a libmpdec.a libexpat.a liblzma.a libbz2.a libncursesw.a libpanelw.a libz.a"
             for lib_name in $REQUIRED_LIBS; do
-              lib_path=$(find $LIB_SEARCH_PATHS -name "$lib_name" -type f 2>/dev/null | head -n 1)
-              if [ -n "$lib_path" ] && [ $(stat -c%s "$lib_path") -gt 0 ]; then
+              # 关闭set -e，避免find返回非0终止脚本，执行完恢复
+              set +e
+              lib_path=$(find $VALID_LIB_PATHS -name "$lib_name" -type f 2>/dev/null | head -n 1)
+              set -e
+              
+              if [ -n "$lib_path" ] && [ -f "$lib_path" ] && [ $(stat -c%s "$lib_path") -gt 0 2>/dev/null ]; then
                 echo "✅ 存在且有效: $lib_path"
                 ln -sf "$lib_path" "/usr/lib/$lib_name" 2>/dev/null || true
               else
@@ -98,20 +95,25 @@ jobs:
               fi
             done
 
-            # 头文件校验：自动搜索全系统路径
-            REQUIRED_HEADERS="
-              uuid/uuid.h
-              ffi.h
-              sqlite3.h
-              openssl/ssl.h
-              zstd.h
-              mpdecimal.h
-            "
-            HEADER_SEARCH_PATHS="/usr/include /usr/local/include"
+            # 3. 预处理头文件搜索路径：同样只保留存在的目录
+            RAW_HEADER_PATHS="/usr/include /usr/local/include"
+            VALID_HEADER_PATHS=""
+            for path in $RAW_HEADER_PATHS; do
+              if [ -d "$path" ]; then
+                VALID_HEADER_PATHS="$VALID_HEADER_PATHS $path"
+              fi
+            done
+            VALID_HEADER_PATHS=$(echo "$VALID_HEADER_PATHS" | xargs)
+            echo "✅ 有效头文件搜索路径: $VALID_HEADER_PATHS"
 
+            # 4. 头文件校验：同样容错优化
+            REQUIRED_HEADERS="uuid/uuid.h ffi.h sqlite3.h openssl/ssl.h zstd.h mpdecimal.h"
             for header_rel in $REQUIRED_HEADERS; do
-              header_path=$(find $HEADER_SEARCH_PATHS -path "*$header_rel" -type f 2>/dev/null | head -n 1)
-              if [ -n "$header_path" ] && [ $(stat -c%s "$header_path") -gt 0 ]; then
+              set +e
+              header_path=$(find $VALID_HEADER_PATHS -path "*$header_rel" -type f 2>/dev/null | head -n 1)
+              set -e
+              
+              if [ -n "$header_path" ] && [ -f "$header_path" ] && [ $(stat -c%s "$header_path") -gt 0 2>/dev/null ]; then
                 echo "✅ 头文件有效: $header_path"
               else
                 echo "❌ 头文件缺失: $header_rel"
@@ -119,6 +121,7 @@ jobs:
               fi
             done
 
+            # 最终校验结果判断
             if [ "$ALL_EXIST" = "false" ]; then
               echo "❌ 核心依赖/头文件缺失，终止构建"
               exit 1
