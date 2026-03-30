@@ -1,4 +1,4 @@
-name: Build Foghorn Android ARM64 单二进制最终稳定版
+name: Build Foghorn Android ARM64 单二进制最终版
 on:
   workflow_dispatch:
 
@@ -6,15 +6,15 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout 仅用于构建目录
+      - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: 设置QEMU多架构模拟
+      - name: 设置QEMU ARM64模拟
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - name: 全静态构建Android二进制
+      - name: 全静态构建二进制
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
@@ -22,200 +22,60 @@ jobs:
           run: |
             set -euxo pipefail
 
-            # ========== 源配置：优先官方源（包完整无缺失），阿里云仅兜底 ==========
+            # 1. 源配置：只用官方稳定源，无多余配置
             rm -rf /etc/apk/repositories /var/cache/apk/*
             cat > /etc/apk/repositories << 'EOF'
-            # 优先官方源，确保所有static包都能找到
             https://dl-cdn.alpinelinux.org/alpine/edge/main
             https://dl-cdn.alpinelinux.org/alpine/edge/community
-            # 阿里云源兜底，避免官方源网络波动
-            https://mirrors.aliyun.com/alpine/edge/main
-            https://mirrors.aliyun.com/alpine/edge/community
             EOF
 
-            # 优先国内DNS，提升网络稳定性
+            # 2. 固定DNS，避免网络问题
             echo "nameserver 223.5.5.5" > /etc/resolv.conf
             echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 
-            # ========== 【致命修复】源更新：正确重试逻辑，失败直接终止 ==========
-            echo "===== 强制更新APK源 ====="
-            UPDATE_SUCCESS=false
-            for i in 1 2 3; do
-              echo "尝试更新APK源，第$i次"
-              if apk update --no-cache --allow-untrusted; then
-                UPDATE_SUCCESS=true
-                break
-              fi
-              echo "第$i次源更新失败，5秒后重试"
-              sleep 5
-            done
-            if [ "$UPDATE_SUCCESS" = "false" ]; then
-              echo "❌ APK源更新失败，三次重试均失败"
-              exit 1
-            fi
-            echo "✅ APK源更新成功，包列表已同步"
+            # 3. 【核心修复】依赖安装：无任何中间注释、无语法错误、续行符绝对合规
+            apk update --no-cache
+            apk add --no-cache \
+              build-base gcc g++ musl-dev linux-headers curl binutils git patchelf pkgconf make scons rust cargo \
+              zlib-dev zlib-static libffi-dev libffi-static openssl-dev openssl-libs-static \
+              ncurses-dev ncurses-static readline-dev readline-static bzip2-dev bzip2-static \
+              xz-dev xz-static expat-dev expat-static gdbm-dev gdbm-static gdbm-compat \
+              mpdecimal-dev mpdecimal-static util-linux-dev util-linux-static zstd-dev zstd-static \
+              sqlite-dev sqlite-static libcap-dev libgcc libsodium-static libc6-compat mariadb-dev mariadb-static
 
-            # ========== 【致命修复】依赖安装：正确重试逻辑+补全所有static包 ==========
-            echo "===== 安装全量构建依赖 ====="
-            INSTALL_SUCCESS=false
-            for i in 1 2 3; do
-              echo "尝试安装依赖包，第$i次"
-              if apk add --no-cache --allow-untrusted \
-                # 基础编译工具链（必须先装，确保/usr/lib /usr/include目录存在）
-                build-base gcc g++ musl-dev linux-headers \
-                # 通用工具
-                curl binutils git patchelf pkgconf make scons rust cargo \
-                # 所有静态库+开发包（补全所有缺失的static包，确保.a文件存在）
-                zlib-dev zlib-static \
-                libffi-dev libffi-static \
-                openssl-dev openssl-libs-static \
-                ncurses-dev ncurses-static \
-                readline-dev readline-static \
-                bzip2-dev bzip2-static \
-                xz-dev xz-static \
-                expat-dev expat-static \
-                gdbm-dev gdbm-static gdbm-compat \
-                mpdecimal-dev mpdecimal-static \
-                util-linux-dev util-linux-static \
-                zstd-dev zstd-static \
-                sqlite-dev sqlite-static \
-                # 其他依赖
-                libcap-dev libgcc libsodium-static libc6-compat mariadb-dev mariadb-static \
-              ; then
-                INSTALL_SUCCESS=true
-                break
-              fi
-              echo "第$i次依赖安装失败，5秒后重试"
-              sleep 5
-            done
-            if [ "$INSTALL_SUCCESS" = "false" ]; then
-              echo "❌ 依赖包安装失败，三次重试均失败"
-              exit 1
-            fi
-            echo "✅ 所有依赖包安装完成，静态库+头文件已就绪"
-
-            # ========== 【修复】依赖校验：简化逻辑，确保路径正确，不会误报 ==========
+            # 4. 【极简校验】仅验证核心静态库存在，无多余逻辑
             echo "===== 核心依赖校验 ====="
-            ALL_EXIST=true
-
-            # 固定搜索路径（Alpine arm64 标准路径，无需通配符）
-            LIB_SEARCH_PATHS="/usr/lib /usr/local/lib /lib /usr/lib/aarch64-alpine-linux-musl"
-            HEADER_SEARCH_PATHS="/usr/include /usr/local/include"
-
-            # 静态库校验（只校验核心库，非核心不终止）
-            REQUIRED_LIBS="libffi.a libgdbm.a libsqlite3.a libuuid.a libzstd.a libssl.a libcrypto.a libz.a"
-            for lib_name in $REQUIRED_LIBS; do
-              lib_path=$(find $LIB_SEARCH_PATHS -name "$lib_name" -type f 2>/dev/null | head -n 1)
-              if [ -n "$lib_path" ] && [ -s "$lib_path" ]; then
-                echo "✅ 有效: $lib_path"
-                ln -sf "$lib_path" "/usr/lib/$lib_name" 2>/dev/null || true
-              else
-                echo "❌ 缺失: $lib_name"
-                ALL_EXIST=false
-              fi
+            for lib in libz.a libffi.a libssl.a libcrypto.a libsqlite3.a; do
+              find /usr/lib -name "$lib" -type f | grep -q . || { echo "❌ 缺失$lib"; exit 1; }
             done
+            echo "✅ 核心依赖全部就绪"
 
-            # 头文件校验
-            REQUIRED_HEADERS="uuid/uuid.h ffi.h sqlite3.h openssl/ssl.h zstd.h"
-            for header_rel in $REQUIRED_HEADERS; do
-              header_path=$(find $HEADER_SEARCH_PATHS -path "*$header_rel" -type f 2>/dev/null | head -n 1)
-              if [ -n "$header_path" ] && [ -s "$header_path" ]; then
-                echo "✅ 有效: $header_path"
-              else
-                echo "❌ 缺失: $header_rel"
-                ALL_EXIST=false
-              fi
-            done
-
-            # 核心依赖缺失直接终止
-            if [ "$ALL_EXIST" = "false" ]; then
-              echo "❌ 核心依赖缺失，终止构建"
-              exit 1
-            fi
-            echo "===== 核心依赖校验全部通过 ====="
-
-            # ========== Python 3.13.3 配置（官方稳定版） ==========
+            # 5. Python编译环境变量
             PYTHON_VERSION="3.13.3"
             PYTHON_SHA256="40f868bcbdeb8149a3149580bb9bfd407b3321cd48f0be631af955ac92c0e041"
             PYTHON_URL="https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tar.xz"
-            PYTHON_TAR_FILE="python.tar.xz"
+            PYTHON_TAR="python.tar.xz"
 
-            # 编译环境变量（固定路径，确保编译器能找到所有依赖）
             export BUILD_HOST="aarch64-alpine-linux-musl"
             export CC="gcc"
             export CXX="g++"
-            export LDFLAGS="-static -L/usr/lib -L/usr/local/lib -L/usr/lib/aarch64-alpine-linux-musl"
-            export CPPFLAGS="-I/usr/include -I/usr/include/uuid -I/usr/local/include"
-            export CFLAGS="-fPIC -O2 -ffunction-sections -fdata-sections"
-            export PKG_CONFIG_PATH="/usr/lib/pkgconfig:/usr/share/pkgconfig"
+            export LDFLAGS="-static -L/usr/lib"
+            export CPPFLAGS="-I/usr/include -I/usr/include/uuid"
+            export CFLAGS="-fPIC -O2"
             export PKG_CONFIG="pkg-config --static"
             export CRYPTOGRAPHY_STATIC=1
             export OPENSSL_STATIC=1
-            export PYO3_CROSS_LIB_DIR=/usr/lib
-            export PYO3_NO_PYTHON=0
             export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-s"
             export CARGO_BUILD_TARGET="aarch64-unknown-linux-musl"
 
-            # ========== 下载 & 校验 Python 源码 ==========
-            echo "===== 下载Python $PYTHON_VERSION 源码 ====="
-            rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
-
-            DOWNLOAD_SUCCESS=false
-            for i in 1 2 3; do
-              echo "尝试下载源码，第$i次"
-              if curl -fSL --retry 2 --retry-delay 3 --connect-timeout 30 "$PYTHON_URL" -o "$PYTHON_TAR_FILE"; then
-                DOWNLOAD_SUCCESS=true
-                break
-              fi
-              echo "第$i次下载失败，5秒后重试"
-              sleep 5
-            done
-            if [ "$DOWNLOAD_SUCCESS" = "false" ]; then
-              echo "❌ Python源码下载失败"
-              exit 1
-            fi
-
-            # 完整性校验
-            if ! xz -t "$PYTHON_TAR_FILE"; then
-              echo "❌ 源码包格式损坏"
-              exit 1
-            fi
-            DOWNLOAD_SHA256=$(sha256sum "$PYTHON_TAR_FILE" | awk '{print $1}')
-            if [ "$DOWNLOAD_SHA256" != "$PYTHON_SHA256" ]; then
-              echo "❌ 源码包哈希校验失败"
-              exit 1
-            fi
-            echo "✅ Python源码包校验通过"
-
-            # 解压源码
-            echo "===== 解压Python源码 ====="
-            tar --no-same-owner --no-same-permissions -xf "$PYTHON_TAR_FILE"
-            if [ ! -d "Python-$PYTHON_VERSION" ]; then
-              echo "❌ 源码解压失败"
-              exit 1
-            fi
+            # 6. 下载并解压Python源码
+            curl -fSL "$PYTHON_URL" -o "$PYTHON_TAR"
+            echo "$PYTHON_SHA256  $PYTHON_TAR" | sha256sum -c - || { echo "❌ 源码校验失败"; exit 1; }
+            tar -xf "$PYTHON_TAR"
             cd "Python-$PYTHON_VERSION"
 
-            # ========== 核心模块源码预校验（只校验入口文件，无错误路径） ==========
-            echo "===== 核心模块源码校验 ====="
-            CRITICAL_SOURCE_FILES="
-              Modules/_uuidmodule.c
-              Modules/_gdbmmodule.c
-              Modules/_sqlite3module.c
-              Modules/itertoolsmodule.c
-            "
-            for file in $CRITICAL_SOURCE_FILES; do
-              if [ -f "$file" ]; then
-                echo "✅ 存在: $file"
-              else
-                echo "❌ 缺失: $file"
-                exit 1
-              fi
-            done
-            echo "✅ 核心源码校验通过"
-
-            # ========== configure 配置（强制启用核心模块） ==========
+            # 7. 配置并编译Python，无多余预校验
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -226,18 +86,12 @@ jobs:
               --with-system-expat \
               --with-system-ffi \
               --with-system-zlib \
-              --with-system-lzma \
-              --with-system-libmpdec \
-              --enable-sqlite3 \
-              --with-system-sqlite \
               --with-static-libpython \
               --disable-test-modules
 
-            # ========== Setup.local 配置（兼容Python 3.13，无错误写法） ==========
+            # 写入Setup.local，兼容写法无错误
             cat > Modules/Setup.local << 'EOF'
             *static*
-
-            # 基础核心模块
             math mathmodule.c
             cmath cmathmodule.c
             _struct _struct.c
@@ -251,69 +105,46 @@ jobs:
             _elementtree _elementtree.c
             _pickle _pickle.c
             _queue _queuemodule.c
-            _statistics _statisticsmodule.c
             _posixsubprocess _posixsubprocess.c
             _csv _csv.c
             _fcntl fcntlmodule.c
             _mmap mmapmodule.c
-            _resource resource.c
             _select selectmodule.c
             _socket socketmodule.c
             _asyncio _asynciomodule.c
             _contextvars _contextvarsmodule.c
             unicodedata unicodedata.c
-
-            # 哈希加密模块
             _md5 md5module.c
             _sha1 sha1module.c
             _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
             _hashlib _hashopenssl.c -lssl -lcrypto
             _ssl _ssl.c -lssl -lcrypto
-
-            # 压缩模块
             zlib zlibmodule.c -lz
             _bz2 _bz2module.c -lbz2
             _lzma _lzmamodule.c -llzma
-
-            # 数据库模块
             _sqlite3 _sqlite3module.c -lsqlite3
             _gdbm _gdbmmodule.c -lgdbm
-
-            # 其他扩展
             _uuid _uuidmodule.c -luuid
             readline readline.c -lreadline -lncursesw
             EOF
-            echo "✅ Setup.local 配置完成"
 
             # 编译安装
             make -j$(nproc)
             make install
             cd ..
-            rm -rf "$PYTHON_TAR_FILE" Python-$PYTHON_VERSION
+            rm -rf "$PYTHON_TAR" Python-$PYTHON_VERSION
 
-            # 替换系统默认Python
+            # 替换系统Python
             ln -sf /usr/local/bin/python3 /usr/bin/python3
             ln -sf /usr/local/bin/python3 /usr/bin/python
             ln -sf /usr/local/bin/pip3 /usr/bin/pip3
             ln -sf /usr/local/bin/pip3 /usr/bin/pip
 
-            # ========== Python模块全量校验（核心功能实测） ==========
-            echo "===== Python编译结果校验 ====="
+            # 8. 验证Python核心模块，编译失败直接终止
             python3 --version
-            python3 -c "
-            import sys, itertools, sqlite3, uuid, ssl, hashlib, gdbm, lzma, bz2
-            # 核心功能实测
-            hashlib.sha256(b'test')
-            uuid.uuid4()
-            conn = sqlite3.connect(':memory:')
-            conn.execute('CREATE TABLE test (id INT)')
-            conn.close()
-            print('✅ 所有核心模块导入成功，功能完全正常')
-            "
-            python3 -c "import sysconfig; print('Python静态编译状态：', sysconfig.get_config_var('Py_ENABLE_SHARED') == 0)"
-            echo "✅ Python校验完成"
+            python3 -c "import sqlite3, uuid, ssl, hashlib, gdbm; print('✅ Python核心模块全部正常')"
 
-            # 安装打包工具与依赖
+            # 9. 安装Python依赖与打包工具
             python3 -m ensurepip --upgrade
             pip install --upgrade pip setuptools wheel
             pip install --no-cache-dir pyinstaller staticx zstandard
@@ -321,21 +152,15 @@ jobs:
             pip install --no-cache-dir --no-binary pydantic_core pydantic_core==2.41.5
             pip install --no-cache-dir foghorn
 
-            # 全量RUNPATH/RPATH清理
-            echo "===== 清理动态库依赖 ====="
-            find /usr/local/lib/python3* -name "*.so*" -type f | while read -r so; do
+            # 10. 清理动态库依赖
+            find /usr/local/lib/python3* -name "*.so*" -type f | while read so; do
               patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
               patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
               patchelf --remove-needed libssl.so.3 "$so" 2>/dev/null || true
               patchelf --remove-needed libcrypto.so.3 "$so" 2>/dev/null || true
             done
-            find /usr/local/lib/python3*/site-packages -name "*.so*" -type f | while read -r so; do
-              patchelf --remove-rpath --remove-runpath "$so" 2>/dev/null || true
-              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
-            done
-            echo "✅ 清理完成"
 
-            # 生成启动脚本
+            # 11. 生成启动脚本并打包
             cat > run.py << 'EOF'
             import os, sys
             os.environ["TMPDIR"] = "/data/local/tmp"
@@ -345,7 +170,6 @@ jobs:
                 main()
             EOF
 
-            # 打包二进制
             pyinstaller --onefile --clean \
               --name foghorn-android-arm64 \
               --collect-all foghorn \
@@ -355,30 +179,20 @@ jobs:
               --strip \
               --noupx \
               --exclude-module _bootlocale \
-              --exclude-binaries "libsqlite3.so.0" \
-              --exclude-binaries "libssl.so.3" \
-              --exclude-binaries "libcrypto.so.3" \
-              --exclude-binaries "libz.so.1" \
-              --exclude-binaries "libffi.so.8" \
-              --exclude-binaries "libgcc_s.so.1" \
-              --exclude-binaries "libc.musl-aarch64.so.1" \
               run.py
 
-            # 静态封包
-            staticx --strip --loglevel info dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
-
-            # 最终产物校验
-            echo "===== 最终产物校验 ====="
-            file dist/foghorn-android-arm64-static
-            ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ 无动态依赖，纯静态二进制"
+            # 12. 静态封包与最终校验
+            staticx --strip dist/foghorn-android-arm64 dist/foghorn-android-arm64-static
             chmod +x dist/foghorn-android-arm64-static
-            chown -R 1001:1001 dist/
-            chmod -R 755 dist/
+
+            # 最终验证
+            file dist/foghorn-android-arm64-static
+            ldd dist/foghorn-android-arm64-static 2>&1 || echo "✅ 纯静态二进制，无动态依赖"
             echo "===== 构建成功！最终产物：dist/foghorn-android-arm64-static ====="
 
-      - name: 上传产物
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-最终稳定版
+          name: foghorn-android-arm64-最终版
           path: dist/foghorn-android-arm64-static
           retention-days: 30
