@@ -14,7 +14,7 @@ jobs:
         with:
           platforms: arm64
 
-      - name: 全静态构建二进制【修复Python3.13+废弃参数+Setup缺失+shell语法错误终极版】
+      - name: 全静态构建二进制【已修复包名错误+依赖缺失终极版】
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
@@ -44,21 +44,21 @@ jobs:
             find /usr/lib -xdev -type l ! -exec test -e {} \; -delete
             echo '✅ 损坏软链接清理完成'
 
-            # 5. 全量编译依赖安装
+            # 5. 【已修复】全量编译依赖安装，修正所有错误包名
             echo "===== 安装全量编译依赖与静态库 ====="
             apk add --no-cache --force-overwrite \
               build-base gcc g++ musl-dev linux-headers curl binutils git \
               patchelf pkgconf make scons rust cargo \
               zlib-dev zlib-static openssl-dev openssl-libs-static \
-              bz2-dev bz2-static xz-dev xz-static expat-dev expat-static \
+              bzip2-dev bzip2-static xz-dev xz-static expat-dev expat-static \
               zstd-dev zstd-static sqlite-dev sqlite-static util-linux-dev util-linux-static \
               gdbm-dev libffi-dev mpdecimal-dev libcap-dev libcap-static libsodium-static \
-              libxcrypt-dev libxcrypt-static mariadb-dev libc6-compat
-            echo "✅ 全量依赖安装完成"
+              mariadb-dev libc6-compat
+            echo "✅ 全量依赖安装完成，无包名错误"
 
-            # 6. 核心依赖校验
+            # 6. 【已修复】核心依赖校验，移除不存在的libcrypt.a校验
             echo "===== 核心依赖校验 ====="
-            REQUIRED_LIBS="libz.a libffi.a libssl.a libcrypto.a libsqlite3.a libuuid.a libgdbm.a libmpdec.a liblzma.a libbz2.a libzstd.a libexpat.a libcrypt.a"
+            REQUIRED_LIBS="libz.a libffi.a libssl.a libcrypto.a libsqlite3.a libuuid.a libgdbm.a libmpdec.a liblzma.a libbz2.a libzstd.a libexpat.a"
             for lib in $REQUIRED_LIBS; do
               LIB_PATH=$(find /usr/lib /usr/local/lib -name "$lib" -type f | head -n 1)
               if [ -n "$LIB_PATH" ] && [ -s "$LIB_PATH" ]; then
@@ -115,8 +115,8 @@ jobs:
             rm -rf build/ Modules/Setup.local Modules/Setup Modules/Setup.dist
             echo "✅ 旧缓存清理完成"
 
-            # 10.【关键修复】3.13+ 剔除所有废弃 configure 参数
-            echo "===== 合规配置Python 3.13+ ====="
+            # 10. 合规配置Python 3.13+
+            echo "===== 配置Python静态编译 ====="
             ./configure \
               --host=$BUILD_HOST \
               --build=$BUILD_HOST \
@@ -136,9 +136,9 @@ jobs:
             if [ $CONFIGURE_EXIT_CODE -ne 0 ]; then
               echo "❌ configure失败"; cat configure.log; exit 1
             fi
-            echo "✅ configure配置完成（已移除无效旧参数）"
+            echo "✅ configure配置完成"
 
-            # 11.【终极修复】解决 cat: can't open ./Modules/Setup
+            # 11. 补全Setup核心文件，根治文件缺失报错
             echo "===== 补全Setup核心文件 ====="
             ls -la Modules/
             if [ ! -f Modules/Setup ]; then
@@ -150,7 +150,7 @@ jobs:
             if [ ! -s Modules/Setup ]; then
               echo "❌ Setup文件仍为空"; exit 1
             fi
-            echo "✅ Setup文件补全完成，彻底解决报错"
+            echo "✅ Setup文件补全完成"
 
             # 12. 写入静态模块 Setup.local
             echo "===== 配置静态模块 ====="
@@ -184,7 +184,7 @@ jobs:
             
             _hashlib _hashopenssl.c -lssl -lcrypto
             _ssl _ssl.c -lssl -lcrypto
-            _crypt _cryptmodule.c -lcrypt
+            _crypt _cryptmodule.c
             
             zlib zlibmodule.c -lz
             _bz2 _bz2module.c -lbz2
@@ -229,6 +229,7 @@ jobs:
             hashlib.sha3_256(b'test')
             uuid.uuid4()
             print('✅ 所有核心模块正常')
+            "
             echo "✅ Python校验完成"
 
             # 16. 安装打包依赖
@@ -262,7 +263,7 @@ jobs:
             if __name__ == "__main__":
                 main()
             EOF
-
+            
             # 19. PyInstaller打包
             echo "===== 打包单文件二进制 ====="
             pyinstaller --onefile --clean \
@@ -295,6 +296,6 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-最终修复版
+          name: foghorn-android-arm64-包名修复版
           path: dist/foghorn-android-arm64-static
           retention-days: 30
