@@ -14,7 +14,7 @@ jobs:
         with:
           platforms: arm64
 
-      - name: 全静态构建二进制【已修复Setup.dist缺失+Makefile报错最终版】
+      - name: 全静态构建二进制【已修复Python 3.13+ Setup模板缺失+Makefile报错最终版】
         uses: addnab/docker-run-action@v3
         with:
           image: alpine:edge
@@ -103,16 +103,17 @@ jobs:
             cd "Python-$PYTHON_VERSION"
 
             # ==============================================
-            # 【前置校验：Python源码完整性校验】
+            # 【前置校验：Python源码完整性校验】【已适配Python 3.13+】
             # 提前确认核心目录与原始模板文件存在，从根源避免后续复制失败
+            # Python 3.13+ 已将原Setup.in拆分为Setup.bootstrap.in/Setup.stdlib.in
             # ==============================================
             if [ ! -d Modules ]; then
               echo "❌ 致命错误：Python源码解压不完整，Modules目录不存在"
               exit 1
             fi
-            # Setup.in是Python源码包自带的原始模板，解压后必存在，不会被clean删除
-            if [ ! -f Modules/Setup.in ]; then
-              echo "❌ 致命错误：Python源码核心模板Modules/Setup.in不存在，源码包损坏"
+            # 兼容Python 3.13+新模板与旧版本Setup.in模板，确保源码完整性
+            if [ ! -f Modules/Setup.bootstrap.in ] && [ ! -f Modules/Setup.in ]; then
+              echo "❌ 致命错误：Python源码核心模板文件不存在，源码包损坏"
               ls -la Modules/
               exit 1
             fi
@@ -162,10 +163,11 @@ jobs:
             echo "✅ Python configure执行完成，无错误"
 
             # ==============================================
-            # 【终极修复：根治Setup文件缺失全场景问题】
+            # 【终极修复：根治Setup文件缺失全场景问题】【已适配Python 3.13+】
             # 解决1：make: *** No rule to make target 'Modules/Setup', needed by 'Makefile'. Stop.
             # 解决2：cp: can't stat 'Modules/Setup.dist': No such file or directory
-            # 双兜底逻辑，100%确保Setup文件存在
+            # 解决3：Python 3.13+ 原Setup.in模板不存在导致的报错
+            # 三兜底逻辑，100%确保Setup文件存在
             # ==============================================
             # 1. 校验configure生成的核心Makefile文件是否存在
             if [ ! -f Makefile ]; then
@@ -180,18 +182,22 @@ jobs:
             ls -la Modules/
             echo "================================="
 
-            # 3. 双兜底逻辑确保Modules/Setup文件存在
+            # 3. 三兜底逻辑确保Modules/Setup文件存在，全版本兼容
             if [ ! -f Modules/Setup ]; then
               echo "⚠️  configure未自动生成Modules/Setup，启动兜底复制逻辑"
               # 兜底1：优先使用configure生成的Setup.dist（官方标准生成模板）
               if [ -f Modules/Setup.dist ]; then
                 echo "✅ 找到configure生成的Setup.dist模板，复制为Setup"
                 cp Modules/Setup.dist Modules/Setup
-              # 兜底2：Setup.dist不存在，使用源码自带的原始模板Setup.in（解压后必存在，永不缺失）
+              # 兜底2：适配Python 3.13+，使用源码核心引导模板Setup.bootstrap.in
+              elif [ -f Modules/Setup.bootstrap.in ]; then
+                echo "⚠️  Setup.dist不存在，使用Python 3.13+源码核心模板Setup.bootstrap.in复制为Setup"
+                cp Modules/Setup.bootstrap.in Modules/Setup
+              # 兜底3：兼容旧版本Python，使用源码原始模板Setup.in
               elif [ -f Modules/Setup.in ]; then
-                echo "⚠️  Setup.dist不存在，使用源码原始模板Setup.in复制为Setup"
+                echo "⚠️  Setup.dist不存在，使用旧版本源码原始模板Setup.in复制为Setup"
                 cp Modules/Setup.in Modules/Setup
-              # 兜底3：所有模板都不存在，直接报错终止，避免无效执行
+              # 兜底4：所有模板都不存在，直接报错终止，避免无效执行
               else
                 echo "❌ 致命错误：未找到任何Setup模板文件，无法继续编译"
                 exit 1
