@@ -1,0 +1,54 @@
+name: Build Telegram Proxy Magisk Module
+on:
+  # 支持手动触发（推荐，在仓库Actions页面一键运行）
+  workflow_dispatch:
+  # 可选：推送代码时自动触发，取消下方注释即可
+  push:
+   branches: [ main, master ]
+
+jobs:
+  build-module:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装构建基础依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y zip unzip curl wget git
+
+      - name: 克隆目标仓库
+        run: |
+          # 浅克隆，仅拉取最新代码，加快速度
+          git clone --depth 1 https://github.com/elementalmasterpotap/telegram-proxy.git
+
+      - name: 给构建脚本添加执行权限
+        run: |
+          chmod +x ./telegram-proxy/tools/build_magisk_module.sh
+
+      - name: 执行构建脚本生成Magisk模块
+        working-directory: ./telegram-proxy/tools
+        run: |
+          # 严格错误校验，出错立即终止流程
+          set -euo pipefail
+          bash build_magisk_module.sh
+
+      - name: 定位构建产物
+        id: find-module
+        run: |
+          # 自动查找生成的Magisk模块zip包，适配任意输出目录
+          MODULE_FILE=$(find ./telegram-proxy -name "*.zip" -type f | head -n 1)
+          if [ -z "$MODULE_FILE" ]; then
+            echo "❌ 构建失败：未找到生成的Magisk模块zip文件"
+            exit 1
+          fi
+          echo "✅ 找到模块文件：$MODULE_FILE"
+          echo "module_path=$MODULE_FILE" >> $GITHUB_OUTPUT
+
+      - name: 上传Magisk模块制品
+        uses: actions/upload-artifact@v4
+        with:
+          # 制品名称，下载时显示
+          name: telegram-proxy-magisk-module
+          # 模块文件路径
+          path: ${{ steps.find-module.outputs.module_path }}
+          # 制品保留时长（默认30天，可自行调整）
+          retention-days: 30
