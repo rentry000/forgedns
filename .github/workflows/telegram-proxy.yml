@@ -1,8 +1,8 @@
 name: Build Telegram Proxy Magisk Module
 on:
-  # 手动触发（推荐，在Actions页面一键运行）
+  # 手动触发（推荐，在仓库Actions页面一键运行）
   workflow_dispatch:
-  # 可选：推送代码时自动触发，取消注释即可
+  # 推送代码自动触发，取消下方注释即可
   # push:
   #   branches: [ main, master ]
 
@@ -13,7 +13,7 @@ jobs:
       - name: 安装系统基础依赖
         run: |
           sudo apt update -y
-          sudo apt install -y zip unzip curl wget git python3
+          sudo apt install -y zip unzip git python3 dos2unix
 
       - name: 安装 Go 1.22+ 环境（mtg编译必需）
         uses: actions/setup-go@v5
@@ -21,24 +21,158 @@ jobs:
           go-version: '1.22'
           check-latest: true
 
-      - name: 克隆目标仓库
+      - name: 生成修正后的构建脚本
         run: |
-          git clone --depth 1 https://github.com/elementalmasterpotap/telegram-proxy.git
-
-      - name: 预清理+修复原脚本核心bug
-        working-directory: ./telegram-proxy/tools
-        run: |
-          # 1. 强制清理残留的mtg_src目录，避免空目录跳过克隆
+          cat > build_magisk_module.sh << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          
+          DOMAIN="google.com"
+          MODULE_ID="mtg_proxy"
+          MODULE_NAME="MTProto Proxy (Fake TLS)"
+          MODULE_VERSION="1.0.0"
+          MODULE_AUTHOR="Potap"
+          BUILD_DIR="build_magisk"
+          OUTPUT_ZIP="mtg_proxy_magisk_v${MODULE_VERSION}.zip"
+          MTG_REPO="https://github.com/9seconds/mtg.git"
+          MTG_BRANCH="v2"
+          
+          trap 'rm -rf mtg_src mtg "$BUILD_DIR"' EXIT
+          
+          if [ $# -ge 2 ] && [ "$1" = "--domain" ]; then
+              DOMAIN="$2"
+          fi
+          
+          echo ""
+          echo "  MTProto Proxy Magisk Module Builder"
+          echo "  ────────────────────────────────────"
+          echo "  Домен маскировки: $DOMAIN"
+          echo ""
+          
+          echo "  [0/5] Проверка зависимостей..."
+          REQUIRED_TOOLS=("go" "git" "python3" "zip" "unzip")
+          for tool in "${REQUIRED_TOOLS[@]}"; do
+              if ! command -v "$tool" &> /dev/null; then
+                  echo "❌ Ошибка: Не найден обязательный инструмент '$tool'"
+                  exit 1
+              fi
+          done
+          echo "  ✅ Все зависимости проверены"
+          
+          echo "  [1/5] Клонирование mtg v2..."
           rm -rf mtg_src
-          # 2. 给构建脚本添加执行权限
-          chmod +x build_magisk_module.sh
-          # 3. 固定mtg v2分支，避免上游main分支结构变更
-          sed -i 's/git clone --depth 1 https:\/\/github.com\/9seconds\/mtg.git mtg_src/git clone --depth 1 --branch v2 https:\/\/github.com\/9seconds\/mtg.git mtg_src/g' build_magisk_module.sh
-          # 4. 增加克隆失败强制退出逻辑，避免无效继续
-          sed -i 's/git clone --depth 1/git clone --depth 1 || { echo "❌ mtg仓库克隆失败，网络异常"; exit 1; }/g' build_magisk_module.sh
+          git clone --depth 1 --branch "$MTG_BRANCH" "$MTG_REPO" mtg_src || {
+              echo "❌ Ошибка: Не удалось склонировать репозиторий mtg"
+              exit 1
+          }
+          
+          if [ ! -d "mtg_src/cmd/mtg" ]; then
+              echo "❌ Ошибка: Структура репозитория mtg повреждена, не найден каталог cmd/mtg"
+              exit 1
+          fi
+          echo "  ✅ Исходный код mtg получен"
+          
+          echo "  [2/5] Компиляция mtg для Android ARM64..."
+          cd mtg_src
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../mtg ./cmd/mtg
+          cd ..
+          
+          if [ ! -f "mtg" ]; then
+              echo "❌ Ошибка: Не удалось скомпилировать бинарный файл mtg"
+              exit 1
+          fi
+          echo "  ✅ Бинарник собран: $(ls -lh mtg | awk '{print $5}')"
+          
+          echo "  [3/5] Генерация Fake TLS секрета для $DOMAIN..."
+          SECRET=$(python3 -c "
+          import os
+          rand = os.urandom(16).hex()
+          domain_hex = '$DOMAIN'.encode().hex()
+          print('ee' + rand + domain_hex)
+          ")
+          echo "  ✅ Секрет сгенерирован (префикс): ${SECRET:0:20}..."
+          
+          echo "  [4/5] Сборка структуры модуля..."
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
+          
+          cat > "$BUILD_DIR/module.prop" << EOF
+          id=$MODULE_ID
+          name=$MODULE_NAME
+          version=$MODULE_VERSION
+          versionCode=1
+          author=$MODULE_AUTHOR
+          description=Локальный MTProto прокси с Fake TLS для Telegram. Домен маскировки: $DOMAIN
+          EOF
+          
+          cp mtg "$BUILD_DIR/mtg"
+          chmod 755 "$BUILD_DIR/mtg"
+          
+          cat > "$BUILD_DIR/config.toml" << EOF
+          [network]
+          bind-to = "127.0.0.1:8443"
+          
+          [mtproto]
+          secret = "$SECRET"
+          EOF
+          
+          cat > "$BUILD_DIR/service.sh" << 'SERVICESH'
+          #!/system/bin/sh
+          MODDIR="${0%/*}"
+          LOG="$MODDIR/proxy.log"
+          
+          while [ "$(getprop sys.boot_completed)" != "1" ]; do
+              sleep 5
+          done
+          sleep 10
+          
+          SECRET=$(grep 'secret' "$MODDIR/config.toml" | sed 's/.*= *"//;s/"//')
+          echo "$(date) Запуск MTProto Proxy..." > "$LOG"
+          echo "tg://proxy?server=127.0.0.1&port=8443&secret=$SECRET" >> "$LOG"
+          
+          "$MODDIR/mtg" run "$MODDIR/config.toml" >> "$LOG" 2>&1 &
+          echo "$(date) PID процесса: $!" >> "$LOG"
+          SERVICESH
+          chmod 755 "$BUILD_DIR/service.sh"
+          
+          cat > "$BUILD_DIR/action.sh" << 'ACTIONSH'
+          #!/system/bin/sh
+          MODDIR="${0%/*}"
+          
+          if pgrep -f "$MODDIR/mtg" > /dev/null 2>&1; then
+              pkill -f "$MODDIR/mtg"
+              echo "MTProto Proxy остановлен"
+          else
+              SECRET=$(grep 'secret' "$MODDIR/config.toml" | sed 's/.*= *"//;s/"//')
+              "$MODDIR/mtg" run "$MODDIR/config.toml" >> "$MODDIR/proxy.log" 2>&1 &
+              echo "MTProto Proxy запущен (PID: $!)"
+              echo "tg://proxy?server=127.0.0.1&port=8443&secret=$SECRET"
+          fi
+          ACTIONSH
+          chmod 755 "$BUILD_DIR/action.sh"
+          
+          echo "  [5/5] Упаковка модуля в ZIP..."
+          cd "$BUILD_DIR"
+          zip -r "../$OUTPUT_ZIP" .
+          cd ..
+          
+          if [ ! -f "$OUTPUT_ZIP" ]; then
+              echo "❌ Ошибка: Не удалось упаковать модуль в ZIP"
+              exit 1
+          fi
+          
+          echo ""
+          echo "  ✅ Модуль успешно собран: $OUTPUT_ZIP"
+          echo "  🔗 Полный секрет: $SECRET"
+          echo "  🔗 Ссылка для Telegram: tg://proxy?server=127.0.0.1&port=8443&secret=$SECRET"
+          echo ""
+          EOF
 
-      - name: 执行构建脚本生成Magisk模块
-        working-directory: ./telegram-proxy/tools
+          # 修复换行符格式+添加执行权限，彻底解决语法报错
+          dos2unix build_magisk_module.sh
+          chmod +x build_magisk_module.sh
+
+      - name: 执行构建生成Magisk模块
         run: |
           set -euo pipefail
           bash build_magisk_module.sh
@@ -46,16 +180,14 @@ jobs:
       - name: 定位构建产物
         id: find-module
         run: |
-          # 精准匹配原脚本生成的zip文件名
-          MODULE_FILE=$(find ./telegram-proxy/tools -name "mtg_proxy_magisk_v*.zip" -type f | head -n 1)
+          MODULE_FILE=$(find . -name "mtg_proxy_magisk_v*.zip" -type f | head -n 1)
           if [ -z "$MODULE_FILE" ]; then
-            echo "❌ 构建失败：未找到生成的Magisk模块zip文件"
+            echo "❌ 构建失败：未找到生成的Magisk模块"
             exit 1
           fi
-          echo "✅ 找到模块文件：$MODULE_FILE"
           echo "module_path=$MODULE_FILE" >> $GITHUB_OUTPUT
 
-      - name: 上传Magisk模块制品
+      - name: 上传模块制品
         uses: actions/upload-artifact@v4
         with:
           name: telegram-proxy-magisk-module
