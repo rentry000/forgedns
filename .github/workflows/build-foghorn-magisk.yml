@@ -1,0 +1,408 @@
+name: Build Foghorn DNS Magisk Module
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'src/**'
+      - 'pyproject.toml'
+      - '.github/workflows/build-foghorn-magisk.yml'
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build-magisk-module:
+    runs-on: ubuntu-latest
+    name: Build Foghorn Magisk Module (ARM64)
+    
+    steps:
+      # ========== 基础准备 ==========
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            zip \
+            upx \
+            libssl-dev \
+            libffi-dev
+
+      # ========== Python 依赖安装 ==========
+      - name: Create minimal requirements file
+        run: |
+          cat > requirements-android.txt << 'EOF'
+          # Core dependencies
+          cachetools>=1.1.3
+          dnslib>=0.9.24
+          jsonschema>=4.17.3
+          pydantic>=2.0.0
+          pyyaml>=6.0.1
+          requests>=2.31.0
+          
+          # DNSSEC
+          cryptography>=41.0.0
+          dnspython>=2.6.1
+          
+          # Utilities
+          paramiko>=3.0.0
+          publicsuffix2>=1.2.0
+          watchdog>=3.0.0
+          zeroconf>=0.64.0
+          EOF
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements-android.txt
+          pip install PyInstaller nuitka
+          pip install -e .
+
+      # ========== 编译为单一二进制 ==========
+      - name: Build single binary with PyInstaller
+        run: |
+          mkdir -p dist_android
+          python -m PyInstaller \
+            --onefile \
+            --name foghorn \
+            --distpath ./dist_android \
+            --workpath ./dist_android/build \
+            --specpath ./dist_android \
+            --add-data "src/foghorn/html:foghorn/html" \
+            --add-data "src/foghorn/plugins:foghorn/plugins" \
+            --add-data "src/foghorn/assets:foghorn/assets" \
+            --collect-all dnslib \
+            --collect-all pydantic \
+            --collect-all yaml \
+            --collect-all cryptography \
+            --collect-all dnspython \
+            --strip \
+            --upx-dir=/usr/bin \
+            src/foghorn/main.py
+
+      - name: Check binary size
+        run: |
+          ls -lh dist_android/foghorn
+          file dist_android/foghorn
+          du -sh dist_android/foghorn
+
+      # ========== 创建 Magisk 模块结构 ==========
+      - name: Create Magisk module structure
+        run: |
+          # 创建目录结构
+          mkdir -p foghorn_magisk/system/app/foghorn/lib/arm64-v8a
+          mkdir -p foghorn_magisk/data/adb/foghorn/config
+          mkdir -p foghorn_magisk/data/adb/foghorn/var
+          
+          # 复制二进制文件
+          cp dist_android/foghorn foghorn_magisk/system/app/foghorn/foghorn
+          chmod 755 foghorn_magisk/system/app/foghorn/foghorn
+
+      - name: Create module.prop
+        run: |
+          cat > foghorn_magisk/module.prop << 'EOF'
+          id=foghorn_dns
+          name=Foghorn DNS Server
+          version=0.7.0
+          versionCode=70
+          author=rentry00
+          description=High-performance DNS server with caching, filtering and routing - ARM64 Android
+          minMagisk=24000
+          EOF
+
+      - name: Create service.sh
+        run: |
+          cat > foghorn_magisk/service.sh << 'EOF'
+          #!/system/bin/sh
+          # Foghorn DNS Server service script for Magisk
+          
+          MODDIR=${0%/*}
+          FOGHORN_BIN="$MODDIR/system/app/foghorn/foghorn"
+          FOGHORN_CONFIG="/data/adb/foghorn/config/config.yaml"
+          FOGHORN_PID="/data/adb/foghorn/foghorn.pid"
+          FOGHORN_LOG="/data/adb/foghorn/var/foghorn.log"
+          
+          # Wait for system to fully boot
+          sleep 30
+          
+          # Create config if not exists
+          if [ ! -f "$FOGHORN_CONFIG" ]; then
+              mkdir -p "$(dirname "$FOGHORN_CONFIG")"
+              mkdir -p "$(dirname "$FOGHORN_LOG")"
+              cat > "$FOGHORN_CONFIG" << 'ENDCONFIG'
+          vars:
+            ENV: prod
+          
+          server:
+            listen:
+              dns:
+                udp:
+                  enabled: true
+                  host: 127.0.0.1
+                  port: 5353
+                tcp:
+                  enabled: false
+            cache:
+              module: memory
+              config:
+                min_cache_ttl: 60
+            resolver:
+              mode: forward
+              timeout_ms: 2000
+          
+          upstreams:
+            strategy: failover
+            max_concurrent: 1
+            endpoints:
+              - host: 1.1.1.1
+                port: 53
+                transport: udp
+          
+          plugins: []
+          
+          logging:
+            python:
+              level: warn
+              file: /data/adb/foghorn/var/foghorn.log
+              stderr: false
+          
+          stats:
+            enabled: false
+          ENDCONFIG
+              chmod 644 "$FOGHORN_CONFIG"
+          fi
+          
+          # Start Foghorn
+          if [ -x "$FOGHORN_BIN" ]; then
+              nohup "$FOGHORN_BIN" --config "$FOGHORN_CONFIG" > "$FOGHORN_LOG" 2>&1 &
+              echo $! > "$FOGHORN_PID"
+              log -p i -t Foghorn "✓ Foghorn DNS started (PID: $(cat $FOGHORN_PID))"
+          else
+              log -p e -t Foghorn "✗ Foghorn binary not found or not executable"
+          fi
+          EOF
+          chmod 755 foghorn_magisk/service.sh
+
+      - name: Create install.sh
+        run: |
+          cat > foghorn_magisk/install.sh << 'EOF'
+          #!/sbin/sh
+          
+          OUTFD=$2
+          
+          ui_print() {
+            echo "ui_print $1" >> /proc/self/fd/$OUTFD
+            echo "ui_print" >> /proc/self/fd/$OUTFD
+          }
+          
+          ui_print "╔═══════════════════════════════════════╗"
+          ui_print "║   Foghorn DNS Server v0.7.0          ║"
+          ui_print "║   Magisk Module Installer            ║"
+          ui_print "╚═══════════════════════════════════════╝"
+          ui_print ""
+          
+          if [ "$ARCH" != "arm64" ]; then
+            ui_print "❌ Error: This module requires ARM64 architecture"
+            ui_print "Your device: $ARCH"
+            exit 1
+          fi
+          
+          ui_print "✓ Creating directories..."
+          mkdir -p $MODPATH/data/adb/foghorn/config
+          mkdir -p $MODPATH/data/adb/foghorn/var
+          
+          ui_print "✓ Setting permissions..."
+          chmod 755 $MODPATH/system/app/foghorn/foghorn
+          
+          ui_print ""
+          ui_print "✅ Installation completed!"
+          ui_print ""
+          ui_print "📁 Config: /data/adb/foghorn/config/config.yaml"
+          ui_print "📋 Logs:   /data/adb/foghorn/var/foghorn.log"
+          ui_print "🔌 Port:   127.0.0.1:5353 (local DNS)"
+          ui_print ""
+          ui_print "⚠️  Please reboot your device"
+          EOF
+          chmod 755 foghorn_magisk/install.sh
+
+      - name: Create post-fs-data.sh
+        run: |
+          cat > foghorn_magisk/post-fs-data.sh << 'EOF'
+          #!/system/bin/sh
+          MODDIR=${0%/*}
+          mkdir -p /data/adb/foghorn/config
+          mkdir -p /data/adb/foghorn/var
+          chmod 755 /data/adb/foghorn
+          chmod 755 /data/adb/foghorn/config
+          chmod 755 /data/adb/foghorn/var
+          EOF
+          chmod 755 foghorn_magisk/post-fs-data.sh
+
+      - name: Create uninstall.sh
+        run: |
+          cat > foghorn_magisk/uninstall.sh << 'EOF'
+          #!/system/bin/sh
+          # Cleanup script
+          pkill -f "foghorn"
+          rm -f /data/adb/foghorn/foghorn.pid
+          EOF
+          chmod 755 foghorn_magisk/uninstall.sh
+
+      - name: Create README
+        run: |
+          cat > foghorn_magisk/README.md << 'EOF'
+          # Foghorn DNS Server - Magisk Module
+          
+          ## Features
+          - ✅ High-performance DNS server
+          - ✅ DNS caching and filtering
+          - ✅ Support for DNS-over-UDP/TCP
+          - ✅ Lightweight (optimized for mobile)
+          - ✅ Zero configuration (auto-setup)
+          
+          ## Installation
+          1. Download module ZIP
+          2. Open Magisk Manager
+          3. Modules → Install from file
+          4. Select foghorn_v0.7.0.zip
+          5. Reboot device
+          
+          ## Configuration
+          Edit: `/data/adb/foghorn/config/config.yaml`
+          
+          Default listens on: `127.0.0.1:5353` (localhost only)
+          
+          To access from other apps, use:
+          ```yaml
+          server:
+            listen:
+              dns:
+                udp:
+                  host: 0.0.0.0  # Requires root/Magisk
+                  port: 5353
+          ```
+          
+          ## Logs
+          ```bash
+          tail -f /data/adb/foghorn/var/foghorn.log
+          ```
+          
+          ## Test
+          ```bash
+          nslookup google.com 127.0.0.1:5353
+          ```
+          
+          ## Uninstall
+          Magisk Manager → Modules → Foghorn → Delete → Reboot
+          
+          ---
+          Version: 0.7.0
+          Author: rentry00
+          EOF
+
+      - name: Create common/system.prop
+        run: |
+          mkdir -p foghorn_magisk/common
+          cat > foghorn_magisk/common/system.prop << 'EOF'
+          # Foghorn DNS Server properties
+          persist.foghorn.enabled=1
+          EOF
+
+      # ========== 打包成 ZIP ==========
+      - name: Package as Magisk module ZIP
+        run: |
+          cd foghorn_magisk
+          zip -r -q ../foghorn_v0.7.0.zip .
+          cd ..
+          ls -lh foghorn_v0.7.0.zip
+
+      - name: Generate checksums
+        run: |
+          sha256sum foghorn_v0.7.0.zip > foghorn_v0.7.0.zip.sha256
+          md5sum foghorn_v0.7.0.zip > foghorn_v0.7.0.zip.md5
+          cat foghorn_v0.7.0.zip.sha256
+          cat foghorn_v0.7.0.zip.md5
+
+      # ========== 上传制品 ==========
+      - name: Upload Magisk module ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: foghorn-magisk-module-arm64
+          path: foghorn_v0.7.0.zip
+          retention-days: 30
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: foghorn-checksums
+          path: |
+            foghorn_v0.7.0.zip.sha256
+            foghorn_v0.7.0.zip.md5
+          retention-days: 30
+
+      # ========== 创建 Release（仅在标签推送时） ==========
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            foghorn_v0.7.0.zip
+            foghorn_v0.7.0.zip.sha256
+            foghorn_v0.7.0.zip.md5
+          draft: false
+          prerelease: false
+          body: |
+            # Foghorn DNS Server v0.7.0 - Magisk Module
+            
+            ## What's New
+            - Optimized for ARM64 Android devices
+            - Compiled with Python 3.14
+            - Minimal dependencies (no database drivers)
+            - Auto-configuration on first run
+            
+            ## Installation
+            1. Download `foghorn_v0.7.0.zip`
+            2. Magisk Manager → Modules → Install from file
+            3. Reboot
+            
+            ## Features
+            ✅ DNS caching & filtering
+            ✅ Lightweight (~120MB)
+            ✅ Zero-config setup
+            ✅ 127.0.0.1:5353 by default
+            
+            ## Checksums
+            - SHA256: `${{ hashFiles('foghorn_v0.7.0.zip') }}`
+            
+            See README.md in module for configuration.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ========== 构建报告 ==========
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "### 📦 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 状态 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Python | ✅ 3.14 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Binary Size | $(du -h dist_android/foghorn | cut -f1) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Module ZIP | $(ls -lh foghorn_v0.7.0.zip | awk '{print $5}') |" >> $GITHUB_STEP✅ ARM64 |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**构件位置**: Artifacts 标签页" >> $GITHUB_STEP_SUMMARY
