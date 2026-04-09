@@ -1,11 +1,10 @@
 name: JSON Proxy To Mihomo Auto Convert
-
 on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */2 * * *'  # 每2小时自动更新
-  workflow_dispatch:       # 支持网页手动点击运行
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -28,10 +27,15 @@ jobs:
       - name: Run JSON Convert Script
         run: python json2mihomo.py
 
-      - name: Commit & Push Config
+      - name: Check & Commit Changes
         run: |
           git config --global user.name "Mihomo-Auto-Bot"
           git config --global user.email "bot@github.com"
           git add mihomo_all_json_config.yaml
+          # 无变更直接退出，不报错
+          if git diff --staged --quiet; then
+            echo "No changes to commit, exit success"
+            exit 0
+          fi
           git commit -m "Auto update from all.json | GitHub Actions"
           git push
