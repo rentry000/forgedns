@@ -1,0 +1,37 @@
+name: JSON Proxy To Mihomo Auto Convert
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 */2 * * *'  # 每2小时自动更新
+  workflow_dispatch:       # 支持网页手动点击运行
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run JSON Convert Script
+        run: python json2mihomo.py
+
+      - name: Commit & Push Config
+        run: |
+          git config --global user.name "Mihomo-Auto-Bot"
+          git config --global user.email "bot@github.com"
+          git add mihomo_all_json_config.yaml
+          git commit -m "Auto update from all.json | GitHub Actions"
+          git push
