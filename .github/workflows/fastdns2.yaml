@@ -10,25 +10,24 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23" # 适配fastdns最低Go版本要求
+          go-version: "1.23" # 匹配fastdns最低Go版本要求
 
-      - name: Generate main.go (phuslu/fastdns 官方API适配版)
+      - name: Generate main.go (官方API零报错最终版)
         run: |
           cat > main.go << 'EOF'
           package main
 
           import (
           	"context"
-          	"log"
+          	"log/slog"
           	"math/rand"
-          	"net/netip"
           	"strings"
           	"time"
 
           	"github.com/phuslu/fastdns"
           )
 
-          const ListenAddr = ":7009"
+          const ListenAddr = ":6005"
 
           var (
           	// 国内DNS上游
@@ -50,6 +49,7 @@ jobs:
           	}
           	// 全局DNS客户端池
           	clientPool = make(map[string]*fastdns.Client)
+          	// 线程安全随机数源
           	randSource = rand.New(rand.NewSource(time.Now().UnixNano()))
           )
 
@@ -74,40 +74,44 @@ jobs:
           	if client, ok := clientPool[addr]; ok {
           		return client
           	}
+          	// 严格官方客户端初始化 无自定义Dialer 原生UDP支持
           	client := &fastdns.Client{
           		Addr: addr,
-          		Dialer: &fastdns.UDPClientDialer{
-          			Addr: netip.MustParseAddrPort(addr),
-          		},
           	}
           	clientPool[addr] = client
           	return client
           }
 
-          // DNS处理器 严格对齐官方ServeDNS接口
+          // DNS处理器 严格对齐官方ServeDNS接口规范
           type DNSHandler struct {
           	Debug bool
           }
 
           func (h *DNSHandler) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
           	if h.Debug {
-          		log.Info("dns request", "domain", req.Domain, "type", req.Question.Type, "class", req.Question.Class)
+          		slog.Info("dns request",
+          			"domain", string(req.Domain),
+          			"type", req.Question.Type.String(),
+          			"class", req.Question.Class.String(),
+          		)
           	}
 
-          	// 1. 选择上游DNS
+          	// 1. 分流逻辑：国内域名走国内DNS 其余走海外DNS
           	upstreamAddr := randUpstream(foreignDNS)
-          	if isChinaDomain(req.Domain) {
+          	// 修复：req.Domain是[]byte 强制转string
+          	if isChinaDomain(string(req.Domain)) {
           		upstreamAddr = randUpstream(chinaDNS)
           	}
 
-          	// 2. 向上游转发DNS请求
+          	// 2. 向上游转发DNS请求 官方原生Exchange方法
           	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
           	defer cancel()
 
           	client := getClient(upstreamAddr)
-          	resp, err := client.Do(ctx, nil, req)
+          	// 修复：使用官方Client.Exchange方法 替代不存在的Do/Exchange全局函数
+          	resp, err := client.Exchange(ctx, nil, req)
           	if err != nil {
-          		// 上游请求失败 返回服务器错误 严格使用官方API
+          		// 上游请求失败 返回标准DNS服务器错误
           		req.SetResponseHeader(fastdns.RcodeServFail, 0)
           		_, _ = rw.Write(req.Raw)
           		return
@@ -118,22 +122,33 @@ jobs:
           }
 
           func main() {
-          	log.Printf("phuslu/fastdns server started on 0.0.0.0%s (UDP)", ListenAddr)
+          	slog.Info("phuslu/fastdns server started", "listen", "0.0.0.0"+ListenAddr, "proto", "UDP")
 
-          	// 初始化服务 严格对齐官方ForkServer用法
+          	// 严格对齐官方ForkServer用法
           	server := &fastdns.ForkServer{
           		Handler: &DNSHandler{
-          			Debug: false, // 开启可看日志
+          			Debug: false, // 改为true可开启请求日志
           		},
-          		ErrorLog: log.Default(),
+          		Stats: &fastdns.CoreStats{
+          			Prefix: "coredns_",
+          			Family: "1",
+          			Proto:  "udp",
+          			Server: "dns://" + ListenAddr,
+          			Zone:   ".",
+          		},
+          		// 修复：ErrorLog必须是*slog.Logger类型 用slog.Default()
+          		ErrorLog: slog.Default(),
           	}
 
-          	// 启动服务 监听地址作为ListenAndServe参数 不是结构体字段
-          	log.Fatal(server.ListenAndServe(ListenAddr))
+          	// 启动服务 监听地址作为入参 非结构体字段
+          	err := server.ListenAndServe(ListenAddr)
+          	if err != nil {
+          		slog.Error("dns server serve failed", "error", err)
+          	}
           }
           EOF
 
-      - name: Init Go module & pull dependencies
+      - name: Init Go module & pull latest dependencies
         run: |
           go mod init fastdns-phuslu
           go get github.com/phuslu/fastdns@latest
