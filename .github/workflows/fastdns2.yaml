@@ -10,9 +10,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23" # 匹配fastdns最低Go版本要求
+          go-version: "1.23"
 
-      - name: Generate main.go (官方API零报错最终版)
+      - name: Generate main.go (最终零报错版)
         run: |
           cat > main.go << 'EOF'
           package main
@@ -27,7 +27,7 @@ jobs:
           	"github.com/phuslu/fastdns"
           )
 
-          const ListenAddr = ":6005"
+          const ListenAddr = ":7009"
 
           var (
           	// 国内DNS上游
@@ -74,7 +74,7 @@ jobs:
           	if client, ok := clientPool[addr]; ok {
           		return client
           	}
-          	// 严格官方客户端初始化 无自定义Dialer 原生UDP支持
+          	// 官方原生客户端初始化
           	client := &fastdns.Client{
           		Addr: addr,
           	}
@@ -82,7 +82,7 @@ jobs:
           	return client
           }
 
-          // DNS处理器 严格对齐官方ServeDNS接口规范
+          // DNS处理器 严格对齐官方接口
           type DNSHandler struct {
           	Debug bool
           }
@@ -96,29 +96,29 @@ jobs:
           		)
           	}
 
-          	// 1. 分流逻辑：国内域名走国内DNS 其余走海外DNS
+          	// 1. 分流逻辑：国内域名走国内DNS，其余走海外DNS
           	upstreamAddr := randUpstream(foreignDNS)
-          	// 修复：req.Domain是[]byte 强制转string
           	if isChinaDomain(string(req.Domain)) {
           		upstreamAddr = randUpstream(chinaDNS)
           	}
 
-          	// 2. 向上游转发DNS请求 官方原生Exchange方法
+          	// 2. 向上游转发DNS请求 严格匹配官方Exchange函数签名
           	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
           	defer cancel()
 
           	client := getClient(upstreamAddr)
-          	// 修复：使用官方Client.Exchange方法 替代不存在的Do/Exchange全局函数
-          	resp, err := client.Exchange(ctx, nil, req)
-          	if err != nil {
-          		// 上游请求失败 返回标准DNS服务器错误
+          	// 核心修复：Exchange仅返回1个值（响应原始字节），无error返回值
+          	respRaw := client.Exchange(ctx, nil, req)
+          	
+          	// 3. 异常处理：响应为空则返回DNS服务器错误
+          	if respRaw == nil || len(respRaw) == 0 {
           		req.SetResponseHeader(fastdns.RcodeServFail, 0)
           		_, _ = rw.Write(req.Raw)
           		return
           	}
 
-          	// 3. 把上游响应返回给客户端 官方标准写法
-          	_, _ = rw.Write(resp.Raw)
+          	// 4. 正常返回上游响应结果
+          	_, _ = rw.Write(respRaw)
           }
 
           func main() {
@@ -136,11 +136,10 @@ jobs:
           			Server: "dns://" + ListenAddr,
           			Zone:   ".",
           		},
-          		// 修复：ErrorLog必须是*slog.Logger类型 用slog.Default()
           		ErrorLog: slog.Default(),
           	}
 
-          	// 启动服务 监听地址作为入参 非结构体字段
+          	// 启动服务
           	err := server.ListenAndServe(ListenAddr)
           	if err != nil {
           		slog.Error("dns server serve failed", "error", err)
