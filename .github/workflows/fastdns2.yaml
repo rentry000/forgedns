@@ -1,0 +1,110 @@
+name: Build FastDNS-phuslu arm64 Android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Generate main.go (phuslu/fastdns 分流版)
+        run: |
+          cat > main.go << 'EOF'
+          package main
+
+          import (
+          	"log"
+          	"math/rand"
+          	"strings"
+          	"time"
+
+          	"github.com/phuslu/fastdns"
+          )
+
+          const ListenAddr = "0.0.0.0:7009"
+
+          var (
+          	chinaDNS = []string{
+          		"223.5.5.5:53",
+          		"223.6.6.6:53",
+          		"114.114.114.114:53",
+          		"119.29.29.29:53",
+          	}
+          	foreignDNS = []string{
+          		"8.8.8.8:53",
+          		"8.8.4.4:53",
+          		"1.1.1.1:53",
+          	}
+          	chinaSuffix = []string{
+          		".cn", ".com.cn", ".net.cn", ".org.cn", ".gov.cn", ".edu.cn",
+          	}
+          )
+
+          func randUp(servers []string) string {
+          	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+          	return servers[r.Intn(len(servers))]
+          }
+
+          func isChinaDomain(qName string) bool {
+          	name := strings.ToLower(qName)
+          	for _, suf := range chinaSuffix {
+          		if strings.HasSuffix(name, suf) {
+          			return true
+          		}
+          	}
+          	return false
+          }
+
+          func handler(w fastdns.ResponseWriter, r *fastdns.Message) {
+          	if len(r.Question) == 0 {
+          		w.Rcode(fastdns.RcodeServerFailure)
+          		return
+          	}
+
+          	q := r.Question[0]
+          	upstream := randUp(foreignDNS)
+          	if isChinaDomain(string(q.Name)) {
+          		upstream = randUp(chinaDNS)
+          	}
+
+          	// fastdns 上游转发
+          	resp, err := fastdns.Exchange(nil, upstream, r)
+          	if err != nil {
+          		w.Rcode(fastdns.RcodeServerFailure)
+          		return
+          	}
+          	w.WriteMsg(resp)
+          }
+
+          func main() {
+          	log.Printf("phuslu/fastdns server listening on %s (UDP)", ListenAddr)
+          	srv := &fastdns.Server{
+          		Addr: ListenAddr,
+          		Handler: fastdns.HandlerFunc(handler),
+          	}
+          	log.Fatal(srv.ListenAndServe())
+          }
+          EOF
+
+      - name: Init Go module & install dependencies
+        run: |
+          go mod init fastdns-phuslu
+          go mod tidy
+
+      - name: Build Android arm64 静态编译(无CGO)
+        run: |
+          CGO_ENABLED=0 \
+          GOOS=android \
+          GOARCH=arm64 \
+          go build -ldflags="-s -w" -o fastdns-phuslu-arm64
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastdns-phuslu-arm64
+          path: fastdns-phuslu-arm64
