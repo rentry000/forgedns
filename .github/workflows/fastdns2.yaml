@@ -10,93 +10,136 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.23" # 适配fastdns最低Go版本要求
 
-      - name: Generate main.go (phuslu/fastdns 分流版)
+      - name: Generate main.go (phuslu/fastdns 官方API适配版)
         run: |
           cat > main.go << 'EOF'
           package main
 
           import (
+          	"context"
           	"log"
           	"math/rand"
+          	"net/netip"
           	"strings"
           	"time"
 
           	"github.com/phuslu/fastdns"
           )
 
-          const ListenAddr = "0.0.0.0:7009"
+          const ListenAddr = ":7009"
 
           var (
+          	// 国内DNS上游
           	chinaDNS = []string{
           		"223.5.5.5:53",
           		"223.6.6.6:53",
           		"114.114.114.114:53",
           		"119.29.29.29:53",
           	}
+          	// 海外DNS上游
           	foreignDNS = []string{
           		"8.8.8.8:53",
           		"8.8.4.4:53",
           		"1.1.1.1:53",
           	}
+          	// 国内域名后缀匹配
           	chinaSuffix = []string{
           		".cn", ".com.cn", ".net.cn", ".org.cn", ".gov.cn", ".edu.cn",
           	}
+          	// 全局DNS客户端池
+          	clientPool = make(map[string]*fastdns.Client)
+          	randSource = rand.New(rand.NewSource(time.Now().UnixNano()))
           )
 
-          func randUp(servers []string) string {
-          	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-          	return servers[r.Intn(len(servers))]
+          // 随机选择上游DNS
+          func randUpstream(servers []string) string {
+          	return servers[randSource.Intn(len(servers))]
           }
 
-          func isChinaDomain(qName string) bool {
-          	name := strings.ToLower(qName)
+          // 判断是否为国内域名
+          func isChinaDomain(domain string) bool {
+          	domainLower := strings.ToLower(domain)
           	for _, suf := range chinaSuffix {
-          		if strings.HasSuffix(name, suf) {
+          		if strings.HasSuffix(domainLower, suf) {
           			return true
           		}
           	}
           	return false
           }
 
-          func handler(w fastdns.ResponseWriter, r *fastdns.Message) {
-          	if len(r.Question) == 0 {
-          		w.Rcode(fastdns.RcodeServerFailure)
-          		return
+          // 获取/初始化DNS客户端
+          func getClient(addr string) *fastdns.Client {
+          	if client, ok := clientPool[addr]; ok {
+          		return client
+          	}
+          	client := &fastdns.Client{
+          		Addr: addr,
+          		Dialer: &fastdns.UDPClientDialer{
+          			Addr: netip.MustParseAddrPort(addr),
+          		},
+          	}
+          	clientPool[addr] = client
+          	return client
+          }
+
+          // DNS处理器 严格对齐官方ServeDNS接口
+          type DNSHandler struct {
+          	Debug bool
+          }
+
+          func (h *DNSHandler) ServeDNS(rw fastdns.ResponseWriter, req *fastdns.Message) {
+          	if h.Debug {
+          		log.Info("dns request", "domain", req.Domain, "type", req.Question.Type, "class", req.Question.Class)
           	}
 
-          	q := r.Question[0]
-          	upstream := randUp(foreignDNS)
-          	if isChinaDomain(string(q.Name)) {
-          		upstream = randUp(chinaDNS)
+          	// 1. 选择上游DNS
+          	upstreamAddr := randUpstream(foreignDNS)
+          	if isChinaDomain(req.Domain) {
+          		upstreamAddr = randUpstream(chinaDNS)
           	}
 
-          	// fastdns 上游转发
-          	resp, err := fastdns.Exchange(nil, upstream, r)
+          	// 2. 向上游转发DNS请求
+          	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+          	defer cancel()
+
+          	client := getClient(upstreamAddr)
+          	resp, err := client.Do(ctx, nil, req)
           	if err != nil {
-          		w.Rcode(fastdns.RcodeServerFailure)
+          		// 上游请求失败 返回服务器错误 严格使用官方API
+          		req.SetResponseHeader(fastdns.RcodeServFail, 0)
+          		_, _ = rw.Write(req.Raw)
           		return
           	}
-          	w.WriteMsg(resp)
+
+          	// 3. 把上游响应返回给客户端 官方标准写法
+          	_, _ = rw.Write(resp.Raw)
           }
 
           func main() {
-          	log.Printf("phuslu/fastdns server listening on %s (UDP)", ListenAddr)
-          	srv := &fastdns.Server{
-          		Addr: ListenAddr,
-          		Handler: fastdns.HandlerFunc(handler),
+          	log.Printf("phuslu/fastdns server started on 0.0.0.0%s (UDP)", ListenAddr)
+
+          	// 初始化服务 严格对齐官方ForkServer用法
+          	server := &fastdns.ForkServer{
+          		Handler: &DNSHandler{
+          			Debug: false, // 开启可看日志
+          		},
+          		ErrorLog: log.Default(),
           	}
-          	log.Fatal(srv.ListenAndServe())
+
+          	// 启动服务 监听地址作为ListenAndServe参数 不是结构体字段
+          	log.Fatal(server.ListenAndServe(ListenAddr))
           }
           EOF
 
-      - name: Init Go module & install dependencies
+      - name: Init Go module & pull dependencies
         run: |
           go mod init fastdns-phuslu
+          go get github.com/phuslu/fastdns@latest
           go mod tidy
 
-      - name: Build Android arm64 静态编译(无CGO)
+      - name: Build Android arm64 纯静态无依赖二进制
         run: |
           CGO_ENABLED=0 \
           GOOS=android \
