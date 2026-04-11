@@ -12,7 +12,7 @@ jobs:
         with:
           go-version: "1.23"
 
-      - name: Generate main.go (最终零报错版)
+      - name: Generate main.go (零报错最终修复版)
         run: |
           cat > main.go << 'EOF'
           package main
@@ -102,22 +102,36 @@ jobs:
           		upstreamAddr = randUpstream(chinaDNS)
           	}
 
-          	// 2. 向上游转发DNS请求 严格匹配官方Exchange函数签名
+          	// 2. 从官方内存池申请响应对象，避免内存泄漏，符合库设计规范
+          	resp := fastdns.AcquireMessage()
+          	defer fastdns.ReleaseMessage(resp)
+
+          	// 3. 向上游转发DNS请求 【核心修复点】
           	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
           	defer cancel()
 
           	client := getClient(upstreamAddr)
-          	// 核心修复：Exchange仅返回1个值（响应原始字节），无error返回值
-          	respRaw := client.Exchange(ctx, nil, req)
+          	// 严格匹配官方API：Exchange仅返回error类型，响应数据写入resp对象
+          	err := client.Exchange(ctx, req, resp)
           	
-          	// 3. 异常处理：响应为空则返回DNS服务器错误
-          	if respRaw == nil || len(respRaw) == 0 {
+          	// 4. 异常处理：请求失败返回DNS服务器错误
+          	if err != nil {
+          		slog.Error("dns upstream query failed", "domain", string(req.Domain), "upstream", upstreamAddr, "error", err)
           		req.SetResponseHeader(fastdns.RcodeServFail, 0)
           		_, _ = rw.Write(req.Raw)
           		return
           	}
 
-          	// 4. 正常返回上游响应结果
+          	// 5. 从响应对象中获取正确的[]byte原始字节，彻底解决类型报错
+          	respRaw := resp.Raw
+          	// 响应为空处理
+          	if len(respRaw) == 0 {
+          		req.SetResponseHeader(fastdns.RcodeServFail, 0)
+          		_, _ = rw.Write(req.Raw)
+          		return
+          	}
+
+          	// 6. 正常返回上游响应结果，类型完全匹配，无编译报错
           	_, _ = rw.Write(respRaw)
           }
 
