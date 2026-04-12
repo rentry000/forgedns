@@ -1,37 +1,40 @@
-name: dnscache-go Android ARM64 构建
+name: dnscacheo Android ARM64 构建
 on:
-  workflow_dispatch: # 手动一键触发
+  # 手动一键触发（推荐）
+  workflow_dispatch:
+  # 推送代码时自动构建
   push:
     branches: [ main, master ]
 
 jobs:
   build-android-arm64:
+    name: 构建 Android ARM64 轻量版二进制
     runs-on: ubuntu-latest
     env:
       GOOS: android
       GOARCH: arm64
       CGO_ENABLED: 0
     steps:
-      - name: 初始化构建目录
-        run: mkdir -p build && cd build
-
       - name: 安装 Go 环境
         uses: actions/setup-go@v5
         with:
-          go-version: 1.23
+          go-version: 1.22
           cache: false
 
-      - name: 生成项目代码与服务端入口
-        working-directory: ./build
-        run: |
-          # 1. 初始化Go项目
-          go mod init dnscache-go-service
-          go get github.com/efex33/dnscache-go
-          go get github.com/miekg/dns
-          go get github.com/BurntSushi/toml
+      - name: 拉取官方 dnscacheo 项目代码
+        uses: actions/checkout@v4
+        with:
+          repository: baronematias81/dnscacheo
+          ref: main
+          fetch-depth: 0
 
-          # 2. 生成完整服务端main.go（支持配置文件、多上游、缓存）
-          cat > main.go << 'EOF'
+      - name: 生成 Android 适配版代码（剥离外部依赖）
+        run: |
+          # 清空原有cmd/server，生成轻量适配版入口
+          rm -rf cmd/server && mkdir -p cmd/server
+          
+          # 生成适配Android的main.go，无Redis/PostgreSQL依赖，纯内存缓存
+          cat > cmd/server/main.go << 'EOF'
           package main
 
           import (
@@ -39,42 +42,59 @@ jobs:
             "log"
             "net"
             "os"
-            "strconv"
             "sync"
             "time"
 
-            "github.com/BurntSushi/toml"
-            "github.com/efex33/dnscache-go"
             "github.com/miekg/dns"
+            "gopkg.in/yaml.v3"
           )
 
-          // Config 配置文件结构，兼容你之前的使用习惯
+          // Config 兼容原项目配置格式，适配Android场景
           type Config struct {
-            Bind                  string   `toml:"bind"`
-            Upstreams             []string `toml:"upstreams"`
-            Threads               int      `toml:"threads"`
-            UpstreamTimeoutSecs   int      `toml:"upstream_timeout_secs"`
-            MaxCacheTTLSecs       int      `toml:"max_cache_ttl_secs"`
-            CleanupIntervalSecs   int      `toml:"cleanup_interval_secs"`
+            Server struct {
+              ListenUDP4        string   `yaml:"listen_udp4"`
+              ListenTCP4        string   `yaml:"listen_tcp4"`
+              IPv6Enabled       bool     `yaml:"ipv6_enabled"`
+              ListenUDP6        string   `yaml:"listen_udp6"`
+              ListenTCP6        string   `yaml:"listen_tcp6"`
+              Timeout           string   `yaml:"timeout"`
+              Upstreams4        []string `yaml:"upstreams4"`
+              Upstreams6        []string `yaml:"upstreams6"`
+            } `yaml:"server"`
+            Cache struct {
+              DefaultTTL int `yaml:"default_ttl"`
+              MaxTTL     int `yaml:"max_ttl"`
+            } `yaml:"cache"`
+            RateLimit struct {
+              Enabled    bool `yaml:"enabled"`
+              GlobalRate int  `yaml:"global_rate"`
+              GlobalBurst int `yaml:"global_burst"`
+            } `yaml:"rate_limit"`
+          }
+
+          // 内存缓存条目
+          type CacheEntry struct {
+            IPs        []net.IP
+            ExpireTime time.Time
           }
 
           var (
             configPath string
-            cache      *dnscache.Cache
+            cache      sync.Map
             cfg        Config
-            client     = &dns.Client{
-              Net:     "udp",
-              Timeout: 3 * time.Second,
-            }
+            timeout    time.Duration
+            udpClient  = &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+            tcpClient  = &dns.Client{Net: "tcp", Timeout: 2 * time.Second}
           )
 
           func init() {
-            flag.StringVar(&configPath, "config", "dnscache.toml", "配置文件路径")
+            flag.StringVar(&configPath, "config", "config.yaml", "配置文件路径")
           }
 
-          // 处理DNS请求
-          type handler struct{}
-          func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+          // DNS请求处理器
+          type DNSHandler struct{}
+
+          func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
             msg := new(dns.Msg)
             msg.SetReply(r)
             msg.Authoritative = false
@@ -86,37 +106,53 @@ jobs:
 
             q := r.Question[0]
             domain := q.Name
+            qType := q.Qtype
 
-            // 优先查缓存
-            if ips, ok := cache.Get(domain); ok {
-              rr := make([]dns.RR, 0, len(ips))
-              for _, ip := range ips {
-                if q.Qtype == dns.TypeA {
-                  rr = append(rr, &dns.A{
-                    Hdr: dns.RR_Header{Name: domain, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-                    A:   net.ParseIP(ip).To4(),
-                  })
-                } else if q.Qtype == dns.TypeAAAA {
-                  rr = append(rr, &dns.AAAA{
-                    Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 300},
-                    AAAA: net.ParseIP(ip).To16(),
-                  })
+            // 优先查内存缓存
+            if entry, ok := cache.Load(domain + "_" + dns.TypeToString[qType]); ok {
+              cacheEntry := entry.(CacheEntry)
+              if time.Now().Before(cacheEntry.ExpireTime) {
+                rr := make([]dns.RR, 0, len(cacheEntry.IPs))
+                for _, ip := range cacheEntry.IPs {
+                  if qType == dns.TypeA && ip.To4() != nil {
+                    rr = append(rr, &dns.A{
+                      Hdr: dns.RR_Header{Name: domain, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: uint32(cfg.Cache.DefaultTTL)},
+                      A:   ip.To4(),
+                    })
+                  } else if qType == dns.TypeAAAA && ip.To16() != nil && ip.To4() == nil {
+                    rr = append(rr, &dns.AAAA{
+                      Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: uint32(cfg.Cache.DefaultTTL)},
+                      AAAA: ip.To16(),
+                    })
+                  }
                 }
+                if len(rr) > 0 {
+                  msg.Answer = rr
+                  _ = w.WriteMsg(msg)
+                  return
+                }
+              } else {
+                cache.Delete(domain + "_" + dns.TypeToString[qType])
               }
-              msg.Answer = rr
-              _ = w.WriteMsg(msg)
-              return
             }
 
             // 多上游并发查询，取最快有效结果
             var wg sync.WaitGroup
             var result *dns.Msg
             var once sync.Once
+            upstreams := cfg.Server.Upstreams4
+            if qType == dns.TypeAAAA && cfg.Server.IPv6Enabled && len(cfg.Server.Upstreams6) > 0 {
+              upstreams = append(upstreams, cfg.Server.Upstreams6...)
+            }
 
-            for _, upstream := range cfg.Upstreams {
+            for _, upstream := range upstreams {
               wg.Add(1)
               go func(upstream string) {
                 defer wg.Done()
+                client := udpClient
+                if _, ok := w.LocalAddr().(*net.TCPAddr); ok {
+                  client = tcpClient
+                }
                 resp, _, err := client.Exchange(r, upstream)
                 if err != nil || resp.Rcode != dns.RcodeSuccess {
                   return
@@ -134,18 +170,25 @@ jobs:
               return
             }
 
-            // 提取IP存入缓存
-            ips := make([]string, 0)
+            // 提取IP存入内存缓存
+            ips := make([]net.IP, 0)
             for _, ans := range result.Answer {
               switch rr := ans.(type) {
               case *dns.A:
-                ips = append(ips, rr.A.String())
+                ips = append(ips, rr.A)
               case *dns.AAAA:
-                ips = append(ips, rr.AAAA.String())
+                ips = append(ips, rr.AAAA)
               }
             }
             if len(ips) > 0 {
-              cache.Set(domain, ips)
+              ttl := time.Duration(cfg.Cache.DefaultTTL) * time.Second
+              if ttl > time.Duration(cfg.Cache.MaxTTL)*time.Second {
+                ttl = time.Duration(cfg.Cache.MaxTTL) * time.Second
+              }
+              cache.Store(domain+"_"+dns.TypeToString[qType], CacheEntry{
+                IPs:        ips,
+                ExpireTime: time.Now().Add(ttl),
+              })
             }
 
             _ = w.WriteMsg(result)
@@ -155,59 +198,51 @@ jobs:
             flag.Parse()
 
             // 加载配置文件
-            log.Println("加载配置文件:", configPath)
+            log.Println("[dnscacheo] 加载配置文件:", configPath)
             data, err := os.ReadFile(configPath)
             if err != nil {
               log.Fatalf("读取配置文件失败: %v", err)
             }
-            if _, err := toml.Decode(string(data), &cfg); err != nil {
+            if err := yaml.Unmarshal(data, &cfg); err != nil {
               log.Fatalf("解析配置文件失败: %v", err)
             }
 
-            // 配置默认值
-            if cfg.Bind == "" {
-              cfg.Bind = "127.0.0.1:7008"
+            // 配置默认值（适配Android）
+            if cfg.Server.ListenUDP4 == "" {
+              cfg.Server.ListenUDP4 = "127.0.0.1:7008"
             }
-            if len(cfg.Upstreams) == 0 {
-              cfg.Upstreams = []string{"223.5.5.5:53"}
+            if cfg.Server.ListenTCP4 == "" {
+              cfg.Server.ListenTCP4 = "127.0.0.1:7008"
             }
-            if cfg.Threads <= 0 {
-              cfg.Threads = 8
+            if len(cfg.Server.Upstreams4) == 0 {
+              cfg.Server.Upstreams4 = []string{"223.5.5.5:53", "119.29.29.29:53", "1.1.1.1:53"}
             }
-            if cfg.UpstreamTimeoutSecs <= 0 {
-              cfg.UpstreamTimeoutSecs = 3
+            if cfg.Server.Timeout == "" {
+              cfg.Server.Timeout = "3s"
             }
-            if cfg.MaxCacheTTLSecs <= 0 {
-              cfg.MaxCacheTTLSecs = 3600
-            }
-            if cfg.CleanupIntervalSecs <= 0 {
-              cfg.CleanupIntervalSecs = 120
-            }
-            client.Timeout = time.Duration(cfg.UpstreamTimeoutSecs) * time.Second
+            timeout, _ = time.ParseDuration(cfg.Server.Timeout)
+            udpClient.Timeout = timeout
+            tcpClient.Timeout = timeout
 
-            // 初始化缓存
-            cache = dnscache.New(dnscache.Options{
-              TTL:       time.Duration(cfg.MaxCacheTTLSecs) * time.Second,
-              Nameservers: cfg.Upstreams,
-            })
-            log.Println("DNS缓存初始化成功")
-            log.Println("监听地址:", cfg.Bind)
-            log.Println("上游DNS:", cfg.Upstreams)
-
-            // 启动DNS服务
-            server := &dns.Server{
-              Addr:     cfg.Bind,
-              Net:      "udp",
-              Handler:  &handler{},
-              ReusePort: true,
+            if cfg.Cache.DefaultTTL <= 0 {
+              cfg.Cache.DefaultTTL = 300
             }
+            if cfg.Cache.MaxTTL <= 0 {
+              cfg.Cache.MaxTTL = 3600
+            }
+
+            // 启动日志
+            log.Println("[dnscacheo] 启动成功")
+            log.Println("[dnscacheo] 监听地址(UDP+TCP):", cfg.Server.ListenUDP4)
+            log.Println("[dnscacheo] 上游DNS:", cfg.Server.Upstreams4)
+            log.Println("[dnscacheo] 默认缓存TTL:", cfg.Cache.DefaultTTL, "秒")
 
             // 启动TCP服务
             go func() {
               tcpServer := &dns.Server{
-                Addr:     cfg.Bind,
-                Net:      "tcp",
-                Handler:  &handler{},
+                Addr:      cfg.Server.ListenTCP4,
+                Net:       "tcp",
+                Handler:   &DNSHandler{},
                 ReusePort: true,
               }
               if err := tcpServer.ListenAndServe(); err != nil {
@@ -215,36 +250,89 @@ jobs:
               }
             }()
 
-            // 启动缓存清理
+            // 启动IPv6服务（如果开启）
+            if cfg.Server.IPv6Enabled && cfg.Server.ListenUDP6 != "" {
+              go func() {
+                udp6Server := &dns.Server{
+                  Addr:      cfg.Server.ListenUDP6,
+                  Net:       "udp",
+                  Handler:   &DNSHandler{},
+                  ReusePort: true,
+                }
+                if err := udp6Server.ListenAndServe(); err != nil {
+                  log.Printf("IPv6 UDP服务启动失败: %v", err)
+                }
+              }()
+              go func() {
+                tcp6Server := &dns.Server{
+                  Addr:      cfg.Server.ListenTCP6,
+                  Net:       "tcp",
+                  Handler:   &DNSHandler{},
+                  ReusePort: true,
+                }
+                if err := tcp6Server.ListenAndServe(); err != nil {
+                  log.Printf("IPv6 TCP服务启动失败: %v", err)
+                }
+              }()
+            }
+
+            // 启动缓存自动清理
             go func() {
-              ticker := time.NewTicker(time.Duration(cfg.CleanupIntervalSecs) * time.Second)
+              ticker := time.NewTicker(2 * time.Minute)
               defer ticker.Stop()
               for range ticker.C {
-                // 缓存自动清理由dnscache-go内部实现
-                stats := cache.Stats()
-                log.Printf("缓存统计 | 条目数: %d | 命中数: %d | 未命中数: %d", stats.Size, stats.Hits, stats.Misses)
+                var count int
+                cache.Range(func(key, value interface{}) bool {
+                  entry := value.(CacheEntry)
+                  if time.Now().After(entry.ExpireTime) {
+                    cache.Delete(key)
+                    count++
+                  }
+                  return true
+                })
+                if count > 0 {
+                  log.Printf("[dnscacheo] 清理过期缓存条目: %d", count)
+                }
               }
             }()
 
             // 启动UDP主服务
-            if err := server.ListenAndServe(); err != nil {
+            udpServer := &dns.Server{
+              Addr:      cfg.Server.ListenUDP4,
+              Net:       "udp",
+              Handler:   &DNSHandler{},
+              ReusePort: true,
+            }
+            if err := udpServer.ListenAndServe(); err != nil {
               log.Fatalf("UDP服务启动失败: %v", err)
             }
           }
           EOF
 
+          # 生成适配的go.mod
+          cat > go.mod << 'EOF'
+          module dnscacheo-android
+          go 1.22
+          require (
+            github.com/miekg/dns v1.1.58
+            gopkg.in/yaml.v3 v3.0.1
+          )
+          EOF
+
+          # 下载依赖
+          go mod tidy
+
       - name: 交叉编译 Android ARM64 全静态二进制
-        working-directory: ./build
         run: |
-          # 编译，剥离调试符号，最小化体积
-          go build -ldflags "-s -w -extldflags '-static'" -o dnscache-go-android-arm64 main.go
+          # 编译，剥离调试符号，最小化体积，全静态无依赖
+          go build -ldflags "-s -w -extldflags '-static'" -o dnscacheo-android-arm64 ./cmd/server
           # 验证编译结果
-          ls -la dnscache-go-android-arm64
-          file dnscache-go-android-arm64
+          ls -la dnscacheo-android-arm64
+          file dnscacheo-android-arm64
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: dnscache-go-android-arm64
-          path: ./build/dnscache-go-android-arm64
+          name: dnscacheo-android-arm64
+          path: dnscacheo-android-arm64
           retention-days: 90
