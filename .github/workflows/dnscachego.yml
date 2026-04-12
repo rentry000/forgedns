@@ -1,36 +1,250 @@
-name: dnscache-go Android ARM64 Build
+name: dnscache-go Android ARM64 构建
 on:
-  workflow_dispatch:   # 手动一键触发
+  workflow_dispatch: # 手动一键触发
   push:
-    branches: [ master ]
+    branches: [ main, master ]
 
 jobs:
-  build:
+  build-android-arm64:
     runs-on: ubuntu-latest
+    env:
+      GOOS: android
+      GOARCH: arm64
+      CGO_ENABLED: 0
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          repository: efex33/dnscache-go
-          ref: master
+      - name: 初始化构建目录
+        run: mkdir -p build && cd build
 
-      - name: Setup Go
+      - name: 安装 Go 环境
         uses: actions/setup-go@v5
         with:
-          go-version: 1.22
-          cache: true
+          go-version: 1.23
+          cache: false
 
-      - name: Cross compile Android ARM64 static binary
-        env:
-          CGO_ENABLED: 0
-          GOOS: android
-          GOARCH: arm64
+      - name: 生成项目代码与服务端入口
+        working-directory: ./build
         run: |
-          go build -ldflags "-s -w" -o dnscache-go-android-arm64 ./cmd/dnscache
+          # 1. 初始化Go项目
+          go mod init dnscache-go-service
+          go get github.com/efex33/dnscache-go
+          go get github.com/miekg/dns
+          go get github.com/BurntSushi/toml
 
-      - name: Upload artifact
+          # 2. 生成完整服务端main.go（支持配置文件、多上游、缓存）
+          cat > main.go << 'EOF'
+          package main
+
+          import (
+            "flag"
+            "log"
+            "net"
+            "os"
+            "strconv"
+            "sync"
+            "time"
+
+            "github.com/BurntSushi/toml"
+            "github.com/efex33/dnscache-go"
+            "github.com/miekg/dns"
+          )
+
+          // Config 配置文件结构，兼容你之前的使用习惯
+          type Config struct {
+            Bind                  string   `toml:"bind"`
+            Upstreams             []string `toml:"upstreams"`
+            Threads               int      `toml:"threads"`
+            UpstreamTimeoutSecs   int      `toml:"upstream_timeout_secs"`
+            MaxCacheTTLSecs       int      `toml:"max_cache_ttl_secs"`
+            CleanupIntervalSecs   int      `toml:"cleanup_interval_secs"`
+          }
+
+          var (
+            configPath string
+            cache      *dnscache.Cache
+            cfg        Config
+            client     = &dns.Client{
+              Net:     "udp",
+              Timeout: 3 * time.Second,
+            }
+          )
+
+          func init() {
+            flag.StringVar(&configPath, "config", "dnscache.toml", "配置文件路径")
+          }
+
+          // 处理DNS请求
+          type handler struct{}
+          func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+            msg := new(dns.Msg)
+            msg.SetReply(r)
+            msg.Authoritative = false
+
+            if len(r.Question) == 0 {
+              _ = w.WriteMsg(msg)
+              return
+            }
+
+            q := r.Question[0]
+            domain := q.Name
+
+            // 优先查缓存
+            if ips, ok := cache.Get(domain); ok {
+              rr := make([]dns.RR, 0, len(ips))
+              for _, ip := range ips {
+                if q.Qtype == dns.TypeA {
+                  rr = append(rr, &dns.A{
+                    Hdr: dns.RR_Header{Name: domain, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+                    A:   net.ParseIP(ip).To4(),
+                  })
+                } else if q.Qtype == dns.TypeAAAA {
+                  rr = append(rr, &dns.AAAA{
+                    Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 300},
+                    AAAA: net.ParseIP(ip).To16(),
+                  })
+                }
+              }
+              msg.Answer = rr
+              _ = w.WriteMsg(msg)
+              return
+            }
+
+            // 多上游并发查询，取最快有效结果
+            var wg sync.WaitGroup
+            var result *dns.Msg
+            var once sync.Once
+
+            for _, upstream := range cfg.Upstreams {
+              wg.Add(1)
+              go func(upstream string) {
+                defer wg.Done()
+                resp, _, err := client.Exchange(r, upstream)
+                if err != nil || resp.Rcode != dns.RcodeSuccess {
+                  return
+                }
+                once.Do(func() {
+                  result = resp
+                })
+              }(upstream)
+            }
+            wg.Wait()
+
+            if result == nil {
+              msg.Rcode = dns.RcodeServerFailure
+              _ = w.WriteMsg(msg)
+              return
+            }
+
+            // 提取IP存入缓存
+            ips := make([]string, 0)
+            for _, ans := range result.Answer {
+              switch rr := ans.(type) {
+              case *dns.A:
+                ips = append(ips, rr.A.String())
+              case *dns.AAAA:
+                ips = append(ips, rr.AAAA.String())
+              }
+            }
+            if len(ips) > 0 {
+              cache.Set(domain, ips)
+            }
+
+            _ = w.WriteMsg(result)
+          }
+
+          func main() {
+            flag.Parse()
+
+            // 加载配置文件
+            log.Println("加载配置文件:", configPath)
+            data, err := os.ReadFile(configPath)
+            if err != nil {
+              log.Fatalf("读取配置文件失败: %v", err)
+            }
+            if _, err := toml.Decode(string(data), &cfg); err != nil {
+              log.Fatalf("解析配置文件失败: %v", err)
+            }
+
+            // 配置默认值
+            if cfg.Bind == "" {
+              cfg.Bind = "127.0.0.1:7008"
+            }
+            if len(cfg.Upstreams) == 0 {
+              cfg.Upstreams = []string{"223.5.5.5:53"}
+            }
+            if cfg.Threads <= 0 {
+              cfg.Threads = 8
+            }
+            if cfg.UpstreamTimeoutSecs <= 0 {
+              cfg.UpstreamTimeoutSecs = 3
+            }
+            if cfg.MaxCacheTTLSecs <= 0 {
+              cfg.MaxCacheTTLSecs = 3600
+            }
+            if cfg.CleanupIntervalSecs <= 0 {
+              cfg.CleanupIntervalSecs = 120
+            }
+            client.Timeout = time.Duration(cfg.UpstreamTimeoutSecs) * time.Second
+
+            // 初始化缓存
+            cache = dnscache.New(dnscache.Options{
+              TTL:       time.Duration(cfg.MaxCacheTTLSecs) * time.Second,
+              Nameservers: cfg.Upstreams,
+            })
+            log.Println("DNS缓存初始化成功")
+            log.Println("监听地址:", cfg.Bind)
+            log.Println("上游DNS:", cfg.Upstreams)
+
+            // 启动DNS服务
+            server := &dns.Server{
+              Addr:     cfg.Bind,
+              Net:      "udp",
+              Handler:  &handler{},
+              ReusePort: true,
+            }
+
+            // 启动TCP服务
+            go func() {
+              tcpServer := &dns.Server{
+                Addr:     cfg.Bind,
+                Net:      "tcp",
+                Handler:  &handler{},
+                ReusePort: true,
+              }
+              if err := tcpServer.ListenAndServe(); err != nil {
+                log.Fatalf("TCP服务启动失败: %v", err)
+              }
+            }()
+
+            // 启动缓存清理
+            go func() {
+              ticker := time.NewTicker(time.Duration(cfg.CleanupIntervalSecs) * time.Second)
+              defer ticker.Stop()
+              for range ticker.C {
+                // 缓存自动清理由dnscache-go内部实现
+                stats := cache.Stats()
+                log.Printf("缓存统计 | 条目数: %d | 命中数: %d | 未命中数: %d", stats.Size, stats.Hits, stats.Misses)
+              }
+            }()
+
+            // 启动UDP主服务
+            if err := server.ListenAndServe(); err != nil {
+              log.Fatalf("UDP服务启动失败: %v", err)
+            }
+          }
+          EOF
+
+      - name: 交叉编译 Android ARM64 全静态二进制
+        working-directory: ./build
+        run: |
+          # 编译，剥离调试符号，最小化体积
+          go build -ldflags "-s -w -extldflags '-static'" -o dnscache-go-android-arm64 main.go
+          # 验证编译结果
+          ls -la dnscache-go-android-arm64
+          file dnscache-go-android-arm64
+
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: dnscache-go-android-arm64
-          path: dnscache-go-android-arm64
+          path: ./build/dnscache-go-android-arm64
           retention-days: 90
