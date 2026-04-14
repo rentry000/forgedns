@@ -41,18 +41,20 @@ jobs:
           npm install --force --no-audit
           # 5. 兜底优化vite配置，用内置esbuild压缩，彻底绕开terser依赖问题
           if [ -f "vite.config.js" ]; then
-            sed -i '/defineConfig(/a \  build: { minify: "esbuild" },' vite.config.js
+            # 适配ESM格式的vite配置，正确插入build配置
+            sed -i 's/export default defineConfig({/export default defineConfig({\n  build: { minify: "esbuild" },/' vite.config.js
             echo "✅ vite配置优化完成，构建兼容性提升"
+            cat vite.config.js
           fi
           # 校验依赖安装结果
           echo "=== 依赖安装完成，核心模块版本 ==="
           npm list vite @vitejs/plugin-vue vue express better-sqlite3
 
-      - name: 5. 构建前端静态文件（生成dist目录）
+      - name: 5. 构建前端静态文件（生成dist目录，已修复参数错误）
         working-directory: ./MiSub
         run: |
-          # 生产环境构建，强制跳过非致命警告
-          npm run build -- --mode production --emptyOutDir --force
+          # 生产环境构建，--logLevel warn 只打印警告和错误，过滤非致命日志
+          npm run build -- --mode production --emptyOutDir --logLevel warn
           # 校验构建结果
           echo "=== 前端构建结果校验 ==="
           if [ -d "./dist" ] && [ -f "./dist/index.html" ]; then
@@ -345,7 +347,7 @@ jobs:
           # 开始安装
           ui_print "*******************************"
           ui_print "MiSub 订阅转换 Magisk 模块"
-          ui_print "版本: $(grep 'version=' $MODDIR/module.prop | cut -d'=' -f2)"
+          ui_print "版本: $(grep 'version=' $MODDIR/module.prop | cut -d'=' -f2 2>/dev/null || echo "latest")"
           ui_print "*******************************"
           
           # 创建模块目录
