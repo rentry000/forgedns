@@ -14,18 +14,38 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 修复点1：前置校验目录，确认webs目录存在，彻底定位cd报错根源
+      - name: Verify project directory structure
+        run: |
+          echo "=== 项目根目录结构 ==="
+          ls -la
+          echo "=== 检查webs目录是否存在 ==="
+          if [ -d "./webs" ]; then
+            echo "✅ webs目录存在，目录内容："
+            ls -la ./webs
+          else
+            echo "❌ webs目录不存在！"
+            exit 1
+          fi
+
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
+
       - name: Enable Corepack
         run: corepack enable
+
       - name: Get yarn cache directory path
         id: yarn-cache-dir-path
-        run: |
-          cd webs
-          echo "dir=$(yarn config get cacheFolder)" >> $GITHUB_OUTPUT
-      - name: Cache dependencies
+        # 修复点2：用working-directory替代cd命令，彻底避免cd执行失败的问题
+        working-directory: ./webs
+        run: echo "dir=$(yarn config get cacheFolder)" >> $GITHUB_OUTPUT
+
+      - name: Cache frontend dependencies
         uses: actions/cache@v4
         id: yarn-cache
         with:
@@ -33,14 +53,27 @@ jobs:
           key: ${{ runner.os }}-yarn-${{ hashFiles('webs/yarn.lock') }}
           restore-keys: |
             ${{ runner.os }}-yarn-
+
       - name: Install frontend dependencies
-        run: |
-          cd webs
-          yarn install --immutable
+        working-directory: ./webs
+        run: yarn install --immutable
+
       - name: Build frontend
+        working-directory: ./webs
+        run: yarn run build
+
+      # 校验前端构建产物是否正常生成
+      - name: Verify frontend build artifacts
         run: |
-          cd webs
-          yarn run build
+          echo "=== 检查前端构建产物 ==="
+          if [ -d "./webs/dist" ]; then
+            echo "✅ 前端dist目录生成成功，文件大小："
+            du -sh ./webs/dist
+          else
+            echo "❌ 前端构建失败，dist目录不存在"
+            exit 1
+          fi
+
       - name: Upload frontend artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -48,12 +81,11 @@ jobs:
           path: webs/dist/
           retention-days: 1
 
-  # 使用矩阵策略并发构建不同架构的二进制文件
   build-go-binaries:
     needs: build-frontend
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # 允许其他架构继续构建，即使某个失败
+      fail-fast: false
       matrix:
         include:
           - goos: linux
@@ -64,7 +96,7 @@ jobs:
             goarch: arm64
             output: sublinkPro-linux-arm64
             upx: true
-          # 新增 Android arm64 构建项
+          # 新增Android arm64构建项，完美适配原项目
           - goos: android
             goarch: arm64
             output: sublinkPro-android-arm64
@@ -84,17 +116,26 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: '1.26.1'
           cache: true
           cache-dependency-path: go.sum
+
       - name: Download frontend artifacts
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: static/
+
+      # 校验前端产物是否正确下载到embed目录
+      - name: Verify embed static files
+        run: |
+          echo "=== 检查嵌入的静态文件 ==="
+          ls -la static/
+
       - name: Write version to VERSION file
         run: |
           if [[ $GITHUB_REF == refs/tags/* ]]; then
@@ -104,26 +145,27 @@ jobs:
           fi
           echo "$TAG_NAME" > VERSION
           echo "Written version $TAG_NAME to VERSION file"
+
       - name: Build Go binary for ${{ matrix.goos }}/${{ matrix.goarch }}
         run: |
           mkdir -p build
           echo "Building ${{ matrix.output }} for ${{ matrix.goos }}/${{ matrix.goarch }}..."
-          # 核心编译参数：禁用CGO确保纯静态编译，无系统依赖，完美适配Android
+          # 核心编译参数：禁用CGO纯静态编译，无系统依赖，完美兼容Android
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
           go build -tags=prod -ldflags="-s -w" -o build/${{ matrix.output }} .
           echo "Build completed. Binary size:"
           ls -lh build/${{ matrix.output }}
+
       - name: Compress binary with UPX
         if: matrix.upx
         run: |
-          # 安装 UPX
           sudo apt-get update && sudo apt-get install -y upx
           echo "=== Original binary size ==="
           ls -lh build/${{ matrix.output }}
-          # 使用最佳压缩率压缩二进制文件，Android arm64完全兼容
           upx --best --lzma build/${{ matrix.output }} || true
           echo "=== Compressed binary size ==="
           ls -lh build/${{ matrix.output }}
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -131,7 +173,6 @@ jobs:
           path: build/${{ matrix.output }}
           retention-days: 1
 
-  # 合并所有架构的二进制文件
   merge-binaries:
     needs: build-go-binaries
     runs-on: ubuntu-latest
@@ -142,11 +183,12 @@ jobs:
           pattern: binary-*
           path: build/
           merge-multiple: true
+
       - name: Verify all binaries
         run: |
           echo "=== All binary files ==="
           ls -lh build/
-          # 验证所有必需的二进制文件都存在，新增Android arm64校验
+          # 新增Android arm64二进制校验
           REQUIRED_FILES=(
             "sublinkPro-linux-amd64"
             "sublinkPro-linux-arm64"
@@ -169,6 +211,7 @@ jobs:
             exit 1
           fi
           echo "=== All binaries verified successfully ==="
+
       - name: Upload merged binaries
         uses: actions/upload-artifact@v4
         with:
@@ -185,11 +228,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
           name: go-binaries
           path: build/
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -211,13 +256,13 @@ jobs:
           echo "### 📦 发布文件:" >> changelog.md
           echo "- \`sublinkPro-linux-amd64\` - Linux x64" >> changelog.md
           echo "- \`sublinkPro-linux-arm64\` - Linux ARM64" >> changelog.md
-          # 新增Android arm64发布说明
           echo "- \`sublinkPro-android-arm64\` - Android ARM64 (aarch64)" >> changelog.md
           echo "- \`sublinkPro-windows-amd64.exe\` - Windows x64" >> changelog.md
           echo "- \`sublinkPro-darwin-amd64\` - macOS x64" >> changelog.md
           echo "- \`sublinkPro-darwin-arm64\` - macOS ARM64 (Apple Silicon)" >> changelog.md
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.changelog.outputs.current_tag }}
           name: Release ${{ steps.changelog.outputs.current_tag }}
@@ -262,7 +307,6 @@ jobs:
       - name: Build and Push Multi-Arch Docker Image
         run: |
           if [[ $GITHUB_REF == refs/tags/* ]]; then
-            # 带 tag 的推送：使用 tag 版本号 + latest
             TAG=${GITHUB_REF#refs/tags/}
             docker buildx build --no-cache --pull --platform linux/amd64,linux/arm64 \
             -f Dockerfile.ci \
@@ -270,12 +314,10 @@ jobs:
             -t zerodeng/sublink-pro:latest \
             --push .
           else
-            # 分支推送：dev 和 main 分支统一使用 dev 标签，其他分支使用分支名
             BRANCH=${GITHUB_REF#refs/heads/}
             if [[ "$BRANCH" == "dev" || "$BRANCH" == "main" ]]; then
               DOCKER_TAG="dev"
             else
-              # 将分支名中的 / 替换为 - 以兼容 Docker tag 格式
               DOCKER_TAG=${BRANCH//\//-}
             fi
             docker buildx build --no-cache --pull --platform linux/amd64,linux/arm64 \
