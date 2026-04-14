@@ -4,7 +4,7 @@ on:
     tags:
       - 'v*'
     branches: [ "main" ]
-  workflow_dispatch: # 支持手动点击触发构建
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
@@ -14,13 +14,13 @@ jobs:
       - name: 初始化环境
         run: |
           sudo apt-get update
-          sudo apt-get install -y git tree
+          sudo apt-get install -y git tree jq
 
-      # 【修复点1】移除cache配置，避免根目录锁文件检测报错
-      - name: 安装 Node.js 环境（LTS稳定版，兼容pkg打包）
+      # 【核心修复】升级到Node.js 20 LTS，完美兼容新版Vite的crypto.hash API
+      - name: 安装 Node.js 20 LTS 稳定版
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: 克隆官方 MiSub 完整仓库
         run: |
@@ -29,7 +29,6 @@ jobs:
           echo "=== 项目目录结构 ==="
           ls -la
 
-      # 【修复点2】新增子目录专属npm缓存，加速重复构建
       - name: 配置npm依赖缓存
         uses: actions/cache@v4
         id: npm-cache
@@ -41,24 +40,32 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-misub-npm-
 
-      - name: 安装项目依赖并构建前端静态文件
+      - name: 安装项目依赖并修复构建兼容性
         working-directory: ./MiSub
         run: |
-          # 安装项目基础依赖
-          npm install
-          # 构建Vue前端，生成dist静态目录
-          npm run build
-          # 校验前端构建结果
+          # 安装项目基础依赖，跳过审计警告，避免干扰
+          npm install --no-audit
+          # 【兜底修复】强制锁定Vue插件版本，彻底避免API兼容问题
+          npm install @vitejs/plugin-vue@5.2.1 --save-dev --no-audit
+          echo "=== 依赖安装完成，核心依赖版本 ==="
+          npm list vite @vitejs/plugin-vue
+
+      - name: 构建前端静态文件
+        working-directory: ./MiSub
+        run: |
+          # 执行构建，开启详细日志，方便定位问题
+          npm run build -- --mode production
+          # 校验构建结果
           echo "=== 前端构建结果校验 ==="
-          if [ -d "./dist" ]; then
-            echo "✅ 前端dist目录构建成功"
+          if [ -d "./dist" ] && [ -f "./dist/index.html" ]; then
+            echo "✅ 前端dist目录构建成功，文件结构："
             tree -L 2 ./dist
           else
-            echo "❌ 前端构建失败，dist目录不存在"
+            echo "❌ 前端构建失败，dist目录或index.html不存在"
             exit 1
           fi
 
-      - name: 写入本地服务适配入口 app.js（核心适配层）
+      - name: 写入本地服务适配入口 app.js
         working-directory: ./MiSub
         run: |
           cat > app.js << 'EOF'
@@ -71,9 +78,8 @@ jobs:
           const PORT = process.env.PORT || 3000;
           const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'misub.db');
 
-          // ========== 1. 初始化本地SQLite数据库（替代Cloudflare D1/KV） ==========
+          // ========== 1. 初始化本地SQLite数据库 ==========
           const db = new Database(DB_PATH);
-          // 执行原项目的表结构初始化
           try {
             const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
             db.exec(schemaSql);
@@ -81,7 +87,6 @@ jobs:
           } catch (err) {
             console.warn("⚠️ 表结构已存在，跳过初始化", err.message);
           }
-          // 补充KV存储表（兼容原项目KV逻辑）
           try {
             db.exec(`
             CREATE TABLE IF NOT EXISTS kv (
@@ -94,19 +99,17 @@ jobs:
             console.warn("⚠️ KV表已存在，跳过初始化", err.message);
           }
 
-          // ========== 2. 基础中间件配置 ==========
+          // ========== 2. 基础中间件 ==========
           app.use(express.json({ limit: '50mb' }));
           app.use(express.urlencoded({ extended: true }));
 
-          // ========== 3. 模拟Cloudflare Workers运行时，全量适配原项目API ==========
-          // Workers Response 转 Express 响应工具
+          // ========== 3. Cloudflare Workers运行时适配 ==========
           function sendResponse(res, workerResponse) {
             res.status(workerResponse.status);
             workerResponse.headers.forEach((value, key) => res.setHeader(key, value));
             workerResponse.body?.pipe(res) || res.send(workerResponse.body);
           }
 
-          // 模拟Cloudflare Context请求上下文
           function createContext(req, res) {
             const url = new URL(req.url, `http://${req.headers.host}`);
             return {
@@ -117,7 +120,6 @@ jobs:
                 duplex: 'half'
               }),
               env: {
-                // 替换D1数据库为本地SQLite
                 MISUB_DB: {
                   prepare: (sql) => {
                     const stmt = db.prepare(sql);
@@ -129,13 +131,11 @@ jobs:
                   },
                   exec: (sql) => db.exec(sql)
                 },
-                // 替换KV存储为本地SQLite表
                 MISUB_KV: {
                   get: (key) => db.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value,
                   put: (key, value) => db.prepare('REPLACE INTO kv (key, value) VALUES (?, ?)').run(key, value),
                   delete: (key) => db.prepare('DELETE FROM kv WHERE key = ?').run(key),
                 },
-                // 环境变量兼容，支持自定义
                 ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin123',
                 COOKIE_SECRET: process.env.COOKIE_SECRET || 'misub-auto-build-random-secret-64bit-2024',
               },
@@ -145,11 +145,10 @@ jobs:
             };
           }
 
-          // 动态加载原项目所有Functions路由，100%兼容原API
+          // 动态加载原项目所有API路由
           const functionsPath = path.join(__dirname, 'functions');
           app.all('*', async (req, res, next) => {
             const reqPath = req.path;
-            // 优先匹配API路由
             let targetFile = '';
             if (reqPath.startsWith('/api')) {
               const apiPath = reqPath.slice(4);
@@ -159,10 +158,8 @@ jobs:
               else if (fs.existsSync(indexFile)) targetFile = indexFile;
             }
 
-            // 匹配到原项目Functions处理器，执行对应逻辑
             if (targetFile && fs.existsSync(targetFile)) {
               try {
-                // 清除模块缓存，确保热加载
                 delete require.cache[require.resolve(targetFile)];
                 const handler = require(targetFile);
                 if (handler?.onRequest) {
@@ -176,20 +173,19 @@ jobs:
               }
             }
 
-            // 非API路由，走静态文件兜底
             next();
           });
 
-          // ========== 4. 托管前端静态文件 ==========
+          // ========== 4. 静态文件托管 ==========
           app.use(express.static(path.join(__dirname, 'dist')));
 
-          // ========== 5. Vue SPA单页应用路由兜底 ==========
+          // ========== 5. SPA路由兜底 ==========
           app.get('*', (req, res) => {
             const indexPath = path.join(__dirname, 'dist', 'index.html');
             if (fs.existsSync(indexPath)) {
               res.sendFile(indexPath);
             } else {
-              res.status(404).send('前端文件未找到，请检查构建是否成功');
+              res.status(404).send('前端文件未找到');
             }
           });
 
@@ -208,13 +204,13 @@ jobs:
         working-directory: ./MiSub
         run: |
           # 安装服务依赖和打包工具
-          npm install express better-sqlite3
+          npm install express better-sqlite3 --no-audit
           npm install -g pkg
-          # 修改package.json，添加pkg打包配置（解决原生模块打包问题）
+          # 配置pkg打包，同步更新为node20目标
           cat > package.tmp.json << EOF
           {
             "name": "misub",
-            "version": "1.0.0",
+            "version": "$(cat package.json | jq -r '.version')",
             "main": "app.js",
             "scripts": {
               "dev": "vite",
@@ -232,34 +228,32 @@ jobs:
                 "node_modules/better-sqlite3/lib/binding/**/*.node"
               ],
               "targets": [
-                "node18-linux-x64",
-                "node18-linux-arm64",
-                "node18-win-x64",
-                "node18-macos-x64",
-                "node18-macos-arm64"
+                "node20-linux-x64",
+                "node20-linux-arm64",
+                "node20-win-x64",
+                "node20-macos-x64",
+                "node20-macos-arm64"
               ],
               "outputPath": "build"
             }
           }
           EOF
           mv package.tmp.json package.json
-          echo "=== 最终package.json配置 ==="
+          echo "=== pkg打包配置 ==="
           cat package.json | jq '.pkg'
 
-      - name: 打包全平台单二进制文件（含Android arm64）
+      - name: 打包全平台单二进制文件
         working-directory: ./MiSub
         run: |
-          # 创建构建产物目录
           mkdir -p build
-          # 执行pkg打包
-          pkg .
+          # 执行打包，添加--debug方便排查问题
+          pkg . --debug
           echo "=== 打包完成，产物列表 ==="
           ls -lh build/
 
-      - name: 校验核心二进制文件
+      - name: 校验二进制文件并重命名Android版本
         working-directory: ./MiSub
         run: |
-          # 校验必须的二进制文件是否生成
           REQUIRED_FILES=(
             "misub-linux-x64"
             "misub-linux-arm64"
@@ -277,26 +271,25 @@ jobs:
             fi
           done
           if [ $MISSING -eq 1 ]; then
-            echo "❌ 构建失败，存在缺失的二进制文件"
+            echo "❌ 构建失败"
             exit 1
           fi
-          # 重命名Android专用二进制，方便识别
+          # 重命名Android专用二进制
           mv build/misub-linux-arm64 build/misub-android-arm64
           echo "✅ Android arm64 二进制重命名完成"
           ls -lh build/
 
-      - name: 上传构建产物到Artifacts
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: misub-all-platform-binaries
           path: ./MiSub/build/
           retention-days: 30
 
-      - name: 发布到GitHub Release（打tag触发）
+      - name: 生成Release更新日志
         if: startsWith(github.ref, 'refs/tags/')
         working-directory: ./MiSub
         run: |
-          # 生成更新日志
           echo "## MiSub 全平台二进制发布" > changelog.md
           echo "" >> changelog.md
           echo "### 📦 发布文件说明" >> changelog.md
@@ -309,10 +302,8 @@ jobs:
           echo "### 默认登录信息" >> changelog.md
           echo "- 访问地址: http://设备IP:3000" >> changelog.md
           echo "- 默认管理员密码: \`admin123\`" >> changelog.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 创建Release并上传文件
+      - name: 发布到GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
