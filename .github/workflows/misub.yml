@@ -16,11 +16,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git tree
 
+      # 【修复点1】移除cache配置，避免根目录锁文件检测报错
       - name: 安装 Node.js 环境（LTS稳定版，兼容pkg打包）
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
 
       - name: 克隆官方 MiSub 完整仓库
         run: |
@@ -28,6 +28,18 @@ jobs:
           cd MiSub
           echo "=== 项目目录结构 ==="
           ls -la
+
+      # 【修复点2】新增子目录专属npm缓存，加速重复构建
+      - name: 配置npm依赖缓存
+        uses: actions/cache@v4
+        id: npm-cache
+        with:
+          path: |
+            ./MiSub/node_modules
+            ~/.npm
+          key: ${{ runner.os }}-misub-npm-${{ hashFiles('MiSub/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-misub-npm-
 
       - name: 安装项目依赖并构建前端静态文件
         working-directory: ./MiSub
