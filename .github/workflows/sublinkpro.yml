@@ -1,15 +1,15 @@
-name: Build SublinkPro Android arm64 Binary
+name: Build SublinkPro Android arm64 Binary (Full Web UI)
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: # 支持手动触发
+  workflow_dispatch: # 支持手动点击触发
 permissions:
   contents: write
 jobs:
   build-sublinkpro-android:
     runs-on: ubuntu-latest
     steps:
-      - name: 初始化环境
+      - name: 初始化系统环境
         run: |
           sudo apt-get update
           sudo apt-get install -y upx git
@@ -22,52 +22,72 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.1'
+          cache: false
 
-      - name: 【核心】克隆官方完整sublinkPro仓库（含完整webs目录）
+      - name: 克隆官方完整sublinkPro仓库
         run: |
           git clone --depth=1 https://github.com/ZeroDeng01/sublinkPro.git
           cd sublinkPro
-          echo "=== 完整项目目录结构 ==="
+          echo "=== 完整项目根目录 ==="
           ls -la
           echo "=== 确认webs目录存在 ==="
           ls -la webs/
 
-      - name: 构建前端项目
+      - name: 安装前端依赖并构建
         working-directory: ./sublinkPro/webs
         run: |
           yarn install --immutable
           yarn run build
-          echo "=== 前端构建完成，dist目录 ==="
+          echo "=== 前端构建完成，dist目录内容 ==="
           ls -la dist/
+
+      # 【核心修复点】把前端产物复制到Go embed要求的static目录
+      - name: 准备Go嵌入的静态文件
+        working-directory: ./sublinkPro
+        run: |
+          # 强制创建static目录
+          mkdir -p static
+          # 把前端dist里的所有文件复制到static目录（必须是dist/*，不是dist）
+          cp -r webs/dist/* static/
+          # 校验静态文件是否正确放入
+          echo "=== static目录内容（Go embed嵌入用） ==="
+          ls -la static/
+          # 校验embed配置文件存在
+          echo "=== 校验embed配置文件 ==="
+          ls -la embed_prod.go embed_dev.go
 
       - name: 注入版本号并构建Android arm64纯静态二进制
         working-directory: ./sublinkPro
         run: |
           # 写入版本号
           echo "$(git rev-parse --short HEAD)" > VERSION
-          # 核心构建Android arm64二进制，禁用CGO纯静态编译，无系统依赖
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -tags=prod -ldflags="-s -w" -o sublinkPro-android-arm64 .
+          # 核心编译：prod标签启用embed，禁用CGO纯静态编译，完美兼容Android
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+          go build -tags=prod -ldflags="-s -w" -o sublinkPro-android-arm64 .
           # UPX压缩减小体积
           upx --best --lzma sublinkPro-android-arm64 || true
-          echo "=== Android二进制构建完成 ==="
+          echo "=== Android二进制构建完成，文件信息 ==="
           ls -lh sublinkPro-android-arm64
+          file sublinkPro-android-arm64
 
       - name: 上传Android二进制产物
         uses: actions/upload-artifact@v4
         with:
-          name: sublinkPro-android-arm64
+          name: sublinkPro-android-arm64-full
           path: ./sublinkPro/sublinkPro-android-arm64
           retention-days: 30
 
-      - name: 自动发布到Release（可选）
+      - name: 自动发布到Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: android-latest
-          name: SublinkPro Android arm64 最新构建
+          name: SublinkPro Android arm64 完整Web版
           files: ./sublinkPro/sublinkPro-android-arm64
           body: |
-            自动构建的 SublinkPro Android arm64 二进制文件
-            适配：Android 7.0+ arm64(aarch64) 设备
-            支持：Termux、Magisk模块、adb shell、root环境运行
+            自动构建的 SublinkPro Android arm64 完整二进制文件
+            ✅ 完整保留Web管理界面
+            ✅ 纯静态无系统依赖，Android 7.0+ 通用
+            ✅ 支持Termux、Magisk模块、adb shell、root环境运行
+            默认账号：admin / 123456
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
