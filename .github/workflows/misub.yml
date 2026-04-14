@@ -16,7 +16,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git tree jq
 
-      # 【核心修复】升级到Node.js 20 LTS，完美兼容新版Vite的crypto.hash API
       - name: 安装 Node.js 20 LTS 稳定版
         uses: actions/setup-node@v4
         with:
@@ -40,20 +39,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-misub-npm-
 
-      - name: 安装项目依赖并修复构建兼容性
+      # 【核心根治】先修改package.json，锁定兼容的依赖版本，再安装，彻底解决冲突
+      - name: 锁定依赖版本并安装
         working-directory: ./MiSub
         run: |
-          # 安装项目基础依赖，跳过审计警告，避免干扰
+          # 修改package.json，锁定vite和plugin-vue到互相兼容的稳定版本
+          jq '.devDependencies.vite = "^5.4.10" | .devDependencies."@vitejs/plugin-vue" = "^5.2.1"' package.json > package.fixed.json
+          mv package.fixed.json package.json
+          # 一次性安装所有依赖，无任何冲突
           npm install --no-audit
-          # 【兜底修复】强制锁定Vue插件版本，彻底避免API兼容问题
-          npm install @vitejs/plugin-vue@5.2.1 --save-dev --no-audit
           echo "=== 依赖安装完成，核心依赖版本 ==="
           npm list vite @vitejs/plugin-vue
 
       - name: 构建前端静态文件
         working-directory: ./MiSub
         run: |
-          # 执行构建，开启详细日志，方便定位问题
           npm run build -- --mode production
           # 校验构建结果
           echo "=== 前端构建结果校验 ==="
@@ -206,7 +206,7 @@ jobs:
           # 安装服务依赖和打包工具
           npm install express better-sqlite3 --no-audit
           npm install -g pkg
-          # 配置pkg打包，同步更新为node20目标
+          # 配置pkg打包
           cat > package.tmp.json << EOF
           {
             "name": "misub",
@@ -246,7 +246,6 @@ jobs:
         working-directory: ./MiSub
         run: |
           mkdir -p build
-          # 执行打包，添加--debug方便排查问题
           pkg . --debug
           echo "=== 打包完成，产物列表 ==="
           ls -lh build/
