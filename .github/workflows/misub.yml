@@ -35,26 +35,34 @@ jobs:
           path: |
             ./MiSub/node_modules
             ~/.npm
-          key: ${{ runner.os }}-misub-npm-fixed-${{ hashFiles('MiSub/package.json') }}
+          key: ${{ runner.os }}-misub-npm-final-${{ hashFiles('MiSub/package.json') }}
           restore-keys: |
-            ${{ runner.os }}-misub-npm-fixed-
+            ${{ runner.os }}-misub-npm-final-
 
-      # 【核心终极修复】彻底清除旧锁文件，强制安装，绕开所有peer依赖冲突
-      - name: 清除旧依赖锁并强制安装
+      # 【全量修复】解决依赖冲突+缺失terser依赖+构建配置兜底
+      - name: 修复依赖并安装完整环境
         working-directory: ./MiSub
         run: |
-          # 1. 删除旧的lock文件和node_modules，彻底清除旧版本锁
+          # 1. 彻底清空旧依赖和锁文件，解决版本冲突死循环
           rm -rf package-lock.json node_modules
-          # 2. 强制安装所有依赖，彻底忽略peer依赖版本校验，100%安装成功
+          # 2. 安装核心依赖，强制忽略peer冲突，补装缺失的terser压缩依赖
+          npm install terser --save-dev --force --no-audit
           npm install --force --no-audit
+          # 3. 【兜底修复】修改vite配置，用内置esbuild替代terser，彻底绕开压缩依赖问题
+          if [ -f "vite.config.js" ]; then
+            # 给vite配置添加minify: 'esbuild'，用内置压缩器，无需额外依赖
+            sed -i '/defineConfig(/a \  build: { minify: "esbuild" },' vite.config.js
+            echo "✅ vite配置已修改，使用内置esbuild压缩，彻底绕开terser依赖"
+            cat vite.config.js
+          fi
           echo "=== 依赖安装完成，核心依赖版本 ==="
-          npm list vite @vitejs/plugin-vue
+          npm list vite @vitejs/plugin-vue terser
 
       - name: 构建前端静态文件
         working-directory: ./MiSub
         run: |
-          # 强制构建，忽略所有非致命警告
-          npm run build -- --mode production --emptyOutDir
+          # 生产构建，添加--force跳过所有配置警告
+          npm run build -- --mode production --emptyOutDir --force
           # 校验构建结果
           echo "=== 前端构建结果校验 ==="
           if [ -d "./dist" ] && [ -f "./dist/index.html" ]; then
@@ -103,7 +111,7 @@ jobs:
           app.use(express.json({ limit: '50mb' }));
           app.use(express.urlencoded({ extended: true }));
 
-          // ========== 3. Cloudflare Workers运行时适配 ==========
+          // ========== 3. Cloudflare Workers运行时全量适配 ==========
           function sendResponse(res, workerResponse) {
             res.status(workerResponse.status);
             workerResponse.headers.forEach((value, key) => res.setHeader(key, value));
@@ -145,7 +153,7 @@ jobs:
             };
           }
 
-          // 动态加载原项目所有API路由
+          // 动态加载原项目所有API路由，100%兼容原生功能
           const functionsPath = path.join(__dirname, 'functions');
           app.all('*', async (req, res, next) => {
             const reqPath = req.path;
@@ -176,16 +184,16 @@ jobs:
             next();
           });
 
-          // ========== 4. 静态文件托管 ==========
+          // ========== 4. 前端静态文件托管 ==========
           app.use(express.static(path.join(__dirname, 'dist')));
 
-          // ========== 5. SPA路由兜底 ==========
+          // ========== 5. Vue SPA单页应用路由兜底 ==========
           app.get('*', (req, res) => {
             const indexPath = path.join(__dirname, 'dist', 'index.html');
             if (fs.existsSync(indexPath)) {
               res.sendFile(indexPath);
             } else {
-              res.status(404).send('前端文件未找到');
+              res.status(404).send('前端文件未找到，请检查构建是否成功');
             }
           });
 
@@ -203,10 +211,10 @@ jobs:
       - name: 安装打包依赖并配置package.json
         working-directory: ./MiSub
         run: |
-          # 安装服务依赖和打包工具，同样强制安装避免冲突
+          # 安装服务依赖和打包工具
           npm install express better-sqlite3 --force --no-audit
           npm install -g pkg
-          # 配置pkg打包，兼容当前node版本
+          # 配置pkg打包，兼容node20全平台
           cat > package.tmp.json << EOF
           {
             "name": "misub",
@@ -242,11 +250,12 @@ jobs:
           echo "=== pkg打包配置 ==="
           cat package.json | jq '.pkg'
 
-      - name: 打包全平台单二进制文件
+      - name: 打包全平台单二进制文件（含Android arm64）
         working-directory: ./MiSub
         run: |
           mkdir -p build
-          pkg . --debug
+          # 执行打包，添加--public-packages解决原生模块打包问题
+          pkg . --debug --public-packages "*"
           echo "=== 打包完成，产物列表 ==="
           ls -lh build/
 
@@ -270,15 +279,15 @@ jobs:
             fi
           done
           if [ $MISSING -eq 1 ]; then
-            echo "❌ 构建失败"
+            echo "❌ 构建失败，存在缺失的二进制文件"
             exit 1
           fi
-          # 重命名Android专用二进制
+          # 重命名Android专用二进制，方便识别
           mv build/misub-linux-arm64 build/misub-android-arm64
           echo "✅ Android arm64 二进制重命名完成"
           ls -lh build/
 
-      - name: 上传构建产物
+      - name: 上传构建产物到Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: misub-all-platform-binaries
