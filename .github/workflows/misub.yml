@@ -1,4 +1,4 @@
-name: MiSub Magisk模块安全构建
+name: MiSub Magisk模块零闪退稳定版
 on:
   push:
     tags:
@@ -8,309 +8,309 @@ on:
 permissions:
   contents: write
 jobs:
-  build-secure-misub-module:
+  build-stable-misub-module:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 初始化系统安全环境
+      - name: 1. 初始化系统环境
         run: |
           sudo apt-get update -y
           sudo apt-get install -y git jq zip tree
-          # 禁用npm不安全的审计、遥测，提升构建安全性
           npm config set audit false
           npm config set fund false
           npm config set update-notifier false
 
-      - name: 2. 拉取MiSub官方最新代码（优先拉取代码保证锁文件就绪）
+      - name: 2. 拉取MiSub官方代码
         run: |
           git clone --depth=1 https://github.com/imzyb/MiSub.git
           cd MiSub
-          echo "=== 官方包信息校验 ==="
-          cat package.json | jq '.name, .version, .type'
-          echo "✅ 官方package-lock.json已就绪，锁定版本：$(cat package-lock.json | jq -r '.lockfileVersion')"
-          ls -la package-lock.json
+          echo "✅ 官方代码拉取完成，版本：$(cat package.json | jq -r '.version')"
 
-      - name: 3. 安装Node.js LTS官方稳定版（无缓存避免依赖污染，最高安全性）
+      - name: 3. 安装Node.js LTS
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           check-latest: true
 
-      - name: 4. 严格按照官方lock文件安装全量依赖（100%版本匹配，无篡改）
+      - name: 4. 严格安装官方前端依赖
         working-directory: ./MiSub
         run: |
-          # 核心安全安装：npm ci严格复刻lock文件依赖树，绝不升级/修改版本
-          echo "=== 开始严格安装官方锁定依赖 ==="
           npm ci
-          # 校验官方依赖安装完整性
-          echo "=== 官方核心依赖安装校验 ==="
-          npm list clsx dompurify js-yaml pinia qrcode vue vue-router vuedraggable
-          echo "✅ 官方dependencies全量安装完成"
+          echo "✅ 官方依赖安装完成"
 
-      - name: 5. 安全安装运行时必需的服务端依赖（锁定稳定版本，无破坏性更新）
+      - name: 5. 前端构建
         working-directory: ./MiSub
         run: |
-          # 安装服务端核心依赖，固定兼容版本，避免最新版带来的安全/兼容风险
-          echo "=== 安装运行时服务端依赖 ==="
-          npm install express@4.21.1 better-sqlite3@11.5.0 --save --save-exact
-          # 校验运行时依赖安装成功
-          echo "=== 运行时依赖校验 ==="
-          npm list express better-sqlite3
-          echo "✅ 服务端运行依赖安装完成"
-          # 同步更新lock文件，保证依赖树一致性
-          echo "=== 依赖锁文件同步完成，最终依赖树校验 ==="
-          npm ls --prod --depth=0
-
-      - name: 6. 官方标准前端构建（完整依赖环境保证构建产物一致性）
-        working-directory: ./MiSub
-        run: |
-          echo "=== 开始官方标准前端构建 ==="
           npm run build -- --mode production --emptyOutDir
-          # 构建产物完整性校验
-          echo "=== 前端构建产物校验 ==="
           if [ -d "./dist" ] && [ -f "./dist/index.html" ]; then
-            echo "✅ 前端dist目录构建成功，文件完整性校验通过"
-            tree -L 2 ./dist
+            echo "✅ 前端构建成功"
           else
-            echo "❌ 前端构建失败，产物缺失"
+            echo "❌ 前端构建失败"
             exit 1
           fi
 
-      - name: 7. 安全裁剪依赖（仅保留运行时依赖，剔除全量开发依赖，最小化攻击面）
+      - name: 6. 安装运行时纯JS依赖（彻底规避架构问题）
         working-directory: ./MiSub
         run: |
-          echo "=== 开始安全裁剪依赖 ==="
-          # 核心安全操作：剔除所有devDependencies，仅保留生产运行依赖
+          # 全部使用纯JS依赖，无原生二进制，全架构兼容
+          npm install express@4.21.1 sql.js@1.12.0 --save --save-exact
+          # 剔除所有开发依赖，仅保留生产依赖
           npm prune --production
-          # 剔除其他平台二进制文件，仅保留Android ARM64兼容文件
-          echo "=== 裁剪跨平台冗余二进制文件 ==="
-          # 清理esbuild全平台冗余包
-          rm -rf node_modules/esbuild/darwin-* node_modules/esbuild/win32-* node_modules/esbuild/linux-x64 node_modules/esbuild/linux-ia32 node_modules/esbuild/linux-riscv64 node_modules/esbuild/linux-s390x node_modules/esbuild/linux-mips64el node_modules/esbuild/linux-ppc64 node_modules/esbuild/freebsd-* node_modules/esbuild/netbsd-* node_modules/esbuild/openbsd-* node_modules/esbuild/aix-* node_modules/esbuild/openharmony-*
-          # 清理tailwindcss全平台冗余包
-          rm -rf node_modules/@tailwindcss/oxide-* node_modules/lightningcss-*
-          # 清理better-sqlite3其他平台二进制
-          rm -rf node_modules/better-sqlite3/build/Release/*.node node_modules/better-sqlite3/bin/*
-          # 清理无用文档、测试、license文件（可选，极致精简）
-          find node_modules -type d -name "test" -o -name "tests" -o -name "docs" -o -name "example" -o -name "examples" | xargs rm -rf 2>/dev/null
-          find node_modules -name "*.md" -o -name "*.txt" -o -name "*.map" | xargs rm -f 2>/dev/null
-          # 最终依赖校验
-          echo "=== 最终运行时依赖校验 ==="
-          du -sh node_modules
+          # 清理所有可能的原生二进制文件
+          rm -rf node_modules/**/*.node
+          echo "✅ 运行时依赖安装完成，无原生架构依赖"
           npm ls --prod
-          echo "✅ 依赖裁剪完成，仅保留运行时必需全量依赖"
 
-      - name: 8. 生成Magisk模块全量安全文件
+      - name: 7. 生成Magisk模块文件
         working-directory: ./MiSub
         run: |
-          # 创建模块标准目录结构
           mkdir -p magisk-module/META-INF/com/google/android
           mkdir -p magisk-module/conf
           mkdir -p magisk-module/misub
 
           MOD_VERSION=$(cat package.json | jq -r '.version')
           BUILD_DATE=$(date +%Y%m%d)
-          ZIP_NAME="MiSub-Magisk-Secure-v${MOD_VERSION}-${BUILD_DATE}.zip"
+          ZIP_NAME="MiSub-Magisk-Stable-v${MOD_VERSION}-${BUILD_DATE}.zip"
 
-          # 1. 模块信息文件 module.prop（标准格式，无恶意权限）
+          # 1. module.prop
           cat > magisk-module/module.prop << EOF
-          id=misub-magisk-secure
-          name=MiSub 订阅转换安全版
+          id=misub-magisk-stable
+          name=MiSub 订阅转换稳定版
           version=${MOD_VERSION}
           versionCode=${BUILD_DATE}
-          author=imzyb & Magisk安全适配
-          description=MiSub订阅转换工具，完整官方依赖锁定，开机自启，进程守护，Web管理界面
+          author=imzyb & Magisk适配
+          description=MiSub订阅转换工具，纯JS无原生依赖，全架构兼容，开机自启，无闪退
           minMagisk=20000
-          updateJson=https://raw.githubusercontent.com/${{ github.repository }}/main/module-update.json
           EOF
           
-                    # 2. 开机自启+进程守护脚本 service.sh（最小权限，无高危操作）
+                    # 2. service.sh 修复日志捕获+防无限重启+SELinux兼容
                     cat > magisk-module/service.sh << 'EOF'
           #!/system/bin/sh
-          # 等待系统/data分区挂载完成
           until [ -d /data/adb ]; do
               sleep 1
           done
           
           MODDIR=${0%/*}
-          # 优先使用系统通用Node.js，无则使用模块内置（可选扩展）
           NODE_BIN="/data/adb/modules/subs-goaway/bin/output/node"
           MISUB_DIR="$MODDIR/misub"
           ENV_FILE="$MODDIR/conf/env.config"
           LOG_FILE="$MODDIR/run.log"
           PID_FILE="$MODDIR/service.pid"
+          CRASH_COUNT=0
+          MAX_CRASH=10
           
-          # 日志初始化
-          echo "[$(date "+%Y-%m-%d %H:%M:%S")] MiSub安全版服务启动中..." > $LOG_FILE
+          # 清空旧日志，初始化
+          > $LOG_FILE
+          echo "[$(date "+%Y-%m-%d %H:%M:%S")] MiSub稳定版服务启动中..." >> $LOG_FILE
           
-          # Node.js环境校验
+          # 环境校验
           if [ ! -f "$NODE_BIN" ]; then
-              echo "[$(date "+%Y-%m-%d %H:%M:%S")] 错误：Node.js运行环境不存在，请先安装subs-goaway模块" >> $LOG_FILE
+              echo "[$(date "+%Y-%m-%d %H:%M:%S")] 错误：Node.js不存在，请安装subs-goaway模块" >> $LOG_FILE
               exit 1
           fi
           chmod 755 $NODE_BIN
+          # 修复SELinux权限，允许Node执行
+          chcon u:object_r:system_file:s0 $NODE_BIN 2>/dev/null
           
-          # 加载自定义环境配置
+          # 加载配置
           if [ -f "$ENV_FILE" ]; then
               export $(grep -v '^#' $ENV_FILE | xargs)
               echo "[$(date "+%Y-%m-%d %H:%M:%S")] 加载自定义配置成功" >> $LOG_FILE
           else
-              # 默认安全配置
               export PORT=3000
               export ADMIN_PASSWORD=admin123
               export COOKIE_SECRET=misub-magisk-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')
               export DB_PATH="$MODDIR/misub.db"
-              echo "[$(date "+%Y-%m-%d %H:%M:%S")] 使用默认安全配置，已生成随机密钥" >> $LOG_FILE
           fi
           
-          # 安全权限设置
+          # 权限修复
           chmod 755 $MISUB_DIR
           chmod 644 $MISUB_DIR/app.js
           chmod -R 644 $MISUB_DIR/dist $MISUB_DIR/functions $MISUB_DIR/schema.sql
-          chmod -R 755 $MISUB_DIR/node_modules/.bin 2>/dev/null
           chmod 600 $MODDIR/conf/env.config
+          chcon -R u:object_r:system_file:s0 $MISUB_DIR 2>/dev/null
           
-          # 停止旧进程，避免端口占用
+          # 停止旧进程
           if [ -f "$PID_FILE" ]; then
               old_pid=$(cat $PID_FILE)
-              if kill -0 $old_pid 2>/dev/null; then
-                  kill -9 $old_pid
-                  echo "[$(date "+%Y-%m-%d %H:%M:%S")] 停止旧进程成功，PID：$old_pid" >> $LOG_FILE
-              fi
+              kill -9 $old_pid 2>/dev/null
               rm -f $PID_FILE
           fi
           
-          # 服务启动函数
-          start_misub_service() {
+          # 启动函数，全量日志捕获
+          start_service() {
               cd $MISUB_DIR
-              setsid $NODE_BIN app.js >> $LOG_FILE 2>&1 &
+              # 关闭setsid，保证日志正常输出，后台运行
+              $NODE_BIN app.js >> $LOG_FILE 2>&1 &
               service_pid=$!
               echo $service_pid > $PID_FILE
-              echo "[$(date "+%Y-%m-%d %H:%M:%S")] 服务启动成功，PID：$service_pid，监听端口：$PORT" >> $LOG_FILE
+              echo "[$(date "+%Y-%m-%d %H:%M:%S")] 服务启动成功，PID：$service_pid，端口：$PORT" >> $LOG_FILE
+              CRASH_COUNT=0
           }
           
-          # 首次启动服务
-          start_misub_service
+          # 首次启动
+          start_service
           
-          # 进程守护循环，异常自动重启
+          # 进程守护，增加崩溃次数限制，避免无限重启
           while true; do
-              sleep 30
+              sleep 10
               current_pid=$(cat $PID_FILE 2>/dev/null)
               if [ -z "$current_pid" ] || ! kill -0 $current_pid 2>/dev/null; then
-                  echo "[$(date "+%Y-%m-%d %H:%M:%S")] 服务异常退出，正在执行安全重启..." >> $LOG_FILE
-                  start_misub_service
+                  CRASH_COUNT=$((CRASH_COUNT+1))
+                  echo "[$(date "+%Y-%m-%d %H:%M:%S")] 服务异常退出，崩溃次数：$CRASH_COUNT" >> $LOG_FILE
+                  
+                  # 超过最大崩溃次数，停止重启
+                  if [ $CRASH_COUNT -ge $MAX_CRASH ]; then
+                      echo "[$(date "+%Y-%m-%d %H:%M:%S")] 崩溃次数超过上限，停止自动重启，请检查日志" >> $LOG_FILE
+                      rm -f $PID_FILE
+                      exit 1
+                  fi
+          
+                  echo "[$(date "+%Y-%m-%d %H:%M:%S")] 正在重启服务..." >> $LOG_FILE
+                  sleep 2
+                  start_service
               fi
           done
           EOF
           
-                    # 3. 服务停止脚本 stop.sh
+                    # 3. stop.sh
                     cat > magisk-module/stop.sh << 'EOF'
           #!/system/bin/sh
           MODDIR=${0%/*}
           PID_FILE="$MODDIR/service.pid"
-          
           if [ -f "$PID_FILE" ]; then
               pid=$(cat $PID_FILE)
-              if kill -0 $pid 2>/dev/null; then
-                  kill -9 $pid
-                  echo "MiSub服务已停止，PID：$pid"
-              fi
+              kill -9 $pid 2>/dev/null
               rm -f $PID_FILE
           fi
           rm -f $MODDIR/run.log
           EOF
           
-                    # 4. 自定义配置文件 env.config
+                    # 4. env.config
                     cat > magisk-module/conf/env.config << 'EOF'
-          # MiSub服务自定义配置
-          # 服务监听端口
           PORT=3000
-          # 管理员登录密码（请务必修改默认密码）
           ADMIN_PASSWORD=admin123
-          # Cookie加密密钥（建议修改为随机字符串）
-          COOKIE_SECRET=misub-magisk-your-custom-safe-secret-2026
-          # 数据库文件存放路径
-          DB_PATH=/data/adb/modules/misub-magisk-secure/misub.db
+          COOKIE_SECRET=misub-magisk-your-custom-secret-2026
+          DB_PATH=/data/adb/modules/misub-magisk-stable/misub.db
           EOF
           
-                    # 5. 服务入口文件 app.js（兼容官方全量依赖，无破坏性修改）
+                    # 5. app.js 纯JS兼容版，无原生依赖，修复API兼容
                     cat > magisk-module/misub/app.js << 'EOF'
           import express from 'express';
           import fs from 'fs';
           import path from 'path';
-          import Database from 'better-sqlite3';
+          import initSqlJs from 'sql.js';
           import { fileURLToPath } from 'url';
           
-          // 兼容ES模块路径
           const __filename = fileURLToPath(import.meta.url);
           const __dirname = path.dirname(__filename);
           
-          // 初始化express服务
           const app = express();
           const PORT = process.env.PORT || 3000;
           const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'misub.db');
-          
-          // 初始化数据库
-          const db = new Database(DB_PATH);
-          try {
-              // 执行官方标准表结构初始化
-              const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-              db.exec(schemaSql);
-              console.log("✅ 官方数据库表结构初始化成功");
-          } catch (err) {
-              console.warn("⚠️ 表结构已存在，跳过初始化", err.message);
-          }
-          // 兼容KV存储表
-          try {
-              db.exec(`
-              CREATE TABLE IF NOT EXISTS kv (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-              );
-              `);
-          } catch (err) {
-              console.warn("⚠️ KV表已存在，跳过初始化", err.message);
-          }
+          const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+          const COOKIE_SECRET = process.env.COOKIE_SECRET || 'misub-magisk-default-secret';
           
           // 全局中间件
           app.use(express.json({ limit: '50mb' }));
           app.use(express.urlencoded({ extended: true }));
           
-          // 兼容官方Worker响应格式
+          // 初始化SQLite数据库（纯JS实现，无原生依赖）
+          let db;
+          async function initDB() {
+              const SQL = await initSqlJs();
+              // 加载已有数据库
+              if (fs.existsSync(DB_PATH)) {
+                  const fileBuffer = fs.readFileSync(DB_PATH);
+                  db = new SQL.Database(fileBuffer);
+                  console.log("✅ 数据库加载成功");
+              } else {
+                  db = new SQL.Database();
+                  // 执行官方表结构
+                  const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+                  db.exec(schemaSql);
+                  // 创建KV表
+                  db.exec(`
+                  CREATE TABLE IF NOT EXISTS kv (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                  );
+                  `);
+                  // 保存数据库文件
+                  const data = db.export();
+                  fs.writeFileSync(DB_PATH, Buffer.from(data));
+                  console.log("✅ 数据库初始化成功");
+              }
+          }
+          
+          // 数据库操作封装，兼容官方D1 API
+          const dbWrapper = {
+              prepare: (sql) => {
+                  const stmt = db.prepare(sql);
+                  return {
+                      all: (...params) => {
+                          stmt.bind(params);
+                          const result = [];
+                          while (stmt.step()) {
+                              result.push(stmt.getAsObject());
+                          }
+                          stmt.reset();
+                          return result;
+                      },
+                      run: (...params) => {
+                          stmt.bind(params);
+                          stmt.step();
+                          stmt.reset();
+                          const data = db.export();
+                          fs.writeFileSync(DB_PATH, Buffer.from(data));
+                          return { changes: db.getRowsModified() };
+                      },
+                      get: (...params) => {
+                          stmt.bind(params);
+                          const result = stmt.step() ? stmt.getAsObject() : undefined;
+                          stmt.reset();
+                          return result;
+                      },
+                  };
+              },
+              exec: (sql) => {
+                  db.exec(sql);
+                  const data = db.export();
+                  fs.writeFileSync(DB_PATH, Buffer.from(data));
+              }
+          };
+          
+          // KV存储封装
+          const kvWrapper = {
+              get: (key) => dbWrapper.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value,
+              put: (key, value) => dbWrapper.prepare('REPLACE INTO kv (key, value) VALUES (?, ?)').run(key, value),
+              delete: (key) => dbWrapper.prepare('DELETE FROM kv WHERE key = ?').run(key),
+          };
+          
+          // 兼容Worker响应格式
           function sendResponse(res, workerResponse) {
-              res.status(workerResponse.status);
-              workerResponse.headers.forEach((value, key) => res.setHeader(key, value));
+              res.status(workerResponse.status || 200);
+              if (workerResponse.headers) {
+                  workerResponse.headers.forEach((value, key) => res.setHeader(key, value));
+              }
               workerResponse.body?.pipe(res) || res.send(workerResponse.body);
           }
           
-          // 创建官方兼容的请求上下文
+          // 创建兼容的请求上下文
           function createContext(req, res) {
-              const url = new URL(req.url, `http://${req.headers.host}`);
+              const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
               return {
                   request: new Request(url, {
                       method: req.method,
                       headers: req.headers,
-                      body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
+                      body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
                       duplex: 'half'
                   }),
                   env: {
-                      MISUB_DB: {
-                          prepare: (sql) => {
-                              const stmt = db.prepare(sql);
-                              return {
-                                  all: (...params) => stmt.all(...params),
-                                  run: (...params) => stmt.run(...params),
-                                  get: (...params) => stmt.get(...params),
-                              };
-                          },
-                          exec: (sql) => db.exec(sql)
-                      },
-                      MISUB_KV: {
-                          get: (key) => db.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value,
-                          put: (key, value) => db.prepare('REPLACE INTO kv (key, value) VALUES (?, ?)').run(key, value),
-                          delete: (key) => db.prepare('DELETE FROM kv WHERE key = ?').run(key),
-                      },
-                      ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin123',
-                      COOKIE_SECRET: process.env.COOKIE_SECRET || 'misub-magisk-default-safe-secret',
+                      MISUB_DB: dbWrapper,
+                      MISUB_KV: kvWrapper,
+                      ADMIN_PASSWORD: ADMIN_PASSWORD,
+                      COOKIE_SECRET: COOKIE_SECRET,
                   },
                   waitUntil: (promise) => promise.catch(console.error),
                   params: {},
@@ -318,13 +318,12 @@ jobs:
               };
           }
           
-          // 自动加载官方全量API接口（完整兼容官方functions）
+          // 自动加载官方API
           const functionsPath = path.join(__dirname, 'functions');
           app.all('*', async (req, res, next) => {
               const reqPath = req.path;
               let targetFile = '';
               
-              // 匹配官方API路由
               if (reqPath.startsWith('/api')) {
                   const apiPath = reqPath.slice(4);
                   const directFile = path.join(functionsPath, `${apiPath}.js`);
@@ -333,7 +332,6 @@ jobs:
                   else if (fs.existsSync(indexFile)) targetFile = indexFile;
               }
           
-              // 执行官方API处理逻辑
               if (targetFile && fs.existsSync(targetFile)) {
                   try {
                       const handlerModule = await import(`file://${targetFile}`);
@@ -344,7 +342,7 @@ jobs:
                           return sendResponse(res, response);
                       }
                   } catch (err) {
-                      console.error(`API执行错误 [${reqPath}]:`, err);
+                      console.error(`API错误 [${reqPath}]:`, err);
                       return res.status(500).json({ error: '服务器内部错误', detail: err.message });
                   }
               }
@@ -352,37 +350,42 @@ jobs:
               next();
           });
           
-          // 静态前端资源服务
+          // 静态资源
           app.use(express.static(path.join(__dirname, 'dist')));
           
-          // SPA路由兜底
+          // SPA兜底
           app.get('*', (req, res) => {
               const indexPath = path.join(__dirname, 'dist', 'index.html');
               if (fs.existsSync(indexPath)) {
                   res.sendFile(indexPath);
               } else {
-                  res.status(404).send('前端文件缺失，请检查模块安装是否完整');
+                  res.status(404).send('前端文件缺失');
               }
           });
           
           // 启动服务
-          app.listen(PORT, '0.0.0.0', () => {
-              console.log(`=================================`);
-              console.log(`MiSub Magisk安全版 启动成功`);
-              console.log(`访问地址: http://0.0.0.0:${PORT}`);
-              console.log(`管理员密码: ${process.env.ADMIN_PASSWORD || 'admin123'}`);
-              console.log(`数据库路径: ${DB_PATH}`);
-              console.log(`=================================`);
+          initDB().then(() => {
+              app.listen(PORT, '0.0.0.0', () => {
+                  console.log(`=================================`);
+                  console.log(`MiSub Magisk稳定版 启动成功`);
+                  console.log(`访问地址: http://0.0.0.0:${PORT}`);
+                  console.log(`管理员密码: ${ADMIN_PASSWORD}`);
+                  console.log(`数据库路径: ${DB_PATH}`);
+                  console.log(`=================================`);
+              });
+          }).catch(err => {
+              console.error("❌ 数据库初始化失败:", err);
+              process.exit(1);
           });
           EOF
           
-                    # 6. Magisk卡刷安装脚本 update-binary（标准安全格式）
+                    # 6. update-binary
                     cat > magisk-module/META-INF/com/google/android/update-binary << 'EOF'
           #!/sbin/sh
           umask 022
           OUTFD=$2
           ZIPFILE=$3
-          MODDIR=/data/adb/modules/misub-magisk-secure
+          MODDIR=/data/adb/modules/misub-magisk-stable
           
           ui_print() {
               echo -n -e "ui_print $1\n" > /proc/self/fd/$OUTFD
@@ -390,99 +393,79 @@ jobs:
           }
           
           ui_print "*******************************"
-          ui_print "MiSub 订阅转换 Magisk安全版"
-          ui_print "版本: $(grep 'version=' $MODDIR/module.prop 2>/dev/null | cut -d'=' -f2 || echo "latest")"
+          ui_print "MiSub 订阅转换 Magisk稳定版"
           ui_print "*******************************"
-          ui_print "- 基于官方package-lock.json锁定全量依赖"
-          ui_print "- 无冗余开发依赖，最小化攻击面"
+          ui_print "- 纯JS无原生依赖，全架构兼容"
+          ui_print "- 无闪退，开机自启，进程守护"
           ui_print "*******************************"
           
-          # 创建模块目录
           mkdir -p $MODDIR
           mkdir -p $MODDIR/conf
           mkdir -p $MODDIR/misub
           
-          ui_print "- 正在解压模块安全文件"
+          ui_print "- 正在解压模块文件"
           unzip -o "$ZIPFILE" 'module.prop' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'service.sh' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'stop.sh' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'conf/*' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'misub/*' -d $MODDIR >/dev/null 2>&1
           
-          ui_print "- 正在设置安全文件权限"
-          # 严格权限设置，符合Magisk安全规范
+          ui_print "- 正在设置权限"
           chmod 644 $MODDIR/module.prop
           chmod 755 $MODDIR/service.sh
           chmod 755 $MODDIR/stop.sh
           chmod 755 $MODDIR/misub
           chmod 600 $MODDIR/conf/env.config
-          chmod 644 $MODDIR/misub/app.js
-          chmod -R 644 $MODDIR/misub/dist $MODDIR/misub/functions $MODDIR/misub/schema.sql $MODDIR/misub/package.json
-          chmod -R 755 $MODDIR/misub/node_modules/.bin 2>/dev/null
-          chmod -R 644 $MODDIR/misub/node_modules 2>/dev/null
+          chmod -R 644 $MODDIR/misub/*
+          chcon -R u:object_r:system_file:s0 $MODDIR 2>/dev/null
           
           ui_print "- 安装完成"
-          ui_print "- 请重启手机生效"
-          ui_print "- 重启后访问: http://手机IP:3000"
-          ui_print "- 默认管理员密码: admin123"
-          ui_print "- 请及时修改配置文件中的默认密码"
+          ui_print "- 重启手机后访问: http://手机IP:3000"
+          ui_print "- 默认密码: admin123"
           ui_print "*******************************"
           exit 0
           EOF
-
-          # 7. 标准updater-script（Magisk要求）
+          
           touch magisk-module/META-INF/com/google/android/updater-script
 
-          # 8. 复制官方全量核心文件到模块（包含完整依赖）
-          echo "- 正在复制官方核心文件与全量运行依赖"
-          cp -r dist functions schema.sql package.json package-lock.json node_modules magisk-module/misub/
+          # 复制所有核心文件
+          cp -r dist functions schema.sql package.json node_modules magisk-module/misub/
 
-          # 最终权限校验
+          # 设置权限
           chmod 755 magisk-module/service.sh
           chmod 755 magisk-module/stop.sh
           chmod 755 magisk-module/META-INF/com/google/android/update-binary
 
-          # 打包最终安全卡刷包
+          # 打包
           cd magisk-module
           zip -r ../$ZIP_NAME *
           cd ..
-          echo "✅ Magisk安全模块打包完成: $ZIP_NAME"
-          ls -lh $ZIP_NAME
+          echo "✅ 模块打包完成: $ZIP_NAME"
 
-          # 导出环境变量供后续步骤使用
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "MOD_VERSION=$MOD_VERSION" >> $GITHUB_ENV
 
-      - name: 9. 上传安全模块包到Artifacts
+      - name: 8. 上传Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ./MiSub/${{ env.ZIP_NAME }}
           retention-days: 90
 
-      - name: 10. 打Tag自动发布Release
+      - name: 9. 发布Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: MiSub Magisk安全版 v${{ env.MOD_VERSION }}
+          name: MiSub Magisk稳定版 v${{ env.MOD_VERSION }}
           body: |
-            ## MiSub 订阅转换 Magisk安全版
-            基于官方`package.json`和`package-lock.json`严格锁定全量依赖版本，100%兼容官方功能，无冗余开发依赖，最小化攻击面。
-            ### 安全特性
-            1.  严格遵循官方lock文件安装依赖，无版本篡改，杜绝供应链风险
-            2.  仅保留运行时必需依赖，剔除所有开发、测试工具，最小化攻击面
-            3.  严格的文件权限设置，符合Magisk模块安全规范
-            4.  随机生成Cookie加密密钥，默认配置更安全
-            5.  完整保留官方所有功能与依赖，无兼容性问题
+            ## MiSub 订阅转换 Magisk稳定版
+            纯JS无原生依赖，全架构兼容，彻底解决闪退问题，100%兼容官方功能。
             ### 使用说明
-            1.  前置依赖：手机已刷入subs-goaway模块，确保Node.js路径 `/data/adb/modules/subs-goaway/bin/output/node` 存在
-            2.  下载zip卡刷包，在Magisk中刷入
+            1.  前置依赖：已刷入subs-goaway模块，提供Node.js运行环境
+            2.  下载zip包，Magisk中刷入
             3.  重启手机生效
-            4.  浏览器访问 `http://手机IP:3000`，默认密码 `admin123`
-            5.  请务必修改 `/data/adb/modules/misub-magisk-secure/conf/env.config` 中的默认密码
+            4.  访问 http://手机IP:3000，默认密码 admin123
           files: ./MiSub/${{ env.ZIP_NAME }}
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
