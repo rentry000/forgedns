@@ -20,37 +20,37 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm' # 缓存npm依赖，加速后续构建
 
-      - name: 3. 拉取 MiSub 官方最新完整代码
+      - name: 3. 拉取 MiSub 官方最新完整代码（含package-lock.json）
         run: |
           git clone --depth=1 https://github.com/imzyb/MiSub.git
           cd MiSub
-          echo "=== 代码拉取完成，项目package.json信息 ==="
+          echo "=== 代码拉取完成，项目核心信息 ==="
           cat package.json | jq '.name, .version, .type'
+          echo "package-lock.json 已存在，将严格按照锁版本安装依赖"
 
-      - name: 4. 全量安装项目依赖（含构建+运行时必需模块）
+      - name: 4. 严格按照package-lock.json安装全量依赖
         working-directory: ./MiSub
         run: |
-          # 1. 清空旧锁文件和缓存，彻底解决依赖冲突
+          # 1. 清空旧文件，保证纯净环境
           rm -rf package-lock.json node_modules
-          # 2. 补装构建必需的terser（vite生产构建压缩依赖）
-          npm install terser --save-dev --force --no-audit
-          # 3. 补装运行时核心依赖（Express服务+SQLite数据库）
-          npm install express better-sqlite3 --force --no-audit
-          # 4. 全量安装package.json里所有依赖（dependencies+devDependencies）
-          npm install --force --no-audit
+          # 2. 重新拉取官方原版lock文件，保证和官方完全一致
+          git checkout -- package-lock.json
+          # 3. 核心：npm ci 严格按照lock文件安装，不修改lock，100%匹配版本
+          npm ci --force --no-audit
+          # 4. 补装运行时核心依赖（Express服务+SQLite数据库）
+          npm install express better-sqlite3 --save --force --no-audit
           # 5. 兜底优化vite配置，用内置esbuild压缩，彻底绕开terser依赖问题
           if [ -f "vite.config.js" ]; then
-            # 适配ESM格式的vite配置，正确插入build配置
             sed -i 's/export default defineConfig({/export default defineConfig({\n  build: { minify: "esbuild" },/' vite.config.js
             echo "✅ vite配置优化完成，构建兼容性提升"
-            cat vite.config.js
           fi
           # 校验依赖安装结果
           echo "=== 依赖安装完成，核心模块版本 ==="
           npm list vite @vitejs/plugin-vue vue express better-sqlite3
 
-      - name: 5. 构建前端静态文件（生成dist目录，已修复参数错误）
+      - name: 5. 构建前端静态文件（生成dist目录）
         working-directory: ./MiSub
         run: |
           # 生产环境构建，--logLevel warn 只打印警告和错误，过滤非致命日志
@@ -65,7 +65,24 @@ jobs:
             exit 1
           fi
 
-      - name: 6. 生成Magisk模块全量文件（适配ESM规范+你的Node.js路径）
+      - name: 6. 精简依赖，剔除运行时无用文件（减小模块体积）
+        working-directory: ./MiSub
+        run: |
+          echo "=== 开始精简node_modules，剔除运行时无用文件 ==="
+          # 1. 剔除开发/测试依赖，运行时完全用不到
+          npm uninstall vitest happy-dom miniflare wrangler @vue/test-utils --save-dev
+          # 2. 剔除其他系统的二进制包（仅保留linux-arm64，适配Android）
+          rm -rf node_modules/esbuild/darwin-* node_modules/esbuild/win32-* node_modules/esbuild/linux-x64 node_modules/esbuild/linux-ia32 node_modules/esbuild/linux-riscv64 node_modules/esbuild/linux-s390x node_modules/esbuild/linux-mips64el node_modules/esbuild/linux-ppc64 node_modules/esbuild/freebsd-* node_modules/esbuild/netbsd-* node_modules/esbuild/openbsd-* node_modules/esbuild/aix-* node_modules/esbuild/openharmony-*
+          rm -rf node_modules/@esbuild/
+          rm -rf node_modules/lightningcss-*
+          rm -rf node_modules/@tailwindcss/oxide-*
+          # 3. 剔除无用的缓存、文档、测试文件
+          find node_modules -type d -name "test" -o -name "tests" -o -name "docs" -o -name "example" -o -name "examples" | xargs rm -rf
+          find node_modules -name "*.md" -o -name "*.txt" -o -name "LICENSE" | xargs rm -f
+          echo "✅ 依赖精简完成，最终node_modules大小："
+          du -sh node_modules
+
+      - name: 7. 生成Magisk模块全量文件（适配ESM规范+Android环境）
         working-directory: ./MiSub
         run: |
           # ========== 创建模块目录结构 ==========
@@ -382,7 +399,7 @@ jobs:
           ui_print "*******************************"
           exit 0
           EOF
-
+          
           # ========== 7. updater-script（Magisk标准要求） ==========
           touch magisk-module/META-INF/com/google/android/updater-script
 
@@ -409,14 +426,14 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "MOD_VERSION=$MOD_VERSION" >> $GITHUB_ENV
 
-      - name: 7. 上传模块包到Actions Artifacts
+      - name: 8. 上传模块包到Actions Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ./MiSub/${{ env.ZIP_NAME }}
           retention-days: 90
 
-      - name: 8. 打Tag自动发布到GitHub Release
+      - name: 9. 打Tag自动发布到GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
@@ -424,16 +441,17 @@ jobs:
           name: MiSub Magisk模块 ${{ env.MOD_VERSION }}
           body: |
             ## MiSub 订阅转换 Magisk 模块
-            自动构建的MiSub Magisk卡刷包，完整保留所有原生功能，开机自启，进程守护。
+            自动构建的MiSub Magisk卡刷包，严格按照官方package-lock.json锁定版本构建，完整保留所有原生功能，开机自启，进程守护。
             ### 使用说明
-            1. 下载zip包，在Magisk Manager中刷入
-            2. 重启手机生效
-            3. 浏览器访问 `http://手机IP:3000`
-            4. 默认管理员密码：`admin123`
+            1. 前置依赖：手机已刷入subs-goaway模块，确保Node.js路径 `/data/adb/modules/subs-goaway/bin/output/node` 存在
+            2. 下载zip包，在Magisk Manager中刷入
+            3. 重启手机生效
+            4. 浏览器访问 `http://手机IP:3000`
+            5. 默认管理员密码：`admin123`
             ### 适配说明
-            - 复用Node.js路径：`/data/adb/modules/subs-goaway/bin/output/node`
             - 支持Magisk 20.0+
-            - 完整适配Android ESM模块化规范
+            - 适配Android arm64架构
+            - 完整适配ESM模块化规范
           files: ./MiSub/${{ env.ZIP_NAME }}
           draft: false
           prerelease: false
