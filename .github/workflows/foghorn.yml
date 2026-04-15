@@ -85,8 +85,8 @@ jobs:
           fi
           chmod +x $BIN_PATH
           file $BIN_PATH
-        uses: actions/upload-artifact@v4
-        with:
+          uses: actions/upload-artifact@v4
+          with:
           name: foghorn-linux-arm64-full
           path: ${{ github.workspace }}/dist/foghorn-linux-arm64-full
           retention-days: 90
