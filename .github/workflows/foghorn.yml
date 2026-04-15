@@ -1,128 +1,87 @@
-name: Build Foghorn Android ARM64 终极全静态版
+name: 构建Foghorn ARM64 单文件二进制
 on:
+  # 推送代码到main分支自动触发（可选，注释掉则仅手动触发）
+  push:
+    branches: [ main ]
+  # 支持手动在GitHub Action页面点击触发
   workflow_dispatch:
 
 jobs:
-  build-android:
-    runs-on: ubuntu-24.04-arm64
+  build-foghorn-arm64:
+    runs-on: ubuntu-latest
+    # 构建超时时间，避免卡死
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-      - name: Checkout 项目源码
+      - name: 检出项目代码
         uses: actions/checkout@v4
         with:
-          repository: zallison/foghorn
-          ref: main
+          repository: zallison/foghorn # 可替换为你fork后的仓库地址
+          ref: main # 可指定分支/Tag，比如v0.7.0
           fetch-depth: 1
 
-      - name: 移除数据库可选依赖
-        run: |
-          sed -i '/mariadb/d' pyproject.toml
-          sed -i '/psycopg2/d' pyproject.toml
-          sed -i '/influxdb/d' pyproject.toml
-
-      - name: 全静态构建Android二进制
-        uses: addnab/docker-run-action@v3
+      - name: 设置QEMU 跨架构模拟环境
+        uses: docker/setup-qemu-action@v3
         with:
-          image: alpine:edge
-          options: -v ${{ github.workspace }}:/workspace -w /workspace
-          run: |
-            set -euxo pipefail
+          platforms: arm64
 
-            # 1. 配置镜像源
-            rm -rf /etc/apk/repositories /var/cache/apk/*
-            cat > /etc/apk/repositories << 'EOF'
-            https://dl-cdn.alpinelinux.org/alpine/edge/main
-            https://dl-cdn.alpinelinux.org/alpine/edge/community
-            https://mirrors.ustc.edu.cn/alpine/edge/main
-            https://mirrors.ustc.edu.cn/alpine/edge/community
-            EOF
-            apk update --no-cache
+      - name: 设置Docker Buildx 构建环境
+        uses: docker/setup-buildx-action@v3
 
-            # 2. 安装构建依赖
-            apk add --no-cache \
-              python3 python3-dev py3-pip py3-setuptools \
-              gcc g++ musl-dev linux-headers libffi-dev \
-              openssl-dev openssl-libs-static build-base patchelf pkgconf \
-              libcap-dev sqlite-dev libgcc sqlite-static libsodium-static \
-              zlib-static libc6-compat scons binutils git
-            apk add --no-cache musl-static || true
+      - name: 构建ARM64 单文件二进制
+        run: |
+          # 用ARM64 Python镜像执行构建，确保产物纯ARM64架构
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/build \
+            -w /build \
+            python:3.11-slim-bookworm \
+            bash -c '
+              # 1. 安装系统依赖（ARM64架构必备）
+              apt update && apt install -y --no-install-recommends \
+                gcc g++ patchelf git ca-certificates
+              
+              # 2. 安装项目核心依赖
+              pip install --upgrade pip setuptools wheel
+              pip install -e .
+              
+              # 3. 安装PyInstaller 打包工具
+              pip install pyinstaller
+              
+              # 4. 核心打包命令：单文件ARM64二进制
+              pyinstaller --onefile \
+                --name foghorn-arm64 \
+                --target-arch aarch64 \
+                --strip \
+                --clean \
+                --noconfirm \
+                --hidden-import=fastapi \
+                --hidden-import=uvicorn \
+                --hidden-import=uvicorn.logging \
+                --hidden-import=uvicorn.lifespan.on \
+                --hidden-import=dnslib \
+                --hidden-import=dns \
+                --hidden-import=cryptography \
+                --hidden-import=yaml \
+                --hidden-import=aiosqlite \
+                --add-data "src/foghorn:foghorn" \
+                --add-data "assets:assets" \
+                src/foghorn/__main__.py
+            '
 
-            # 3. 环境变量：彻底静态链接，拒绝任何动态 libgcc
-            PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-            export PYTHONPATH=/usr/lib/python$PYTHON_VERSION
-            export LDFLAGS="-L/usr/lib -lpython$PYTHON_VERSION -Wl,--export-dynamic -static -static-libgcc -static-libstdc++ -Wl,-Bstatic"
-            export CFLAGS="-I/usr/include/python$PYTHON_VERSION -fPIC"
-            export CPPFLAGS="-I/usr/include/python$PYTHON_VERSION"
-            export CRYPTOGRAPHY_RUST=0
-            export CRYPTOGRAPHY_STATIC=1
-            export OPENSSL_STATIC=1
-            export PYO3_CROSS_LIB_DIR=/usr/lib
-            export RUSTFLAGS="-C target-feature=+crt-static"
+      - name: 验证二进制架构
+        run: |
+          # 检查生成的二进制是否为ARM64架构
+          file ${{ github.workspace }}/dist/foghorn-arm64
+          # 赋予执行权限
+          chmod +x ${{ github.workspace }}/dist/foghorn-arm64
 
-            # 4. 虚拟环境
-            python3 -m venv /opt/venv
-            source /opt/venv/bin/activate
-
-            # 5. 安装打包工具
-            pip install --upgrade pip
-            pip install --no-cache-dir "setuptools==69.0.0" wheel
-            pip install --no-cache-dir pyinstaller
-            pip install --no-cache-dir --no-build-isolation staticx
-
-            # 6. 安装依赖 + 强制 pydantic_core 静态编译
-            pip install --no-cache-dir cryptography==38.0.4
-            pip install --no-cache-dir \
-              annotated-doc==0.0.4 annotated-types==0.7.0 anyio==4.13.0 attrs==26.1.0 \
-              bcrypt==5.0.0 cachetools==7.0.5 certifi==2026.2.25 cffi==2.0.0 \
-              charset-normalizer==3.4.6 click==8.3.1 dnslib==0.9.26 \
-              dnspython==2.8.0 docker==7.1.0 fastapi==0.135.2 h11==0.16.0 \
-              idna==3.11 ifaddr==0.2.0 invoke==2.2.1 jsonschema==4.26.0 \
-              jsonschema-specifications==2025.9.1 mysql-connector-python==9.6.0 paho-mqtt==2.1.0 \
-              paramiko==4.0.0 psutil==7.2.2 pycparser==3.0 pydantic==2.12.5 pydantic-core==2.41.5 \
-              pynacl==1.6.2 pyyaml==6.0.3 referencing==0.37.0 requests==2.33.0 rpds-py==0.30.0 \
-              starlette==1.0.0 typing-extensions==4.15.0 typing-inspection==0.4.2 urllib3==2.6.3 \
-              uvicorn==0.42.0 watchdog==6.0.0 zeroconf==0.148.0
-            pip install --no-cache-dir .
-
-            # 7. 【关键】彻底移除 pydantic_core 对 libgcc_s.so.1 的动态依赖
-            find /opt/venv -name "_pydantic_core*.so" -type f | while read so; do
-              patchelf --remove-needed libgcc_s.so.1 "$so" 2>/dev/null || true
-              patchelf --remove-rpath "$so" 2>/dev/null || true
-            done
-
-            find /usr/lib /lib /opt/venv -name "*.so*" -type f -exec patchelf --remove-rpath {} \; 2>/dev/null || true
-
-            # 8. 启动入口
-            cat > run.py << 'EOF'
-            import os, sys
-            os.environ["TMPDIR"] = "/data/local/tmp"
-            from foghorn.main import main
-            if __name__ == "__main__":
-                main()
-            EOF
-
-            # 9. PyInstaller 打包（不再依赖外部 libgcc_s.so）
-            pyinstaller --onefile --clean \
-              --name foghorn-android-arm64 \
-              --collect-all foghorn \
-              --collect-all cryptography \
-              --collect-all pydantic_core \
-              --runtime-tmpdir /data/local/tmp \
-              --strip \
-              --noupx \
-              run.py
-
-            # 10. Staticx 封包
-            staticx \
-              dist/foghorn-android-arm64 \
-              dist/foghorn-android-arm64-static
-
-            # 11. 修复权限
-            chown -R 1001:1001 dist/
-            chmod -R 755 dist/
-
-      - name: 上传最终全静态二进制
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-android-arm64-v8a-终极全静态版
-          path: dist/foghorn-android-arm64-static
-          retention-days: 30
+          name: foghorn-linux-arm64
+          path: ${{ github.workspace }}/dist/foghorn-arm64
+          # 产物保留90天
+          retention-days: 90
