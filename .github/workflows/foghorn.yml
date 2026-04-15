@@ -1,40 +1,27 @@
-name: 构建 foghorn ARM64 单文件二进制
+name: 构建 foghorn ARM64 全量功能二进制
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
 
 jobs:
-  build-arm64:
+  build-arm64-full:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: 初始化工作目录
         run: |
-          # 清理环境，固定目录结构
           sudo rm -rf ${{ github.workspace }}/*
           mkdir -p ${{ github.workspace }}/foghorn-src
           mkdir -p ${{ github.workspace }}/dist
-          echo "✅ 工作目录初始化完成"
-          ls -la ${{ github.workspace }}
 
-      - name: 检出 foghorn 官方源码
+      - name: 检出 foghorn 源码
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
           ref: v0.7.0
           fetch-depth: 1
-          path: foghorn-src # 固定源码目录，绝对不会和你自己的仓库文件混淆
-
-      - name: 源码完整性校验（容错版，不会误报错）
-        run: |
-          echo "=== 源码目录结构 ==="
-          ls -la ${{ github.workspace }}/foghorn-src
-          
-          echo -e "\n=== pyproject.toml 核心配置 ==="
-          # 容错处理：无论是否匹配到都不会报错退出
-          grep -A 10 "console_scripts" ${{ github.workspace }}/foghorn-src/pyproject.toml || echo "⚠️  未匹配到console_scripts，打印完整pyproject.toml"
-          cat ${{ github.workspace }}/foghorn-src/pyproject.toml
+          path: foghorn-src
 
       - name: 配置 ARM64 跨架构环境
         uses: docker/setup-qemu-action@v3
@@ -44,80 +31,62 @@ jobs:
       - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 核心构建：ARM64 单文件二进制
+      - name: 全量功能构建
         run: |
-          # Docker内构建，全程严格错误检查，只有真正构建失败才会终止
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}/foghorn-src:/build \
             -v ${{ github.workspace }}/dist:/build/dist \
             -w /build \
-            python:3.11-slim-bookworm \
+            python:3.11-bookworm \
             bash -c "
               set -euo pipefail
-              echo '=== 1. 安装系统依赖 ==='
+              echo '=== 1. 安装全量系统依赖 ==='
               apt update && apt install -y --no-install-recommends \
-                gcc g++ patchelf binutils git ca-certificates
+                gcc g++ patchelf binutils git ca-certificates \
+                libmariadb-dev libpq-dev libssl-dev build-essential \
+                mosquitto-dev libsqlite3-dev
 
-              echo '=== 2. 安装项目全量依赖 ==='
+              echo '=== 2. 安装全量项目依赖 ==='
               pip install --upgrade pip setuptools wheel
-              pip install --root-user-action=ignore .[full]
+              pip install --root-user-action=ignore .[all]
               pip install --root-user-action=ignore pyinstaller==6.19.0
 
-              echo '=== 3. 验证项目安装成功 ==='
+              echo '=== 3. 验证安装 ==='
               which foghorn
               foghorn --version
-              foghorn --help
 
-              echo '=== 4. 执行打包 ==='
+              echo '=== 4. 打包 ==='
               pyinstaller --onefile \
-                --name foghorn-linux-arm64 \
+                --name foghorn-linux-arm64-full \
                 --target-arch aarch64 \
                 --strip \
                 --clean \
                 --noconfirm \
                 --root-user-action=ignore \
                 --console \
-                --hidden-import=fastapi \
-                --hidden-import=uvicorn \
-                --hidden-import=uvicorn.* \
-                --hidden-import=dnslib \
-                --hidden-import=dns.* \
-                --hidden-import=cryptography \
-                --hidden-import=yaml \
-                --hidden-import=aiosqlite \
-                --hidden-import=asyncio \
-                --hidden-import=requests \
+                --hidden-import=* \
+                --collect-all=foghorn \
                 --add-data 'assets:assets' \
                 --add-data 'example_configs:example_configs' \
                 $(which foghorn)
 
-              echo '=== 5. 容器内产物验证 ==='
+              echo '=== 5. 验证产物 ==='
               ls -la /build/dist/
-              chmod +x /build/dist/foghorn-linux-arm64
-              /build/dist/foghorn-linux-arm64 --version
+              chmod +x /build/dist/foghorn-linux-arm64-full
+              /build/dist/foghorn-linux-arm64-full --version
             "
 
-      - name: 最终产物校验
+      - name: 产物校验与上传
         run: |
-          echo "=== 最终产物目录 ==="
-          ls -la ${{ github.workspace }}/dist
-          
-          # 核心校验：文件不存在直接报错
-          BIN_PATH="${{ github.workspace }}/dist/foghorn-linux-arm64"
+          BIN_PATH="${{ github.workspace }}/dist/foghorn-linux-arm64-full"
           if [ ! -f "$BIN_PATH" ]; then
-            echo "❌ 构建失败：二进制文件未生成"
+            echo "❌ 构建失败"
             exit 1
           fi
-
-          # 权限与架构校验
           chmod +x $BIN_PATH
-          echo -e "\n=== 二进制架构信息 ==="
           file $BIN_PATH
-          echo -e "\n✅ 构建成功！"
-
-      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-linux-arm64
-          path: ${{ github.workspace }}/dist/foghorn-linux-arm64
+          name: foghorn-linux-arm64-full
+          path: ${{ github.workspace }}/dist/foghorn-linux-arm64-full
           retention-days: 90
