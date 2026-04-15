@@ -9,12 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: 初始化工作目录
+      - name: 清理工作环境
         run: |
           sudo rm -rf ${{ github.workspace }}/*
-          mkdir -p ${{ github.workspace }}/foghorn-src
-          mkdir -p ${{ github.workspace }}/dist
-          echo "✅ 工作目录初始化完成"
+          docker rm -f foghorn-build 2>/dev/null || true
+          echo "✅ 环境清理完成"
 
       - name: 检出 foghorn 官方源码
         uses: actions/checkout@v4
@@ -22,14 +21,6 @@ jobs:
           repository: zallison/foghorn
           ref: v0.7.0
           fetch-depth: 1
-          path: foghorn-src
-
-      - name: 源码完整性校验
-        run: |
-          echo "=== 源码目录结构 ==="
-          ls -la ${{ github.workspace }}/foghorn-src
-          echo -e "\n=== pyproject.toml 项目配置 ==="
-          cat ${{ github.workspace }}/foghorn-src/pyproject.toml | head -80
 
       - name: 配置 ARM64 跨架构环境
         uses: docker/setup-qemu-action@v3
@@ -39,111 +30,118 @@ jobs:
       - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 全量功能核心构建（零报错最终版）
+      - name: 【核心】创建构建容器并执行全量构建
         run: |
-          docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}/foghorn-src:/build \
-            -v ${{ github.workspace }}/dist:/build/dist \
+          # 1. 创建arm64构建容器，不自动删除，方便拷文件
+          docker create --name foghorn-build --platform linux/arm64 \
             -w /build \
             python:3.11-bookworm \
-            bash -c "
-              set -euo pipefail
-              echo '=== 1. 安装全量系统依赖 ==='
-              apt update && apt install -y --no-install-recommends \
-                gcc g++ patchelf binutils git ca-certificates \
-                libmariadb-dev libpq-dev libssl-dev build-essential \
-                mosquitto-dev libsqlite3-dev libffi-dev zlib1g-dev
+            sleep infinity
 
-              echo '=== 2. 安装全量项目依赖 ==='
-              pip install --upgrade pip setuptools wheel
-              # 全量安装所有可选依赖，包含所有数据库/消息队列后端
-              pip install --root-user-action=ignore .[all]
-              # 安装PyInstaller固定稳定版
-              pip install --root-user-action=ignore pyinstaller==6.19.0
+          # 2. 把源码拷贝进容器
+          docker cp ${{ github.workspace }}/. foghorn-build:/build/
 
-              echo '=== 3. 项目安装有效性验证 ==='
-              echo '> 验证foghorn命令路径'
-              which foghorn
-              echo '> 验证foghorn命令可正常运行'
-              foghorn --help
-              echo '✅ 项目安装验证通过'
+          # 3. 启动容器
+          docker start foghorn-build
 
-              echo '=== 4. 生成固定打包入口脚本（彻底解决scriptname问题） ==='
-              # 生成绝对路径的入口脚本，100%稳定，无包装脚本兼容问题
-              cat > /build/entry.py << 'EOF'
-              #!/usr/bin/env python3
-              from foghorn.cli import main
-              if __name__ == "__main__":
-                  main()
-              EOF
-              # 验证入口脚本有效
-              echo '> 验证入口脚本有效性'
-              python3 /build/entry.py --help
-              echo '✅ 入口脚本验证通过'
+          # 4. 容器内执行全量构建，全程日志输出
+          docker exec foghorn-build bash -c "
+            set -euo pipefail
+            echo '=== 1. 安装全量系统依赖 ==='
+            apt update && apt install -y --no-install-recommends \
+              gcc g++ patchelf binutils git ca-certificates \
+              libmariadb-dev libpq-dev libssl-dev build-essential \
+              mosquitto-dev libsqlite3-dev libffi-dev zlib1g-dev
 
-              echo '=== 5. 执行PyInstaller全量打包（修复所有参数错误） ==='
-              pyinstaller --onefile \
-                --name foghorn-linux-arm64-full \
-                --target-architecture aarch64 \
-                --strip \
-                --clean \
-                --noconfirm \
-                --root-user-action=ignore \
-                --console \
-                --collect-all=foghorn \
-                --collect-all=uvicorn \
-                --collect-all=fastapi \
-                --hidden-import=dnslib \
-                --hidden-import=dns \
-                --hidden-import=cryptography \
-                --hidden-import=yaml \
-                --hidden-import=aiosqlite \
-                --hidden-import=asyncio \
-                --hidden-import=requests \
-                --hidden-import=pymysql \
-                --hidden-import=psycopg2 \
-                --hidden-import=paho.mqtt.client \
-                --hidden-import=redis \
-                --add-data 'assets:assets' \
-                --add-data 'example_configs:example_configs' \
-                /build/entry.py
+            echo '=== 2. 安装全量Python依赖 ==='
+            pip install --upgrade pip setuptools wheel
+            pip install --root-user-action=ignore .[all]
+            pip install --root-user-action=ignore pyinstaller==6.19.0
 
-              echo '=== 6. 容器内打包产物验证 ==='
-              echo '> 产物目录列表'
-              ls -la /build/dist/
-              # 验证二进制文件存在
-              BIN_FILE=/build/dist/foghorn-linux-arm64-full
-              if [ ! -f "$BIN_FILE" ]; then
-                echo '❌ 打包失败：二进制文件未生成'
-                exit 1
-              fi
-              # 赋予执行权限并验证可正常运行
-              chmod +x $BIN_FILE
-              echo '> 验证打包后二进制可正常执行'
-              $BIN_FILE --help
-              echo '✅ 打包产物验证通过'
-            "
+            echo '=== 3. 验证项目安装成功 ==='
+            which foghorn
+            foghorn --help
+            echo '✅ 项目安装验证通过'
 
-      - name: 宿主机最终产物校验
+            echo '=== 4. 生成固定入口脚本 ==='
+            cat > /build/entry.py << 'EOF'
+            #!/usr/bin/env python3
+            from foghorn.cli import main
+            if __name__ == '__main__':
+                main()
+            EOF
+            python3 /build/entry.py --help
+            echo '✅ 入口脚本验证通过'
+
+            echo '=== 5. 执行PyInstaller打包 ==='
+            pyinstaller --onefile \
+              --name foghorn-linux-arm64 \
+              --target-architecture aarch64 \
+              --strip \
+              --clean \
+              --noconfirm \
+              --root-user-action=ignore \
+              --console \
+              --collect-all=foghorn \
+              --collect-all=uvicorn \
+              --collect-all=fastapi \
+              --hidden-import=dnslib \
+              --hidden-import=dns \
+              --hidden-import=cryptography \
+              --hidden-import=yaml \
+              --hidden-import=aiosqlite \
+              --hidden-import=asyncio \
+              --hidden-import=requests \
+              --hidden-import=pymysql \
+              --hidden-import=psycopg2 \
+              --hidden-import=paho.mqtt.client \
+              --hidden-import=redis \
+              --add-data 'assets:assets' \
+              --add-data 'example_configs:example_configs' \
+              /build/entry.py
+
+            echo '=== 6. 容器内构建产物验证 ==='
+            echo '> 产物目录详情'
+            ls -la /build/dist/
+            # 强制验证二进制文件存在
+            if [ ! -f /build/dist/foghorn-linux-arm64 ]; then
+              echo '❌ 打包失败：二进制文件未在容器内生成'
+              exit 1
+            fi
+            # 验证二进制可执行
+            chmod +x /build/dist/foghorn-linux-arm64
+            /build/dist/foghorn-linux-arm64 --help
+            echo '✅ 容器内构建成功，二进制文件有效'
+          "
+
+      - name: 【关键】从容器内强制拷出二进制文件到宿主机
         run: |
-          echo "=== 最终产物目录 ==="
-          ls -la ${{ github.workspace }}/dist
+          # 把容器内的二进制文件强制拷到宿主机工作目录
+          docker cp foghorn-build:/build/dist/foghorn-linux-arm64 ${{ github.workspace }}/
           
-          BIN_PATH="${{ github.workspace }}/dist/foghorn-linux-arm64-full"
-          if [ ! -f "$BIN_PATH" ]; then
-            echo "❌ 构建失败：二进制文件未生成"
+          # 验证文件是否成功拷出
+          echo "=== 宿主机最终产物 ==="
+          ls -la ${{ github.workspace }}/
+          
+          if [ ! -f "${{ github.workspace }}/foghorn-linux-arm64" ]; then
+            echo "❌ 失败：文件未从容器内拷出"
             exit 1
           fi
 
-          # 赋予执行权限并校验架构
-          chmod +x $BIN_PATH
+          # 权限与架构校验
+          chmod +x ${{ github.workspace }}/foghorn-linux-arm64
           echo -e "\n=== 二进制架构信息 ==="
-          file $BIN_PATH
-          echo -e "\n✅ 全量功能ARM64二进制构建成功！"
+          file ${{ github.workspace }}/foghorn-linux-arm64
+          echo -e "\n✅ 二进制文件成功获取！"
 
-      - name: 上传构建产物
+      - name: 清理构建容器
+        run: |
+          docker rm -f foghorn-build
+          echo "✅ 构建容器清理完成"
+
+      - name: 上传最终构建产物
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-linux-arm64-full
-          path: ${{ github.workspace }}/dist/foghorn-linux-arm64-full
+          path: ${{ github.workspace }}/foghorn-linux-arm64
           retention-days: 90
