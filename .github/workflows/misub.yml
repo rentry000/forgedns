@@ -148,7 +148,7 @@ jobs:
               log_info "加载自定义env配置成功"
           else
               # 默认配置，确保所有变量全程有值
-              export PORT=3000
+              export PORT=3005
               export HOST=0.0.0.0
               export ADMIN_PASSWORD=admin123
               export COOKIE_SECRET=misub-magisk-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')
@@ -320,7 +320,7 @@ jobs:
           
                     # 4. env.config 默认配置文件
                     cat > magisk-module/conf/env.config << 'EOF'
-          PORT=3000
+          PORT=3005
           HOST=0.0.0.0
           ADMIN_PASSWORD=admin123
           COOKIE_SECRET=misub-magisk-your-custom-secret-2026
@@ -343,7 +343,7 @@ jobs:
           globalThis.fetch = fetch;
           
           const app = express();
-          const PORT = process.env.PORT || 3000;
+          const PORT = process.env.PORT || 3005;
           const HOST = process.env.HOST || '0.0.0.0';
           const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'misub.db');
           const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
@@ -368,7 +368,7 @@ jobs:
           globalThis.misubFetch = async (url, options = {}) => {
               const defaultOptions = {
                   follow: 20,
-                  timeout: 30000,
+                  timeout: 30050,
                   headers: {
                       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                       ...options.headers
@@ -624,7 +624,7 @@ jobs:
           chcon -R u:object_r:system_file:s0 $MODDIR 2>/dev/null
           
           ui_print "- 安装完成"
-          ui_print "- 重启手机后访问: http://手机IP:3000"
+          ui_print "- 重启手机后访问: http://手机IP:3005"
           ui_print "- 默认密码: admin123"
           ui_print "- 日志路径: /data/adb/modules/misub-magisk-stable/"
           ui_print "*******************************"
@@ -672,7 +672,7 @@ jobs:
             1.  前置依赖：必须先刷入 `subs-goaway` 模块，提供Node.js运行环境
             2.  下载zip包，在Magisk中直接刷入
             3.  重启手机生效
-            4.  访问地址：http://你的手机IP:3000
+            4.  访问地址：http://你的手机IP:3005
             5.  默认账号密码：admin / admin123
             ### 日志路径
             运行日志：`/data/adb/modules/misub-magisk-stable/run.log`
