@@ -9,12 +9,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - name: 检出项目源码
+      - name: 清理工作目录
+        run: |
+          sudo rm -rf ${{ github.workspace }}/*
+          ls -la ${{ github.workspace }}
+
+      - name: 检出 foghorn 项目源码
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
-          ref: v0.7.0 # 可指定版本/分支
+          ref: v0.7.0
           fetch-depth: 1
+          path: foghorn-src # 固定源码目录，避免路径混乱
+
+      - name: 校验源码拉取结果
+        run: |
+          echo "=== 源码目录结构 ==="
+          ls -la ${{ github.workspace }}/foghorn-src
+          echo "=== pyproject.toml 校验 ==="
+          cat ${{ github.workspace }}/foghorn-src/pyproject.toml | grep -A 10 "console_scripts"
 
       - name: 配置 ARM64 跨架构模拟环境
         uses: docker/setup-qemu-action@v3
@@ -24,30 +37,36 @@ jobs:
       - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 核心构建：ARM64 单文件二进制
+      - name: 核心构建：ARM64 单文件二进制（严格错误检查）
         run: |
+          # 创建产物目录，提前确保路径存在
+          mkdir -p ${{ github.workspace }}/dist
+          chmod 777 ${{ github.workspace }}/dist
+
+          # Docker内构建，开启严格错误检查，任何一步失败直接退出
           docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}:/build \
+            -v ${{ github.workspace }}/foghorn-src:/build \
+            -v ${{ github.workspace }}/dist:/build/dist \
             -w /build \
+            --entrypoint /bin/bash \
             python:3.11-slim-bookworm \
-            bash -c '
-              # 1. 安装系统依赖
+            -c "
+              set -euo pipefail # 开启严格错误检查，报错直接终止
+              echo '=== 1. 安装系统依赖 ==='
               apt update && apt install -y --no-install-recommends \
                 gcc g++ patchelf binutils git ca-certificates
-              
-              # 2. 安装项目本体+全量依赖+PyInstaller，屏蔽root警告
+
+              echo '=== 2. 安装Python依赖 ==='
               pip install --upgrade pip setuptools wheel
-              pip install --root-user-action=ignore .
-              pip install --root-user-action=ignore pyinstaller
-              
-              # 3. 生成临时入口脚本（解决无__main__.py的问题）
-              cat > entry.py << EOF
-              from foghorn.cli import main
-              if __name__ == "__main__":
-                  main()
-              EOF
-              
-              # 4. 全量打包命令：单文件ARM64二进制，补全所有依赖
+              pip install --root-user-action=ignore .[all] # 安装全量可选依赖，避免模块缺失
+              pip install --root-user-action=ignore pyinstaller==6.19.0 # 固定版本，避免兼容性问题
+
+              echo '=== 3. 验证项目安装成功 ==='
+              which foghorn
+              foghorn --help
+
+              echo '=== 4. 执行PyInstaller打包 ==='
+              # 官方推荐方式：直接打包console script，无需手动写入口文件
               pyinstaller --onefile \
                 --name foghorn-linux-arm64 \
                 --target-arch aarch64 \
@@ -55,33 +74,45 @@ jobs:
                 --clean \
                 --noconfirm \
                 --root-user-action=ignore \
+                --console \
                 --hidden-import=fastapi \
                 --hidden-import=uvicorn \
-                --hidden-import=uvicorn.logging \
-                --hidden-import=uvicorn.lifespan.on \
+                --hidden-import=uvicorn.* \
                 --hidden-import=dnslib \
-                --hidden-import=dns \
+                --hidden-import=dns.* \
                 --hidden-import=cryptography \
                 --hidden-import=yaml \
                 --hidden-import=aiosqlite \
                 --hidden-import=asyncio \
                 --hidden-import=requests \
-                --add-data "assets:assets" \
-                --add-data "example_configs:example_configs" \
-                entry.py
-            '
+                --add-data 'assets:assets' \
+                --add-data 'example_configs:example_configs' \
+                $(which foghorn)
 
-      - name: 验证二进制架构与可用性
+              echo '=== 5. 容器内验证产物 ==='
+              ls -la /build/dist/
+              file /build/dist/foghorn-linux-arm64
+              chmod +x /build/dist/foghorn-linux-arm64
+              /build/dist/foghorn-linux-arm64 --version
+            "
+
+      - name: 宿主机校验产物
         run: |
-          # 验证架构是否为ARM64
-          file ${{ github.workspace }}/dist/foghorn-linux-arm64
+          echo "=== 宿主机产物目录 ==="
+          ls -la ${{ github.workspace }}/dist
+          
+          # 校验文件是否存在
+          if [ ! -f "${{ github.workspace }}/dist/foghorn-linux-arm64" ]; then
+            echo "❌ 错误：二进制文件未生成！"
+            exit 1
+          fi
+
           # 赋予执行权限
           chmod +x ${{ github.workspace }}/dist/foghorn-linux-arm64
-          # 容器内验证二进制可正常执行
-          docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}/dist:/test \
-            python:3.11-slim-bookworm \
-            /test/foghorn-linux-arm64 --help
+          
+          # 最终架构校验
+          echo "=== 二进制架构信息 ==="
+          file ${{ github.workspace }}/dist/foghorn-linux-arm64
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
