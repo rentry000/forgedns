@@ -1,62 +1,60 @@
-name: 构建Foghorn ARM64 单文件二进制
+name: 构建 foghorn ARM64 单文件二进制
 on:
-  # 推送代码到main分支自动触发（可选，注释掉则仅手动触发）
+  workflow_dispatch:
   push:
     branches: [ main ]
-  # 支持手动在GitHub Action页面点击触发
-  workflow_dispatch:
 
 jobs:
-  build-foghorn-arm64:
+  build-arm64:
     runs-on: ubuntu-latest
-    # 构建超时时间，避免卡死
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
-
+    timeout-minutes: 40
     steps:
-      - name: 检出项目代码
+      - name: 检出项目源码
         uses: actions/checkout@v4
         with:
-          repository: zallison/foghorn # 可替换为你fork后的仓库地址
-          ref: main # 可指定分支/Tag，比如v0.7.0
+          repository: zallison/foghorn
+          ref: v0.7.0 # 可指定版本/分支
           fetch-depth: 1
 
-      - name: 设置QEMU 跨架构模拟环境
+      - name: 配置 ARM64 跨架构模拟环境
         uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm64
+          platforms: linux/arm64
 
-      - name: 设置Docker Buildx 构建环境
+      - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 构建ARM64 单文件二进制
+      - name: 核心构建：ARM64 单文件二进制
         run: |
-          # 用ARM64 Python镜像执行构建，确保产物纯ARM64架构
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/build \
             -w /build \
             python:3.11-slim-bookworm \
             bash -c '
-              # 1. 安装系统依赖（ARM64架构必备）
+              # 1. 安装系统依赖
               apt update && apt install -y --no-install-recommends \
-                gcc g++ patchelf git ca-certificates
+                gcc g++ patchelf binutils git ca-certificates
               
-              # 2. 安装项目核心依赖
+              # 2. 安装项目本体+全量依赖+PyInstaller，屏蔽root警告
               pip install --upgrade pip setuptools wheel
-              pip install -e .
+              pip install --root-user-action=ignore .
+              pip install --root-user-action=ignore pyinstaller
               
-              # 3. 安装PyInstaller 打包工具
-              pip install pyinstaller
+              # 3. 生成临时入口脚本（解决无__main__.py的问题）
+              cat > entry.py << EOF
+              from foghorn.cli import main
+              if __name__ == "__main__":
+                  main()
+              EOF
               
-              # 4. 核心打包命令：单文件ARM64二进制
+              # 4. 全量打包命令：单文件ARM64二进制，补全所有依赖
               pyinstaller --onefile \
-                --name foghorn-arm64 \
+                --name foghorn-linux-arm64 \
                 --target-arch aarch64 \
                 --strip \
                 --clean \
                 --noconfirm \
+                --root-user-action=ignore \
                 --hidden-import=fastapi \
                 --hidden-import=uvicorn \
                 --hidden-import=uvicorn.logging \
@@ -66,22 +64,28 @@ jobs:
                 --hidden-import=cryptography \
                 --hidden-import=yaml \
                 --hidden-import=aiosqlite \
-                --add-data "src/foghorn:foghorn" \
+                --hidden-import=asyncio \
+                --hidden-import=requests \
                 --add-data "assets:assets" \
-                src/foghorn/__main__.py
+                --add-data "example_configs:example_configs" \
+                entry.py
             '
 
-      - name: 验证二进制架构
+      - name: 验证二进制架构与可用性
         run: |
-          # 检查生成的二进制是否为ARM64架构
-          file ${{ github.workspace }}/dist/foghorn-arm64
+          # 验证架构是否为ARM64
+          file ${{ github.workspace }}/dist/foghorn-linux-arm64
           # 赋予执行权限
-          chmod +x ${{ github.workspace }}/dist/foghorn-arm64
+          chmod +x ${{ github.workspace }}/dist/foghorn-linux-arm64
+          # 容器内验证二进制可正常执行
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}/dist:/test \
+            python:3.11-slim-bookworm \
+            /test/foghorn-linux-arm64 --help
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-linux-arm64
-          path: ${{ github.workspace }}/dist/foghorn-arm64
-          # 产物保留90天
+          path: ${{ github.workspace }}/dist/foghorn-linux-arm64
           retention-days: 90
