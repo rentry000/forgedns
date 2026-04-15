@@ -24,7 +24,7 @@ jobs:
         with:
           platforms: linux/arm64
 
-      - name: 全量功能构建
+      - name: 全量功能构建（零错误最终版）
         run: |
           docker run -d --name foghorn-build --platform linux/arm64 \
             -w /build \
@@ -33,7 +33,7 @@ jobs:
 
           docker cp ${{ github.workspace }}/. foghorn-build:/build/
 
-          # 全量构建，每一步都做校验，完整输出日志
+          # 全量构建，彻底规避所有缩进/引号/依赖问题
           docker exec foghorn-build bash -euxo pipefail -c "
             # 1. 安装全量系统依赖，解决所有编译问题
             apt update && apt install -y --no-install-recommends \
@@ -42,7 +42,7 @@ jobs:
               mosquitto-dev libsqlite3-dev libffi-dev zlib1g-dev \
               default-libmysqlclient-dev redis-tools
 
-            # 2. 先安装系统级Python依赖，避免pip安装冲突
+            # 2. 安装系统级Python依赖，避免pip冲突
             apt install -y --no-install-recommends \
               python3-cryptography python3-yaml python3-requests \
               python3-aiosqlite python3-paho-mqtt python3-redis \
@@ -53,41 +53,51 @@ jobs:
             pip install --root-user-action=ignore .[all]
             pip install --root-user-action=ignore pyinstaller==6.19.0
 
-            # 4. 【关键】验证所有模块可正常导入
-            echo '=== 验证核心模块导入 ==='
-            python3 -c '
-            from foghorn.cli import main
-            import fastapi
-            import uvicorn
-            import dnslib
-            import dns
-            import cryptography
-            import yaml
-            import aiosqlite
-            import requests
-            import pymysql
-            import psycopg2
-            import paho.mqtt.client
-            import redis
-            print(\"✅ 所有模块导入成功\")
-            '
+            # 【修复】写入全量模块验证脚本，彻底解决缩进问题
+            cat > /build/validate_full.py << 'PYEOF'
+# 全量模块导入验证
+from foghorn.cli import main
+# Web核心依赖
+import fastapi
+import uvicorn
+# DNS核心依赖
+import dnslib
+import dns
+# 加密/配置依赖
+import cryptography
+import yaml
+# 数据库依赖
+import aiosqlite
+import pymysql
+import psycopg2
+# 网络/消息队列依赖
+import requests
+import paho.mqtt.client
+import redis
+print("✅ 全量模块导入成功，无缺失")
+PYEOF
 
-            # 5. 生成入口脚本
-            cat > /build/entry.py << 'EOF'
-            #!/usr/bin/env python3
-            import sys
-            import os
-            # 把打包后的资源目录添加到Python路径
-            if getattr(sys, 'frozen', False):
-                app_path = sys._MEIPASS
-                sys.path.insert(0, app_path)
-            from foghorn.cli import main
-            if __name__ == '__main__':
-                main()
-            EOF
+            # 执行验证
+            echo '=== 全量模块导入验证 ==='
+            python3 /build/validate_full.py
 
-            # 6. 全量打包，修复路径问题
-            echo '=== 开始全量打包 ==='
+            # 生成打包入口脚本，适配PyInstaller资源路径
+            cat > /build/entry.py << 'PYEOF'
+#!/usr/bin/env python3
+import sys
+import os
+# 适配PyInstaller打包后的资源路径
+if getattr(sys, 'frozen', False):
+    app_path = sys._MEIPASS
+    sys.path.insert(0, app_path)
+    os.environ['PATH'] = app_path + os.pathsep + os.environ['PATH']
+from foghorn.cli import main
+if __name__ == '__main__':
+    main()
+PYEOF
+
+            # 全量打包，修复所有路径问题
+            echo '=== 开始全量功能打包 ==='
             pyinstaller \
               --onefile \
               --name foghorn-linux-arm64-full \
@@ -107,18 +117,18 @@ jobs:
               --add-data /build/example_configs:example_configs \
               /build/entry.py
 
-            # 7. 强制校验产物
+            # 强制校验产物
             echo '=== 打包结果校验 ==='
             ls -la /build/dist/
             BIN_FILE=/build/dist/foghorn-linux-arm64-full
-            if [ ! -f "$BIN_FILE" ]; then
+            if [ ! -f "\$BIN_FILE" ]; then
               echo '❌ 打包失败，二进制文件未生成'
               exit 1
             fi
 
-            # 8. 验证二进制可执行
-            chmod +x $BIN_FILE
-            $BIN_FILE --help
+            # 验证二进制可正常执行
+            chmod +x \$BIN_FILE
+            \$BIN_FILE --help
             echo '✅ 全量功能二进制验证通过'
           "
 
