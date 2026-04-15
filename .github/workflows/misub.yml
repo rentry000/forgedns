@@ -31,32 +31,43 @@ jobs:
           node-version: '20'
           check-latest: true
 
-      - name: 4. 严格安装官方全量依赖
+      - name: 4. 【修复】先安装全量依赖（含vite构建工具）
         working-directory: ./MiSub
         run: |
-          # 先安装官方所有依赖，确保核心功能完整
+          # 严格安装官方所有依赖（包含开发依赖vite，用于构建）
           npm ci
-          # 安装Node环境兼容依赖，彻底解决fetch、数据库、网络问题
-          npm install express@4.21.1 sql.js@1.12.0 node-fetch@3.3.2 https-proxy-agent@7.0.5 --save --save-exact
-          # 剔除开发依赖，仅保留生产依赖
-          npm prune --production
-          # 清理原生二进制文件，确保全架构兼容
-          rm -rf node_modules/**/*.node
-          echo "✅ 全量依赖安装完成，无原生架构依赖"
-          npm ls --prod
+          # 验证vite安装成功
+          npx vite --version
+          echo "✅ 全量依赖安装完成，vite构建工具就绪"
 
-      - name: 5. 官方前端构建
+      - name: 5. 【修复】前端构建（此时vite存在，不会报错）
         working-directory: ./MiSub
         run: |
           npm run build -- --mode production --emptyOutDir
+          # 构建后强制验证产物
           if [ -d "./dist" ] && [ -f "./dist/index.html" ]; then
-            echo "✅ 前端构建成功"
+            echo "✅ 前端构建成功，产物目录正常"
+            tree ./dist -L 2
           else
-            echo "❌ 前端构建失败"
+            echo "❌ 前端构建失败，dist目录不存在"
             exit 1
           fi
 
-      - name: 6. 生成Magisk模块全量文件
+      - name: 6. 【修复】构建完成后，仅安装运行时生产依赖
+        working-directory: ./MiSub
+        run: |
+          # 清理旧的node_modules，避免开发依赖残留
+          rm -rf node_modules package-lock.json
+          # 仅安装生产运行时依赖，纯JS无原生二进制，全架构兼容
+          npm install express@4.21.1 sql.js@1.12.0 node-fetch@3.3.2 https-proxy-agent@7.0.5 --save --save-exact
+          # 剔除所有开发依赖，仅保留生产运行必须的包
+          npm prune --production
+          # 清理所有可能的原生二进制文件，确保全架构兼容
+          rm -rf node_modules/**/*.node
+          echo "✅ 运行时依赖安装完成，无原生架构依赖"
+          npm ls --prod
+
+      - name: 7. 生成Magisk模块全量文件
         working-directory: ./MiSub
         run: |
           # 创建模块目录结构
@@ -79,7 +90,7 @@ jobs:
           minMagisk=20000
           EOF
           
-                    # 2. service.sh 【核心修复】网络全适配+零闪退启动脚本
+                    # 2. service.sh 网络全适配+零闪退启动脚本
                     cat > magisk-module/service.sh << 'EOF'
           #!/system/bin/sh
           # MiSub Magisk模块启动脚本 【网络全适配最终版】
@@ -176,7 +187,7 @@ jobs:
           chcon -R u:object_r:system_file:s0 $MODDIR 2>/dev/null
           chcon u:object_r:system_file:s0 $NODE_BIN 2>/dev/null
           
-          # 【关键修复】权限修复，之前的644导致JS无法执行
+          # 【关键修复】权限修复，避免JS无法执行
           chmod 755 $NODE_BIN
           chmod 755 $MISUB_DIR
           chmod 755 $MISUB_DIR/functions
@@ -193,7 +204,7 @@ jobs:
           iptables -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
           iptables -t nat -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || iptables -t nat -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
           ip6tables -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || ip6tables -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
-          ip6tables -t nat -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || ip6tables -t nat -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
+          ip6tables -t nat -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || ip6tables -t nat -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
           
           # 放行面板端口全量访问
           iptables -C INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport $PORT -j ACCEPT 2>> $ERROR_LOG
@@ -327,7 +338,7 @@ jobs:
           DB_PATH=/data/adb/modules/misub-magisk-stable/misub.db
           EOF
           
-                    # 5. app.js 【全功能兼容版】100%兼容官方MiSub API，解决订阅拉取/保存问题
+                    # 5. app.js 全功能兼容版，100%兼容官方MiSub API
                     cat > magisk-module/misub/app.js << 'EOF'
           import express from 'express';
           import fs from 'fs';
@@ -353,7 +364,7 @@ jobs:
           app.use(express.json({ limit: '100mb' }));
           app.use(express.urlencoded({ extended: true }));
           
-          // 【关键修复】CORS跨域配置，解决前端API请求失败
+          // CORS跨域配置，解决前端API请求失败
           app.use((req, res, next) => {
               res.header('Access-Control-Allow-Origin', '*');
               res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -364,7 +375,7 @@ jobs:
               next();
           });
           
-          // 【关键修复】全局fetch配置，解决订阅拉取重定向、UA、超时问题
+          // 全局fetch配置，解决订阅拉取重定向、UA、超时问题
           globalThis.misubFetch = async (url, options = {}) => {
               const defaultOptions = {
                   follow: 20,
@@ -406,7 +417,7 @@ jobs:
               }
           }
           
-          // 【100%兼容官方】D1数据库API封装
+          // 100%兼容官方D1数据库API封装
           const dbWrapper = {
               prepare: (sql) => {
                   const stmt = db.prepare(sql);
@@ -444,7 +455,7 @@ jobs:
               }
           };
           
-          // 【100%兼容官方】KV存储API封装
+          // 100%兼容官方KV存储API封装
           const kvWrapper = {
               get: (key) => {
                   const res = dbWrapper.prepare('SELECT value FROM kv WHERE key = ?').get(key);
@@ -467,7 +478,7 @@ jobs:
           // ############################## 官方API兼容路由 ##############################
           // 自动加载官方所有API函数
           const functionsPath = path.join(__dirname, 'functions');
-          const loadApiHandler = async (req, res) => {
+          const loadApiHandler = async (req, res, next) => {
               const reqPath = req.path;
               let targetFile = '';
           
@@ -529,7 +540,6 @@ jobs:
                   }
               }
           
-              // 静态资源兜底
               next();
           };
           
@@ -652,14 +662,14 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "MOD_VERSION=$MOD_VERSION" >> $GITHUB_ENV
 
-      - name: 7. 上传构建产物
+      - name: 8. 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ./MiSub/${{ env.ZIP_NAME }}
           retention-days: 90
 
-      - name: 8. 发布Release
+      - name: 9. 发布Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
