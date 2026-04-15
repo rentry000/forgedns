@@ -29,8 +29,7 @@ jobs:
           echo "=== 源码目录结构 ==="
           ls -la ${{ github.workspace }}/foghorn-src
           echo -e "\n=== pyproject.toml 项目配置 ==="
-          cat ${{ github.workspace }}/foghorn-src/pyproject.toml | grep -A 20 "project.scripts" || echo "⚠️  未匹配到scripts，打印完整配置头"
-          cat ${{ github.workspace }}/foghorn-src/pyproject.toml | head -60
+          cat ${{ github.workspace }}/foghorn-src/pyproject.toml | head -80
 
       - name: 配置 ARM64 跨架构环境
         uses: docker/setup-qemu-action@v3
@@ -40,7 +39,7 @@ jobs:
       - name: 配置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 全量功能核心构建（零报错修复版）
+      - name: 全量功能核心构建（零报错最终版）
         run: |
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}/foghorn-src:/build \
@@ -49,7 +48,7 @@ jobs:
             python:3.11-bookworm \
             bash -c "
               set -euo pipefail
-              echo '=== 1. 安装全量系统依赖（解决mariadb编译问题） ==='
+              echo '=== 1. 安装全量系统依赖 ==='
               apt update && apt install -y --no-install-recommends \
                 gcc g++ patchelf binutils git ca-certificates \
                 libmariadb-dev libpq-dev libssl-dev build-essential \
@@ -57,24 +56,35 @@ jobs:
 
               echo '=== 2. 安装全量项目依赖 ==='
               pip install --upgrade pip setuptools wheel
-              # 全量安装项目所有可选依赖，包含所有数据库/消息队列后端
+              # 全量安装所有可选依赖，包含所有数据库/消息队列后端
               pip install --root-user-action=ignore .[all]
               # 安装PyInstaller固定稳定版
               pip install --root-user-action=ignore pyinstaller==6.19.0
 
-              echo '=== 3. 项目安装有效性验证（修复参数错误） ==='
-              # 第一步：验证命令存在
+              echo '=== 3. 项目安装有效性验证 ==='
               echo '> 验证foghorn命令路径'
               which foghorn
-              # 第二步：用支持的-h/--help参数验证命令可正常执行，无报错
               echo '> 验证foghorn命令可正常运行'
               foghorn --help
               echo '✅ 项目安装验证通过'
 
-              echo '=== 4. 执行PyInstaller全量打包（修复无效语法） ==='
+              echo '=== 4. 生成固定打包入口脚本（彻底解决scriptname问题） ==='
+              # 生成绝对路径的入口脚本，100%稳定，无包装脚本兼容问题
+              cat > /build/entry.py << 'EOF'
+              #!/usr/bin/env python3
+              from foghorn.cli import main
+              if __name__ == "__main__":
+                  main()
+              EOF
+              # 验证入口脚本有效
+              echo '> 验证入口脚本有效性'
+              python3 /build/entry.py --help
+              echo '✅ 入口脚本验证通过'
+
+              echo '=== 5. 执行PyInstaller全量打包（修复所有参数错误） ==='
               pyinstaller --onefile \
                 --name foghorn-linux-arm64-full \
-                --target-arch aarch64 \
+                --target-architecture aarch64 \
                 --strip \
                 --clean \
                 --noconfirm \
@@ -93,23 +103,24 @@ jobs:
                 --hidden-import=pymysql \
                 --hidden-import=psycopg2 \
                 --hidden-import=paho.mqtt.client \
+                --hidden-import=redis \
                 --add-data 'assets:assets' \
                 --add-data 'example_configs:example_configs' \
-                --add-data 'src/foghorn:foghorn' \
-                $(which foghorn)
+                /build/entry.py
 
-              echo '=== 5. 容器内打包产物验证 ==='
+              echo '=== 6. 容器内打包产物验证 ==='
               echo '> 产物目录列表'
               ls -la /build/dist/
               # 验证二进制文件存在
-              if [ ! -f "/build/dist/foghorn-linux-arm64-full" ]; then
+              BIN_FILE=/build/dist/foghorn-linux-arm64-full
+              if [ ! -f "$BIN_FILE" ]; then
                 echo '❌ 打包失败：二进制文件未生成'
                 exit 1
               fi
               # 赋予执行权限并验证可正常运行
-              chmod +x /build/dist/foghorn-linux-arm64-full
+              chmod +x $BIN_FILE
               echo '> 验证打包后二进制可正常执行'
-              /build/dist/foghorn-linux-arm64-full --help
+              $BIN_FILE --help
               echo '✅ 打包产物验证通过'
             "
 
