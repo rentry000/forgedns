@@ -11,137 +11,123 @@ jobs:
         run: |
           sudo rm -rf ${{ github.workspace }}/*
           docker rm -f foghorn-build 2>/dev/null || true
+          mkdir -p ${{ github.workspace }}/output
 
-      - name: 检出源码
+      - name: 检出官方源码
         uses: actions/checkout@v4
         with:
           repository: zallison/foghorn
           ref: v0.7.0
           fetch-depth: 1
 
-      - name: 配置ARM64模拟环境
+      - name: 配置ARM64跨架构环境
         uses: docker/setup-qemu-action@v3
         with:
           platforms: linux/arm64
 
-      - name: 全量功能构建（零错误最终版）
+      - name: 全量功能构建（零语法错误版）
         run: |
-          docker run -d --name foghorn-build --platform linux/arm64 \
-            -w /build \
-            python:3.11-bookworm \
-            sleep infinity
+          docker run -d --name foghorn-build --platform linux/arm64 python:3.11-bookworm sleep infinity
+          docker cp ${{ github.workspace }}/. foghorn-build:/foghorn-src/
 
-          docker cp ${{ github.workspace }}/. foghorn-build:/build/
+          # 全量构建，所有here-document结束符顶格无缩进，无任何语法歧义
+          docker exec foghorn-build bash -euxo pipefail << 'EOF'
+          set -e
+          # 1. 安装全量系统依赖
+          apt update && apt install -y --no-install-recommends \
+            gcc g++ patchelf binutils git ca-certificates \
+            libmariadb-dev libpq-dev libssl-dev build-essential \
+            mosquitto-dev libsqlite3-dev libffi-dev zlib1g-dev \
+            default-libmysqlclient-dev redis-tools
+          
+          # 2. 安装系统级Python依赖，避免pip冲突
+          apt install -y --no-install-recommends \
+            python3-cryptography python3-yaml python3-requests \
+            python3-aiosqlite python3-paho-mqtt python3-redis \
+            python3-psycopg2 python3-mysqldb
+          
+          # 3. 安装项目全量依赖
+          pip install --upgrade pip setuptools wheel
+          pip install --root-user-action=ignore /foghorn-src/[all]
+          pip install --root-user-action=ignore pyinstaller==6.19.0
+          
+          # 4. 生成模块验证脚本，结束符顶格无缩进
+          cat > /validate.py << 'PYEOF'
+          from foghorn.cli import main
+          import fastapi
+          import uvicorn
+          import dnslib
+          import dns
+          import cryptography
+          import yaml
+          import aiosqlite
+          import requests
+          import pymysql
+          import psycopg2
+          import paho.mqtt.client
+          import redis
+          print("✅ 全量模块导入成功")
+          PYEOF
+          
+          # 执行验证
+          python3 /validate.py
+          
+          # 5. 生成打包入口脚本，结束符顶格无缩进
+          cat > /entry.py << 'PYEOF'
+          #!/usr/bin/env python3
+          import sys
+          import os
+          if getattr(sys, 'frozen', False):
+              app_path = sys._MEIPASS
+              sys.path.insert(0, app_path)
+              os.environ['PATH'] = app_path + os.pathsep + os.environ['PATH']
+          from foghorn.cli import main
+          if __name__ == '__main__':
+              main()
+          PYEOF
+          
+          # 6. 全量打包，输出到绝对路径/dist
+          pyinstaller \
+            --onefile \
+            --name foghorn-linux-arm64-full \
+            --target-architecture aarch64 \
+            --distpath /dist \
+            --workpath /build \
+            --strip \
+            --clean \
+            --noconfirm \
+            --root-user-action=ignore \
+            --console \
+            --collect-all=foghorn \
+            --collect-all=uvicorn \
+            --collect-all=fastapi \
+            --add-data /foghorn-src/assets:assets \
+            --add-data /foghorn-src/example_configs:example_configs \
+            /entry.py
+          
+          # 7. 强制验证二进制
+          ls -la /dist/
+          chmod +x /dist/foghorn-linux-arm64-full
+          /dist/foghorn-linux-arm64-full --help
+          echo "✅ 全量功能二进制构建成功"
+          EOF
 
-          # 全量构建，彻底规避所有缩进/引号/依赖问题
-          docker exec foghorn-build bash -euxo pipefail -c "
-            # 1. 安装全量系统依赖，解决所有编译问题
-            apt update && apt install -y --no-install-recommends \
-              gcc g++ patchelf binutils git ca-certificates \
-              libmariadb-dev libpq-dev libssl-dev build-essential \
-              mosquitto-dev libsqlite3-dev libffi-dev zlib1g-dev \
-              default-libmysqlclient-dev redis-tools
-
-            # 2. 安装系统级Python依赖，避免pip冲突
-            apt install -y --no-install-recommends \
-              python3-cryptography python3-yaml python3-requests \
-              python3-aiosqlite python3-paho-mqtt python3-redis \
-              python3-psycopg2 python3-mysqldb
-
-            # 3. 安装项目全量依赖
-            pip install --upgrade pip setuptools wheel
-            pip install --root-user-action=ignore .[all]
-            pip install --root-user-action=ignore pyinstaller==6.19.0
-
-            # 【修复】写入全量模块验证脚本，彻底解决缩进问题
-            cat > /build/validate_full.py << 'PYEOF'
-            # 全量模块导入验证
-            from foghorn.cli import main
-            # Web核心依赖
-            import fastapi
-            import uvicorn
-            # DNS核心依赖
-            import dnslib
-            import dns
-            # 加密/配置依赖
-            import cryptography
-            import yaml
-            # 数据库依赖
-            import aiosqlite
-            import pymysql
-            import psycopg2
-            # 网络/消息队列依赖
-            import requests
-            import paho.mqtt.client
-            import redis
-            print("✅ 全量模块导入成功，无缺失")
-            PYEOF
-
-            # 执行验证
-            echo '=== 全量模块导入验证 ==='
-            python3 /build/validate_full.py
-
-            # 生成打包入口脚本，适配PyInstaller资源路径
-            cat > /build/entry.py << 'PYEOF'
-            #!/usr/bin/env python3
-            import sys
-            import os
-            # 适配PyInstaller打包后的资源路径
-            if getattr(sys, 'frozen', False):
-                app_path = sys._MEIPASS
-                sys.path.insert(0, app_path)
-                os.environ['PATH'] = app_path + os.pathsep + os.environ['PATH']
-            from foghorn.cli import main
-            if __name__ == '__main__':
-                main()
-            PYEOF
-
-            # 全量打包，修复所有路径问题
-            echo '=== 开始全量功能打包 ==='
-            pyinstaller \
-              --onefile \
-              --name foghorn-linux-arm64-full \
-              --target-architecture aarch64 \
-              --strip \
-              --clean \
-              --noconfirm \
-              --root-user-action=ignore \
-              --console \
-              --log-level INFO \
-              --collect-all=foghorn \
-              --collect-all=uvicorn \
-              --collect-all=fastapi \
-              --collect-all=dnslib \
-              --collect-all=dns \
-              --add-data /build/assets:assets \
-              --add-data /build/example_configs:example_configs \
-              /build/entry.py
-
-            # 强制校验产物
-            echo '=== 打包结果校验 ==='
-            ls -la /build/dist/
-            BIN_FILE=/build/dist/foghorn-linux-arm64-full
-            if [ ! -f "\$BIN_FILE" ]; then
-              echo '❌ 打包失败，二进制文件未生成'
-              exit 1
-            fi
-
-            # 验证二进制可正常执行
-            chmod +x \$BIN_FILE
-            \$BIN_FILE --help
-            echo '✅ 全量功能二进制验证通过'
-          "
-
-      - name: 拷出二进制文件
+      - name: 拷出最终二进制文件
         run: |
-          docker cp foghorn-build:/build/dist/foghorn-linux-arm64-full ${{ github.workspace }}/
-          ls -la ${{ github.workspace }}/
-          if [ ! -f "${{ github.workspace }}/foghorn-linux-arm64-full" ]; then
+          docker cp foghorn-build:/dist/foghorn-linux-arm64-full ${{ github.workspace }}/output/
+          
+          echo "=== 最终产物校验 ==="
+          ls -la ${{ github.workspace }}/output/
+          BIN_FILE=${{ github.workspace }}/output/foghorn-linux-arm64-full
+          
+          if [ ! -f "$BIN_FILE" ]; then
             echo "❌ 文件拷出失败"
             exit 1
           fi
-          chmod +x ${{ github.workspace }}/foghorn-linux-arm64-full
-          file ${{ github.workspace }}/foghorn-linux-arm64-full
+          
+          chmod +x $BIN_FILE
+          file $BIN_FILE
+          echo "✅ 全量功能二进制成功获取！"
 
       - name: 清理容器
         run: docker rm -f foghorn-build
@@ -150,5 +136,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: foghorn-linux-arm64-full
-          path: ${{ github.workspace }}/foghorn-linux-arm64-full
+          path: ${{ github.workspace }}/output/foghorn-linux-arm64-full
           retention-days: 90
