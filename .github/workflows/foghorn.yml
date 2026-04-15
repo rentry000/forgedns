@@ -55,27 +55,27 @@ jobs:
 
             # 【修复】写入全量模块验证脚本，彻底解决缩进问题
             cat > /build/validate_full.py << 'PYEOF'
-# 全量模块导入验证
-from foghorn.cli import main
-# Web核心依赖
-import fastapi
-import uvicorn
-# DNS核心依赖
-import dnslib
-import dns
-# 加密/配置依赖
-import cryptography
-import yaml
-# 数据库依赖
-import aiosqlite
-import pymysql
-import psycopg2
-# 网络/消息队列依赖
-import requests
-import paho.mqtt.client
-import redis
-print("✅ 全量模块导入成功，无缺失")
-PYEOF
+            # 全量模块导入验证
+            from foghorn.cli import main
+            # Web核心依赖
+            import fastapi
+            import uvicorn
+            # DNS核心依赖
+            import dnslib
+            import dns
+            # 加密/配置依赖
+            import cryptography
+            import yaml
+            # 数据库依赖
+            import aiosqlite
+            import pymysql
+            import psycopg2
+            # 网络/消息队列依赖
+            import requests
+            import paho.mqtt.client
+            import redis
+            print("✅ 全量模块导入成功，无缺失")
+            PYEOF
 
             # 执行验证
             echo '=== 全量模块导入验证 ==='
@@ -83,18 +83,18 @@ PYEOF
 
             # 生成打包入口脚本，适配PyInstaller资源路径
             cat > /build/entry.py << 'PYEOF'
-#!/usr/bin/env python3
-import sys
-import os
-# 适配PyInstaller打包后的资源路径
-if getattr(sys, 'frozen', False):
-    app_path = sys._MEIPASS
-    sys.path.insert(0, app_path)
-    os.environ['PATH'] = app_path + os.pathsep + os.environ['PATH']
-from foghorn.cli import main
-if __name__ == '__main__':
-    main()
-PYEOF
+            #!/usr/bin/env python3
+            import sys
+            import os
+            # 适配PyInstaller打包后的资源路径
+            if getattr(sys, 'frozen', False):
+                app_path = sys._MEIPASS
+                sys.path.insert(0, app_path)
+                os.environ['PATH'] = app_path + os.pathsep + os.environ['PATH']
+            from foghorn.cli import main
+            if __name__ == '__main__':
+                main()
+            PYEOF
 
             # 全量打包，修复所有路径问题
             echo '=== 开始全量功能打包 ==='
