@@ -1,4 +1,4 @@
-name: Build MiSub Magisk Module (v2.5.0 Miniflare Stable)
+name: Build MiSub Magisk Module (v2.5.0 Miniflare PrePacked)
 
 on:
   workflow_dispatch:
@@ -12,22 +12,29 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/imzyb/MiSub.git .
 
-      # 2. 配置Node.js构建环境
+      # 2. 配置Node.js构建环境，启用arm64交叉编译
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      # 3. 仅安装构建依赖（生产依赖在手机本地安装，解决x86/arm64架构不兼容问题）
-      - name: Install Build Dependencies & Build
+      # 3. 构建前端产物 + 预打包arm64架构的所有依赖（含Miniflare）
+      - name: Build & PreInstall Arm64 Dependencies
         run: |
-          # 仅安装构建所需的开发依赖，不安装运行时依赖
+          # 第一步：安装开发依赖，构建前端产物
           npm install --only=dev
-          # 构建前端与Worker产物，生成dist目录（纯静态+_worker.js入口，无架构依赖）
           npm run build
 
-      # 4. 生成Miniflare启动配置文件（官方模拟器，无需手动适配Cloudflare API）
+          # 第二步：配置npm交叉编译参数，强制安装arm64架构依赖
+          npm config set target_arch=arm64
+          npm config set target_platform=linux
+          npm config set ignore-scripts=true
+
+          # 第三步：安装生产依赖（含Miniflare），全部为arm64架构适配版本
+          npm install miniflare@3 --only=prod --registry=https://registry.npmmirror.com
+
+      # 4. 生成Miniflare启动脚本（和之前一致，无需修改）
       - name: Create Miniflare Startup Script
         run: |
           cat << 'EOF' > start.js
@@ -46,7 +53,7 @@ jobs:
               // 自动加载Pages入口_worker.js
               workers: [path.join(__dirname, 'dist/_worker.js')],
               
-              // 监听配置：修复原脚本127.0.0.1无法访问的问题
+              // 监听配置：支持本机+同网段访问
               host: '0.0.0.0',
               port: 8787,
               
@@ -100,28 +107,28 @@ jobs:
           });
           EOF
 
-      # 5. 打包Magisk模块（核心优化：不预打包node_modules，避免架构不兼容）
+      # 5. 打包Magisk模块（预打包所有依赖，刷入即用）
       - name: Package Magisk Module
         run: |
           # 创建模块目录结构
           mkdir -p magisk_module/misub
           mkdir -p magisk_module/misub/data
           
-          # 复制构建产物与启动脚本（无架构依赖）
-          cp -r dist start.js package.json magisk_module/misub/
+          # 复制所有文件：构建产物、启动脚本、预安装的node_modules
+          cp -r dist start.js node_modules package.json magisk_module/misub/
           
           # 1. 模块基础信息配置
           cat << 'EOF' > magisk_module/module.prop
-          id=misub_v250_miniflare
-          name=MiSub v2.5.0 Magisk (Miniflare)
+          id=misub_v250_miniflare_prepacked
+          name=MiSub v2.5.0 Magisk (Miniflare预打包版)
           version=v2.5.0
           versionCode=250
           author=imzyb | Miniflare适配
-          description=MiSub订阅管理工具，基于Cloudflare官方Miniflare模拟器本地化运行，完美兼容D1/KV/Worker原生API，支持arm64安卓设备，开机自启，数据持久化。
+          description=MiSub订阅管理工具，预打包arm64架构Miniflare运行时，无需手机端联网安装，刷入即用，完美兼容Cloudflare原生API。
           updateJson=https://raw.githubusercontent.com/imzyb/MiSub/main/module_update.json
           EOF
           
-          # 2. 核心开机自启脚本（修复架构兼容、启动容错、日志输出）
+          # 2. 开机自启脚本（移除了安装逻辑，直接启动）
           cat << 'EOF' > magisk_module/service.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
@@ -166,17 +173,6 @@ jobs:
           # 进入应用目录
           cd $APP_DIR
           
-          # 首次启动：本地安装运行时依赖（适配手机arm64架构，解决原脚本x86依赖不兼容问题）
-          if [ ! -d "node_modules" ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 首次启动，安装Miniflare运行时依赖..." >> $LOG_FILE
-            $NODE_BIN $NODE_BIN/../npm install miniflare@3 --only=prod --registry=https://registry.npmmirror.com >> $LOG_FILE 2>&1
-            if [ $? -ne 0 ]; then
-              echo "[$(date '+%Y-%m-%d %H:%M:%S')] 错误：依赖安装失败，请检查网络连接" >> $LOG_FILE
-              exit 1
-            fi
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 依赖安装完成" >> $LOG_FILE
-          fi
-          
           # 检查端口是否被占用
           if netstat -tulpn | grep -q :8787; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 警告：8787端口被占用，尝试终止占用进程..." >> $LOG_FILE
@@ -184,7 +180,7 @@ jobs:
             sleep 2
           fi
           
-          # 启动MiSub服务
+          # 直接启动MiSub服务（无需安装依赖）
           echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动MiSub服务..." >> $LOG_FILE
           $NODE_BIN start.js >> $LOG_FILE 2>&1 &
           
@@ -212,11 +208,11 @@ jobs:
           chmod 755 magisk_module/uninstall.sh
           
           # 打包模块
-          cd magisk_module && zip -r ../MiSub_v250_Magisk_Miniflare.zip .
+          cd magisk_module && zip -r ../MiSub_v250_Magisk_Miniflare_PrePacked.zip .
 
       # 6. 上传构建产物
       - name: Upload Magisk Module Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiSub-v250-Magisk-Miniflare
-          path: MiSub_v250_Magisk_Miniflare.zip
+          name: MiSub-v250-Magisk-Miniflare-PrePacked
+          path: MiSub_v250_Magisk_Miniflare_PrePacked.zip
