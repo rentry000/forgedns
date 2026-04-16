@@ -1,0 +1,174 @@
+name: 编译安卓ARM64原生Node.js二进制
+on:
+  # 手动触发，支持自定义版本参数
+  workflow_dispatch:
+    inputs:
+      nodejs_version:
+        description: "Node.js 版本（推荐LTS版，如v20.18.0）"
+        required: true
+        default: "v20.18.0"
+        type: string
+      ndk_version:
+        description: "安卓NDK版本（Node.js LTS推荐r25c，兼容性最优）"
+        required: true
+        default: "r25c"
+        type: string
+      android_api_level:
+        description: "最低兼容安卓API等级（推荐24，兼容Android 7.0+）"
+        required: true
+        default: "24"
+        type: number
+      enable_static:
+        description: "是否启用静态编译（减少系统依赖，推荐开启）"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build-android-nodejs:
+    runs-on: ubuntu-latest
+    env:
+      # 全局环境变量
+      NDK_BASE_URL: "https://dl.google.com/android/repository"
+      TARGET_ARCH: "aarch64"
+      ANDROID_TARGET: "aarch64-linux-android"
+    steps:
+      # 1. 安装系统编译依赖
+      - name: 安装系统基础依赖
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential python3 python3-pip git wget unzip xz-utils pkg-config
+          python3 -m pip install --upgrade pip setuptools
+          echo "✅ 系统依赖安装完成"
+
+      # 2. 缓存NDK，避免重复下载
+      - name: 缓存安卓NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: android-ndk-${{ inputs.ndk_version }}
+          key: ${{ runner.os }}-ndk-${{ inputs.ndk_version }}
+
+      # 3. 下载并解压安卓NDK（缓存未命中时执行）
+      - name: 下载安卓NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          NDK_FILENAME="android-ndk-${{ inputs.ndk_version }}-linux.zip"
+          wget -q ${NDK_BASE_URL}/${NDK_FILENAME}
+          unzip -q ${NDK_FILENAME}
+          rm -f ${NDK_FILENAME}
+          echo "✅ NDK ${{ inputs.ndk_version }} 下载解压完成"
+
+      # 4. 配置交叉编译环境变量
+      - name: 配置交叉编译环境
+        run: |
+          # NDK工具链路径
+          export NDK_PATH=$(pwd)/android-ndk-${{ inputs.ndk_version }}
+          export TOOLCHAIN=${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64
+          
+          # 交叉编译器配置（核心：安卓NDK原生clang，适配bionic库）
+          export CC=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET }}${{ inputs.android_api_level }}-clang
+          export CXX=${TOOLCHAIN}/bin/${{ env.ANDROID_TARGET }}${{ inputs.android_api_level }}-clang++
+          export AR=${TOOLCHAIN}/bin/llvm-ar
+          export RANLIB=${TOOLCHAIN}/bin/llvm-ranlib
+          export STRIP=${TOOLCHAIN}/bin/llvm-strip
+          export LD=${TOOLCHAIN}/bin/ld.lld
+          
+          # 把环境变量写入GITHUB_ENV，后续步骤可复用
+          echo "NDK_PATH=${NDK_PATH}" >> $GITHUB_ENV
+          echo "TOOLCHAIN=${TOOLCHAIN}" >> $GITHUB_ENV
+          echo "CC=${CC}" >> $GITHUB_ENV
+          echo "CXX=${CXX}" >> $GITHUB_ENV
+          echo "AR=${AR}" >> $GITHUB_ENV
+          echo "RANLIB=${RANLIB}" >> $GITHUB_ENV
+          echo "STRIP=${STRIP}" >> $GITHUB_ENV
+          echo "LD=${LD}" >> $GITHUB_ENV
+          echo "✅ 交叉编译环境配置完成"
+          echo "编译器路径：${CC}"
+          ${CC} --version
+
+      # 5. 缓存Node.js源码，加速构建
+      - name: 缓存Node.js源码
+        id: cache-nodejs
+        uses: actions/cache@v4
+        with:
+          path: node
+          key: ${{ runner.os }}-nodejs-${{ inputs.nodejs_version }}-src
+
+      # 6. 克隆指定版本的Node.js官方源码
+      - name: 克隆Node.js源码
+        if: steps.cache-nodejs.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ inputs.nodejs_version }} https://github.com/nodejs/node.git
+          echo "✅ Node.js ${{ inputs.nodejs_version }} 源码克隆完成"
+
+      # 7. 配置Node.js编译参数（安卓原生适配核心步骤）
+      - name: 配置Node.js编译参数
+        run: |
+          cd node
+          
+          # 基础编译参数
+          CONFIG_ARGS="
+            --dest-cpu=arm64
+            --dest-os=android
+            --cross-compiling
+            --prefix=/data/adb/nodejs
+            --with-intl=small-icu
+            --openssl-use-def-ca-store
+            --without-dtrace
+            --without-systemtap
+            --without-etw
+          "
+          
+          # 静态编译参数（用户开启时追加）
+          if [ "${{ inputs.enable_static }}" = "true" ]; then
+            CONFIG_ARGS="${CONFIG_ARGS} --enable-static --partly-static --disable-shared"
+          fi
+          
+          # 执行配置
+          ./configure ${CONFIG_ARGS}
+          echo "✅ Node.js编译参数配置完成"
+          echo "使用配置：${CONFIG_ARGS}"
+
+      # 8. 并行编译（利用GitHub Actions多核性能）
+      - name: 编译Node.js
+        run: |
+          cd node
+          make -j$(nproc)
+          echo "✅ Node.js编译完成"
+
+      # 9. 整理编译产物，裁剪体积
+      - name: 整理编译产物
+        run: |
+          # 安装到临时目录
+          cd node
+          make install DESTDIR=$(pwd)/output
+          
+          # 裁剪体积：移除调试符号
+          ${STRIP} output/data/adb/nodejs/bin/node
+          
+          # 重命名产物目录，方便用户使用
+          mv output/data/adb/nodejs ./nodejs-android-arm64
+          
+          # 生成版本信息文件
+          echo "Node.js版本：${{ inputs.nodejs_version }}" > nodejs-android-arm64/VERSION_INFO
+          echo "安卓最低API等级：${{ inputs.android_api_level }}" >> nodejs-android-arm64/VERSION_INFO
+          echo "编译架构：arm64(aarch64)" >> nodejs-android-arm64/VERSION_INFO
+          echo "静态编译：${{ inputs.enable_static }}" >> nodejs-android-arm64/VERSION_INFO
+          echo "编译时间：$(date '+%Y-%m-%d %H:%M:%S')" >> nodejs-android-arm64/VERSION_INFO
+          
+          # 打包成压缩包
+          tar -czf nodejs-${{ inputs.nodejs_version }}-android-arm64.tar.gz nodejs-android-arm64
+          
+          echo "✅ 产物整理完成"
+          echo "最终产物：nodejs-${{ inputs.nodejs_version }}-android-arm64.tar.gz"
+          echo "二进制文件大小：$(du -h nodejs-android-arm64/bin/node)"
+          echo "完整环境大小：$(du -sh nodejs-android-arm64)"
+
+      # 10. 上传编译产物到GitHub Artifacts
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodejs-${{ inputs.nodejs_version }}-android-arm64
+          path: node/nodejs-${{ inputs.nodejs_version }}-android-arm64.tar.gz
+          retention-days: 90
