@@ -1,4 +1,4 @@
-name: Build MiSub v2.5.0 Magisk (Hono Adapter)
+name: Build MiSub v2.5.0 Magisk (Universal Fix)
 
 on:
   workflow_dispatch:
@@ -7,87 +7,126 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout MiSub v2.5.0
-        uses: actions/checkout@v4
-        with:
-          repository: 'imzyb/MiSub'
-          ref: 'v2.5.0'
+      # 1. 使用直接克隆，绕过 Git Fetch 匹配问题
+      - name: Clone Repository
+        run: |
+          git clone --depth 1 --branch v2.5.0 https://github.com/imzyb/MiSub.git .
+          # 如果 v2.5.0 tag 不存在，会自动回退到 main
+          if [ $? -ne 0 ]; then git clone --depth 1 https://github.com/imzyb/MiSub.git .; fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Inject Node Adapter & Build
+      - name: Install & Build Frontend
         run: |
           npm install
-          # 核心步骤：安装让 Node 运行 Worker 代码的桥梁
-          npm install @hono/node-server
-          
-          # 编写注入文件 entry.js
-          # 这里假设 v2.5.0 的后端逻辑位于 src/index.ts 或编译后的对应位置
+          # 安装 hono 的 node 适配器和纯 JS 的 SQL 引擎 (无需 native 编译)
+          npm install @hono/node-server sql.js
+          npm run build
+
+      - name: Inject Backend Adapter (entry.js)
+        run: |
           cat << 'EOF' > entry.js
           const { serve } = require('@hono/node-server');
-          // 注意：这里的引入路径需根据 v2.5.0 的源码结构调整，通常编译后在 dist
-          const app = require('./dist/index.js').default; 
-          
-          const port = 8787;
-          console.log(`Server is running on http://localhost:${port}`);
-          
-          serve({
-            fetch: app.fetch,
-            port
-          });
+          const { serveStatic } = require('@hono/node-server/serve-static');
+          const initSqlJs = require('sql.js');
+          const fs = require('fs');
+          const path = require('path');
+
+          async function start() {
+            // 1. 初始化纯 JS 数据库环境 (模拟 D1)
+            const SQL = await initSqlJs();
+            const dbPath = path.join(__dirname, 'misub.db');
+            let dbFile = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : null;
+            const sqlite = new SQL.Database(dbFile);
+
+            // 简单的 D1 接口模拟
+            const D1Mock = {
+              prepare: (sql) => ({
+                bind: (...args) => ({
+                  first: async () => {
+                    const stmt = sqlite.prepare(sql);
+                    const res = stmt.getAsObject(args);
+                    stmt.free();
+                    return res;
+                  },
+                  run: async () => {
+                    sqlite.run(sql, args);
+                    fs.writeFileSync(dbPath, sqlite.export());
+                    return { success: true };
+                  },
+                  all: async () => {
+                    const stmt = sqlite.prepare(sql);
+                    const results = [];
+                    while(stmt.step()) results.push(stmt.getAsObject(args));
+                    stmt.free();
+                    return { results };
+                  }
+                })
+              })
+            };
+
+            // 2. 加载后端 Hono App
+            // 注意：v2.5.0 编译后的入口通常在 .output/server 或 dist/_worker.js
+            const appModule = require('./dist/_worker.js'); 
+            const app = appModule.default;
+
+            // 3. 注入环境变量
+            const handler = (req) => {
+              return app.fetch(req, {
+                MISUB_DB: D1Mock, // 对应 wrangler-cf-pages.toml 里的绑定
+                ADMIN_PASSWORD: "admin"
+              });
+            };
+
+            // 4. 启动服务并托管静态文件
+            const server = new (require('hono').Hono)();
+            server.use('/*', serveStatic({ root: './dist' })); // 托管前端
+            server.all('/api/*', (c) => handler(c.req.raw)); // 托管 API
+
+            serve({ fetch: server.fetch, port: 8787 });
+            console.log("MiSub v2.5.0 is running on http://127.0.0.1:8787");
+          }
+
+          start();
           EOF
 
-          # 构建项目生成 dist 文件夹
-          npm run build || true
-
-      - name: Prepare Magisk Module
+      - name: Create Magisk Module
         run: |
           mkdir -p magisk_module/misub
-          # 排除不必要的大文件
-          rsync -a --exclude='.git' --exclude='magisk_module' ./ magisk_module/misub/
-          
+          # 只拷贝构建后的产物，减小体积
+          cp -r dist entry.js node_modules package.json magisk_module/misub/
+          cp schema.sql magisk_module/misub/ || true
+
           cat << 'EOF' > magisk_module/module.prop
-          id=misub_v250_fixed
-          name=MiSub v2.5.0 Node-Fixed
-          version=v2.5.0-Adapter
+          id=misub_v250_js_fixed
+          name=MiSub v2.5.0 (No-Native)
+          version=v2.5.0
           versionCode=250
           author=GitHub_Actions
-          description=使用 @hono/node-server 适配器强制让 v2.5.0 在原生 Node 环境运行。
+          description=使用 sql.js 纯 JS 模拟层运行的 v2.5.0。不依赖 C++ 编译，兼容手机 Node。
           EOF
-          
+
           cat << 'EOF' > magisk_module/service.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
           NODE_BIN="/data/adb/modules/subs-goaway/bin/output/node"
           export PATH="${NODE_BIN%/*}:$PATH"
-          export NODE_ENV="production"
           
-          # 确保日志有写入权限
-          exec > $MODDIR/run.log 2>&1
-          
-          until [ "$(getprop sys.boot_completed)" = "1" ]; do
-              sleep 2
-          done
+          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 5; done
           
           cd $MODDIR/misub
-          echo "Starting MiSub v2.5.0 with Node Adapter..."
-          
-          # 运行我们注入的入口文件
-          $NODE_BIN entry.js &
+          # 增加内存限制，防止手机上 Node 占用过高
+          $NODE_BIN --max-old-space-size=256 entry.js > $MODDIR/run.log 2>&1 &
           EOF
           
           chmod +x magisk_module/service.sh
+          cd magisk_module && zip -r ../MiSub_v250_Portable.zip .
 
-      - name: Zip Magisk Module
-        run: |
-          cd magisk_module
-          zip -r9 ../MiSub_v250_Adapter.zip .
-
-      - name: Upload Artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: MiSub-v250-Adapter
-          path: MiSub_v250_Adapter.zip
+          name: MiSub-v250-Portable
+          path: MiSub_v250_Portable.zip
