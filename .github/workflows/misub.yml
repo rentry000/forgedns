@@ -1,4 +1,4 @@
-name: Build MiSub Magisk Module (v2.5.0 Miniflare PrePacked)
+name: Build MiSub Magisk Module (v2.5.0 Miniflare PrePacked Fixed)
 
 on:
   workflow_dispatch:
@@ -12,29 +12,28 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/imzyb/MiSub.git .
 
-      # 2. 配置Node.js构建环境，启用arm64交叉编译
+      # 2. 配置Node.js构建环境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      # 3. 构建前端产物 + 预打包arm64架构的所有依赖（含Miniflare）
-      - name: Build & PreInstall Arm64 Dependencies
+      # 3. 构建前端产物 + 预打包arm64兼容依赖（修复npm参数报错）
+      - name: Build & PreInstall Arm64 Compatible Dependencies
         run: |
-          # 第一步：安装开发依赖，构建前端产物
+          # 第一步：安装开发依赖，构建前端纯静态产物（无架构依赖）
           npm install --only=dev
           npm run build
 
-          # 第二步：配置npm交叉编译参数，强制安装arm64架构依赖
-          npm config set target_arch=arm64
-          npm config set target_platform=linux
-          npm config set ignore-scripts=true
+          # 第二步：临时注入交叉编译环境变量，安装生产依赖+Miniflare
+          # 核心修复：通过npm_config_* 环境变量指定目标架构，无全局配置报错
+          # --ignore-scripts 跳过原生模块编译，Miniflare 3.x纯JS实现，跨架构兼容
+          npm_config_arch=arm64 \
+          npm_config_platform=linux \
+          npm install miniflare@3 --only=prod --ignore-scripts --registry=https://registry.npmmirror.com
 
-          # 第三步：安装生产依赖（含Miniflare），全部为arm64架构适配版本
-          npm install miniflare@3 --only=prod --registry=https://registry.npmmirror.com
-
-      # 4. 生成Miniflare启动脚本（和之前一致，无需修改）
+      # 4. 生成Miniflare启动脚本（稳定兼容版）
       - name: Create Miniflare Startup Script
         run: |
           cat << 'EOF' > start.js
@@ -53,7 +52,7 @@ jobs:
               // 自动加载Pages入口_worker.js
               workers: [path.join(__dirname, 'dist/_worker.js')],
               
-              // 监听配置：支持本机+同网段访问
+              // 监听配置：修复127.0.0.1无法访问，支持本机+同网段
               host: '0.0.0.0',
               port: 8787,
               
@@ -61,7 +60,7 @@ jobs:
               bindings: {
                 ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin',
               },
-              // D1数据库绑定（持久化，完美兼容MiSub原生SQL）
+              // D1数据库绑定（持久化，原生兼容MiSub所有SQL）
               d1Databases: {
                 MISUB_DB: path.join(dataDir, 'misub.db'),
               },
@@ -70,7 +69,7 @@ jobs:
                 MISUB_KV: path.join(dataDir, 'kv'),
               },
               
-              // 运行时优化
+              // 运行时优化，关闭不必要的开发功能
               watch: false,
               liveReload: false,
               disableCache: false,
@@ -114,7 +113,7 @@ jobs:
           mkdir -p magisk_module/misub
           mkdir -p magisk_module/misub/data
           
-          # 复制所有文件：构建产物、启动脚本、预安装的node_modules
+          # 复制所有核心文件：构建产物、启动脚本、预安装的node_modules
           cp -r dist start.js node_modules package.json magisk_module/misub/
           
           # 1. 模块基础信息配置
@@ -124,11 +123,11 @@ jobs:
           version=v2.5.0
           versionCode=250
           author=imzyb | Miniflare适配
-          description=MiSub订阅管理工具，预打包arm64架构Miniflare运行时，无需手机端联网安装，刷入即用，完美兼容Cloudflare原生API。
+          description=MiSub订阅管理工具，预打包arm64兼容Miniflare运行时，无需手机端联网安装，刷入即用，完美兼容Cloudflare原生API。
           updateJson=https://raw.githubusercontent.com/imzyb/MiSub/main/module_update.json
           EOF
           
-          # 2. 开机自启脚本（移除了安装逻辑，直接启动）
+          # 2. 开机自启脚本（无安装逻辑，直接启动）
           cat << 'EOF' > magisk_module/service.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
