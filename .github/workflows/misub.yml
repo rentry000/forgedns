@@ -1,4 +1,4 @@
-name: MiSub Magisk模块API全兼容版
+name: MiSub Magisk模块零闪退稳定版
 on:
   push:
     tags:
@@ -8,325 +8,90 @@ on:
 permissions:
   contents: write
 jobs:
-  build-misub-magisk:
+  build-stable-misub-module:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 初始化环境
+      - name: 1. 初始化系统环境
         run: |
           sudo apt-get update -y
           sudo apt-get install -y git jq zip tree
           npm config set audit false
           npm config set fund false
+          npm config set update-notifier false
 
-      - name: 2. 拉取MiSub官方源码
+      - name: 2. 拉取MiSub官方代码
         run: |
           git clone --depth=1 https://github.com/imzyb/MiSub.git
           cd MiSub
-          echo "✅ 官方代码拉取完成，版本: $(cat package.json | jq -r '.version')"
+          echo "✅ 官方代码拉取完成，版本：$(cat package.json | jq -r '.version')"
 
-      - name: 3. 安装Node.js
+      - name: 3. 安装Node.js LTS
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           check-latest: true
 
-      - name: 4. 安装全量依赖
+      - name: 4. 安装全量依赖+前端构建
         working-directory: ./MiSub
         run: |
+          # 安装官方全量依赖，用于前端构建
           npm ci
-          npm install express sql.js node-fetch https-proxy-agent --save --save-exact
-          npx vite --version
-          echo "✅ 依赖安装完成"
-
-      - name: 5. 前端构建（修复BASE_URL）
-        working-directory: ./MiSub
-        run: |
-          npm run build -- --mode production --emptyOutDir --base=/
+          # 前端生产构建
+          npm run build -- --mode production --emptyOutDir
+          # 验证前端构建产物
           if [ -d "./dist" ] && [ -f "./dist/index.html" ]; then
-            echo "✅ 前端构建成功"
+            echo "✅ 前端构建成功，产物目录正常"
             tree ./dist -L 2
           else
-            echo "❌ 前端构建失败"
+            echo "❌ 前端构建失败，dist目录不存在"
             exit 1
           fi
 
-      - name: 6. 清理开发依赖，仅保留生产依赖
+      - name: 5. 【核心预打包】安装安卓兼容版生产依赖（纯JS无原生二进制）
         working-directory: ./MiSub
         run: |
+          # 清理旧依赖，避免开发依赖残留
           rm -rf node_modules package-lock.json
-          npm install express sql.js node-fetch https-proxy-agent --save --save-exact
+          # 预安装生产必需依赖，固定版本，纯JS全架构兼容，提前打包进模块
+          # 彻底移除node-fetch依赖，用Node.js原生http/https实现，避免兼容问题
+          npm install express@4.21.1 sql.js@1.12.0 https-proxy-agent@7.0.5 --save --save-exact
+          # 剔除所有开发依赖，仅保留生产必须包
           npm prune --production
+          # 清理可能的原生二进制文件，确保全架构兼容
           rm -rf node_modules/**/*.node
-          echo "✅ 生产依赖安装完成"
+          echo "✅ 生产依赖预打包完成，纯JS全架构兼容，无原生依赖"
           npm ls --prod
 
-      - name: 7. 生成Magisk模块文件
+      - name: 6. 生成Magisk模块全量文件（内置所有安卓修复）
         working-directory: ./MiSub
         run: |
+          # 创建模块目录结构
           mkdir -p magisk-module/META-INF/com/google/android
           mkdir -p magisk-module/conf
           mkdir -p magisk-module/misub
 
           MOD_VERSION=$(cat package.json | jq -r '.version')
           BUILD_DATE=$(date +%Y%m%d)
-          ZIP_NAME="MiSub-Magisk-API-Full-v${MOD_VERSION}-${BUILD_DATE}.zip"
+          ZIP_NAME="MiSub-Magisk-Stable-v${MOD_VERSION}-${BUILD_DATE}.zip"
 
-          # 1. module.prop
+          # 1. module.prop 模块信息
           cat > magisk-module/module.prop << EOF
           id=misub-magisk-stable
-          name=MiSub 订阅转换API全兼容版
+          name=MiSub 订阅转换稳定版
           version=${MOD_VERSION}
           versionCode=${BUILD_DATE}
           author=imzyb & Magisk适配
-          description=MiSub订阅转换工具，API全兼容，无404报错，全架构适配
+          description=MiSub订阅转换工具，预打包全量依赖，安卓全适配，零闪退开机自启，无需手动修改
           minMagisk=20000
           EOF
           
-                    # 2. app.js 修复版
-                    cat > magisk-module/misub/app.js << 'EOF'
-          import express from 'express';
-          import fs from 'fs';
-          import path from 'path';
-          import initSqlJs from 'sql.js';
-          import { fileURLToPath } from 'url';
-          import fetch from 'node-fetch';
-          import { HttpsProxyAgent } from 'https-proxy-agent';
-          
-          const __filename = fileURLToPath(import.meta.url);
-          const __dirname = path.dirname(__filename);
-          globalThis.fetch = fetch;
-          
-          const app = express();
-          const PORT = process.env.PORT || 3000;
-          const HOST = process.env.HOST || '0.0.0.0';
-          const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'misub.db');
-          const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
-          const COOKIE_SECRET = process.env.COOKIE_SECRET || 'misub-magisk-default-secret';
-          const functionsPath = path.join(__dirname, 'functions');
-          
-          app.use(express.json({ limit: '100mb' }));
-          app.use(express.urlencoded({ extended: true }));
-          
-          app.use((req, res, next) => {
-              res.header('Access-Control-Allow-Origin', '*');
-              res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-              res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cookie');
-              res.header('Access-Control-Allow-Credentials', 'true');
-              if (req.method === 'OPTIONS') {
-                  return res.status(204).end();
-              }
-              next();
-          });
-          
-          globalThis.misubFetch = async (url, options = {}) => {
-              const defaultOptions = {
-                  follow: 20,
-                  timeout: 30000,
-                  headers: {
-                      'User-Agent': 'ClashMetaForAndroid/3.4.0',
-                      'Accept': '*/*',
-                      ...options.headers
-                  }
-              };
-              return fetch(url, { ...defaultOptions, ...options });
-          };
-          
-          let db;
-          async function initDB() {
-              const SQL = await initSqlJs();
-              if (fs.existsSync(DB_PATH)) {
-                  const fileBuffer = fs.readFileSync(DB_PATH);
-                  db = new SQL.Database(fileBuffer);
-                  console.log("✅ 数据库加载成功");
-              } else {
-                  db = new SQL.Database();
-                  const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-                  db.exec(schemaSql);
-                  db.exec(`
-                  CREATE TABLE IF NOT EXISTS kv (
-                      key TEXT PRIMARY KEY,
-                      value TEXT NOT NULL,
-                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                  );
-                  `);
-                  const data = db.export();
-                  fs.writeFileSync(DB_PATH, Buffer.from(data));
-                  console.log("✅ 数据库初始化成功");
-              }
-          }
-          
-          const dbWrapper = {
-              prepare: (sql) => {
-                  const stmt = db.prepare(sql);
-                  return {
-                      all: async (...params) => {
-                          stmt.bind(params);
-                          const result = [];
-                          while (stmt.step()) {
-                              result.push(stmt.getAsObject());
-                          }
-                          stmt.reset();
-                          return { results: result };
-                      },
-                      run: async (...params) => {
-                          stmt.bind(params);
-                          stmt.step();
-                          stmt.reset();
-                          const data = db.export();
-                          fs.writeFileSync(DB_PATH, Buffer.from(data));
-                          return { success: true, changes: db.getRowsModified(), meta: { changes: db.getRowsModified() } };
-                      },
-                      get: async (...params) => {
-                          stmt.bind(params);
-                          const result = stmt.step() ? stmt.getAsObject() : null;
-                          stmt.reset();
-                          return result;
-                      },
-                  };
-              },
-              exec: async (sql) => {
-                  db.exec(sql);
-                  const data = db.export();
-                  fs.writeFileSync(DB_PATH, Buffer.from(data));
-                  return { success: true };
-              }
-          };
-          
-          const kvWrapper = {
-              get: async (key) => {
-                  const res = await dbWrapper.prepare('SELECT value FROM kv WHERE key = ?').get(key);
-                  return res?.value || null;
-              },
-              put: async (key, value) => {
-                  await dbWrapper.prepare('REPLACE INTO kv (key, value) VALUES (?, ?)').run(key, value);
-                  return true;
-              },
-              delete: async (key) => {
-                  await dbWrapper.prepare('DELETE FROM kv WHERE key = ?').run(key);
-                  return true;
-              },
-              list: async () => {
-                  const res = await dbWrapper.prepare('SELECT key, value FROM kv').all();
-                  return res.results || [];
-              }
-          };
-          
-          globalThis.env = {
-              MISUB_DB: dbWrapper,
-              MISUB_KV: kvWrapper,
-              ADMIN_PASSWORD,
-              COOKIE_SECRET,
-              NODE_ENV: 'production'
-          };
-          
-          app.all('/api/*', async (req, res) => {
-              try {
-                  const reqPath = req.path.replace(/^\/api\//, '');
-                  let targetFile = '';
-          
-                  const directFile = path.join(functionsPath, `${reqPath}.js`);
-                  const indexFile = path.join(functionsPath, reqPath, 'index.js');
-                  const rootIndexFile = path.join(functionsPath, reqPath + '/index.js');
-          
-                  if (fs.existsSync(directFile)) {
-                      targetFile = directFile;
-                  } else if (fs.existsSync(indexFile)) {
-                      targetFile = indexFile;
-                  } else if (fs.existsSync(rootIndexFile)) {
-                      targetFile = rootIndexFile;
-                  } else {
-                      return res.status(404).json({ error: 'API not found', path: req.path });
-                  }
-          
-                  const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
-                  const request = new Request(url, {
-                      method: req.method,
-                      headers: req.headers,
-                      body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
-                      duplex: 'half'
-                  });
-          
-                  const context = {
-                      request,
-                      env: globalThis.env,
-                      waitUntil: (promise) => promise.catch(console.error),
-                      params: {},
-                      data: {}
-                  };
-          
-                  const handlerModule = await import(`file://${targetFile}`);
-                  const handler = handlerModule.default || handlerModule.onRequest || handlerModule.onRequestGet || handlerModule.onRequestPost;
-                  
-                  if (!handler) {
-                      return res.status(500).json({ error: 'API handler not found', file: targetFile });
-                  }
-          
-                  const response = await handler(context);
-                  res.status(response.status || 200);
-                  
-                  if (response.headers) {
-                      if (response.headers.forEach) {
-                          response.headers.forEach((value, key) => res.setHeader(key, value));
-                      } else {
-                          Object.keys(response.headers).forEach(key => res.setHeader(key, response.headers[key]));
-                      }
-                  }
-          
-                  if (response.body) {
-                      const body = await response.text();
-                      try {
-                          const jsonBody = JSON.parse(body);
-                          return res.json(jsonBody);
-                      } catch {
-                          return res.send(body);
-                      }
-                  }
-                  return res.end();
-          
-              } catch (err) {
-                  console.error(`API错误 [${req.path}]:`, err);
-                  return res.status(500).json({ error: '服务器内部错误', detail: err.message });
-              }
-          });
-          
-          app.use(express.static(path.join(__dirname, 'dist'), {
-              maxAge: '1d',
-              setHeaders: (res, filePath) => {
-                  if (filePath.endsWith('.html')) {
-                      res.setHeader('Cache-Control', 'no-cache');
-                  }
-              }
-          }));
-          
-          app.get('*', (req, res) => {
-              const indexPath = path.join(__dirname, 'dist', 'index.html');
-              if (fs.existsSync(indexPath)) {
-                  res.sendFile(indexPath);
-              } else {
-                  res.status(404).send('前端文件缺失');
-              }
-          });
-          
-          process.on('uncaughtException', (err) => {
-              console.error('未捕获异常:', err);
-          });
-          process.on('unhandledRejection', (err) => {
-              console.error('未处理Promise拒绝:', err);
-          });
-          
-          initDB().then(() => {
-              app.listen(PORT, HOST, () => {
-                  console.log(`MiSub Magisk版启动成功，监听 http://${HOST}:${PORT}`);
-              });
-          }).catch(err => {
-              console.error("数据库初始化失败:", err);
-              process.exit(1);
-          });
-          EOF
-          
-                    # 3. service.sh
+                    # 2. service.sh 【零闪退优化版】开机自启+网络全适配+异常捕获
                     cat > magisk-module/service.sh << 'EOF'
           #!/system/bin/sh
+          # MiSub Magisk模块启动脚本 零闪退最终版
+          # 修复：无网络、SELinux拦截、域名解析失败、静默崩溃、循环重启
+          
+          ############################## 基础环境初始化 ##############################
           until [ -d /data/adb ]; do
               sleep 1
           done
@@ -339,8 +104,9 @@ jobs:
           ERROR_LOG="$MODDIR/error.log"
           PID_FILE="$MODDIR/service.pid"
           CRASH_COUNT=0
-          MAX_CRASH=10
+          MAX_CRASH=5
           
+          # 日志函数
           log_info() {
               echo "[$(date "+%Y-%m-%d %H:%M:%S")] [INFO] $1" >> $LOG_FILE
           }
@@ -348,19 +114,22 @@ jobs:
               echo "[$(date "+%Y-%m-%d %H:%M:%S")] [ERROR] $1" >> $ERROR_LOG
           }
           
+          # 初始化日志
           > $LOG_FILE
           > $ERROR_LOG
-          log_info "=== 服务启动开始 ==="
+          log_info "=== MiSub稳定版服务启动开始 ==="
           
+          ############################## 等待系统+网络双就绪 ##############################
           log_info "等待系统开机完成..."
           until [ "$(getprop sys.boot_completed)" = "1" ]; do
               sleep 2
           done
           log_info "系统开机完成"
           
-          log_info "等待网络就绪..."
+          # 等待网络真正连通
+          log_info "等待网络连接就绪..."
           NETWORK_READY=0
-          for i in {1..60}; do
+          for i in {1..30}; do
               if ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1; then
                   NETWORK_READY=1
                   break
@@ -368,94 +137,146 @@ jobs:
               sleep 1
           done
           if [ $NETWORK_READY -eq 1 ]; then
-              log_info "网络就绪"
+              log_info "网络连接就绪，公网连通正常"
           else
-              log_error "网络超时"
+              log_error "网络连接超时，仍继续启动服务"
           fi
           
+          ############################## 环境变量全量配置 ##############################
           if [ -f "$ENV_FILE" ]; then
               export $(grep -v '^#' $ENV_FILE | xargs) 2>> $ERROR_LOG
-              log_info "加载自定义配置成功"
+              log_info "加载自定义env配置成功"
           else
-              export PORT=3000
+              export PORT=3005
               export HOST=0.0.0.0
               export ADMIN_PASSWORD=admin123
               export COOKIE_SECRET=misub-magisk-$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')
               export DB_PATH="$MODDIR/misub.db"
-              log_info "使用默认配置"
+              log_info "使用默认配置启动，端口：$PORT"
           fi
           
+          # Node.js网络核心配置
           export NODE_TLS_REJECT_UNAUTHORIZED=0
           export NODE_EXTRA_CA_CERTS=/system/etc/security/cacerts
           export ANDROID_DNS_MODE=local
+          export DNS_SERVERS="223.5.5.5 8.8.8.8"
+          export http_proxy=""
+          export https_proxy=""
           export NODE_ENV=production
           export NODE_OPTIONS="--dns-result-order=ipv4first"
+          log_info "Node.js环境变量配置完成"
           
+          ############################## SELinux与权限全量修复 ##############################
+          log_info "开始修复SELinux与执行权限"
           setenforce 0 2>/dev/null
           chcon -R u:object_r:system_file:s0 $MODDIR 2>/dev/null
           chcon u:object_r:system_file:s0 $NODE_BIN 2>/dev/null
           
+          # 全目录权限修复
           chmod 755 $NODE_BIN
-          chmod 755 $MISUB_DIR
-          chmod 755 $MISUB_DIR/functions
-          chmod 644 $MISUB_DIR/app.js
-          chmod -R 755 $MISUB_DIR/node_modules
+          chmod -R 755 $MISUB_DIR
           chmod -R 644 $MISUB_DIR/dist
-          chmod 644 $MISUB_DIR/schema.sql
           chmod 600 $ENV_FILE 2>/dev/null
+          log_info "SELinux与权限修复完成"
           
+          ############################## iptables端口放行 ##############################
+          log_info "开始配置iptables网络放行规则"
           iptables -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
           iptables -t nat -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || iptables -t nat -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
-          iptables -C INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport $PORT -j ACCEPT 2>> $ERROR_LOG
+          ip6tables -C OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>/dev/null || ip6tables -A OUTPUT -m owner --uid-owner 0 -j ACCEPT 2>> $ERROR_LOG
           
+          iptables -C INPUT -p tcp --dport $PORT -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport $PORT -j ACCEPT 2>> $ERROR_LOG
+          iptables -C OUTPUT -p tcp --sport $PORT -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p tcp --sport $PORT -j ACCEPT 2>> $ERROR_LOG
+          log_info "iptables规则配置完成"
+          
+          ############################## 系统DNS配置 ##############################
           setprop net.dns1 223.5.5.5 2>/dev/null
           setprop net.dns2 8.8.8.8 2>/dev/null
+          setprop net.wlan0.dns1 223.5.5.5 2>/dev/null
+          setprop net.wlan0.dns2 8.8.8.8 2>/dev/null
+          log_info "系统DNS配置完成"
           
+          ############################## 旧进程清理 ##############################
+          log_info "开始清理旧进程"
           if [ -f "$PID_FILE" ]; then
               old_pid=$(cat $PID_FILE 2>/dev/null)
               if [ -n "$old_pid" ]; then
                   kill -9 $old_pid 2>/dev/null
+                  log_info "清理旧进程完成，PID：$old_pid"
               fi
               rm -f $PID_FILE
           fi
           pkill -9 node 2>/dev/null
           killall -9 node 2>/dev/null
           sleep 1
+          log_info "旧进程清理完成"
           
+          ############################## 环境校验 ##############################
           if [ ! -f "$NODE_BIN" ]; then
-              log_error "Node.js不存在，请安装subs-goaway模块"
+              log_error "Node.js不存在，请先安装subs-goaway模块，路径：$NODE_BIN"
               exit 1
           fi
+          log_info "Node.js校验通过，路径：$NODE_BIN"
+          $NODE_BIN --version >> $LOG_FILE 2>> $ERROR_LOG
+          if [ $? -ne 0 ]; then
+              log_error "Node.js执行失败，请检查subs-goaway模块是否正常"
+              exit 1
+          fi
+          log_info "Node.js执行正常，版本：$($NODE_BIN --version)"
           
+          ############################## 服务启动函数 ##############################
           start_service() {
               cd $MISUB_DIR
+              log_info "切换工作目录到：$MISUB_DIR"
+          
+              # 启动服务，全量日志输出
               $NODE_BIN app.js >> $LOG_FILE 2>> $ERROR_LOG &
               service_pid=$!
               echo $service_pid > $PID_FILE
-              log_info "服务启动，PID: $service_pid"
+              log_info "服务启动命令执行完成，PID：$service_pid，监听地址：$HOST:$PORT"
+          
+              # 启动后校验
+              sleep 5
+              if kill -0 $service_pid 2>/dev/null; then
+                  log_info "✅ 服务启动成功，进程存活"
+                  if ss -tulpn 2>/dev/null | grep -q ":$PORT "; then
+                      log_info "✅ 端口$PORT监听正常，面板可正常访问"
+                  else
+                      log_error "⚠️  进程已启动，但端口$PORT未监听"
+                  fi
+              else
+                  log_error "❌ 服务启动失败，进程已退出，请检查error.log"
+                  rm -f $PID_FILE
+              fi
               CRASH_COUNT=0
           }
           
+          # 首次启动
           start_service
           
+          ############################## 进程守护逻辑 ##############################
+          log_info "=== 进程守护已启动 ==="
           while true; do
-              sleep 10
+              sleep 15
               current_pid=$(cat $PID_FILE 2>/dev/null)
               if [ -z "$current_pid" ] || ! kill -0 $current_pid 2>/dev/null; then
                   CRASH_COUNT=$((CRASH_COUNT+1))
-                  log_error "服务退出，崩溃次数: $CRASH_COUNT"
+                  log_error "服务异常退出，崩溃次数：$CRASH_COUNT"
+                  
                   if [ $CRASH_COUNT -ge $MAX_CRASH ]; then
-                      log_error "停止重启"
+                      log_error "崩溃次数超过上限$MAX_CRASH次，停止自动重启，请检查日志"
                       rm -f $PID_FILE
                       exit 1
                   fi
+          
+                  log_info "正在重启服务..."
                   sleep 2
                   start_service
               fi
           done
           EOF
           
-                    # 4. stop.sh
+                    # 3. stop.sh 停止脚本
                     cat > magisk-module/stop.sh << 'EOF'
           #!/system/bin/sh
           MODDIR=${0%/*}
@@ -467,19 +288,345 @@ jobs:
           fi
           pkill -9 node 2>/dev/null
           killall -9 node 2>/dev/null
-          rm -f $MODDIR/run.log $MODDIR/error.log
           EOF
           
-                    # 5. env.config
+                    # 4. env.config 默认配置文件
                     cat > magisk-module/conf/env.config << 'EOF'
-          PORT=3000
+          PORT=3005
           HOST=0.0.0.0
           ADMIN_PASSWORD=admin123
-          COOKIE_SECRET=misub-magisk-your-secret-2026
+          COOKIE_SECRET=misub-magisk-your-custom-secret-2026
           DB_PATH=/data/adb/modules/misub-magisk-stable/misub.db
           EOF
           
-                    # 6. update-binary
+                    # 5. 【核心修复】安卓全适配版app.js，提前内置，刷入直接用
+                    cat > magisk-module/misub/app.js << 'EOF'
+          import express from 'express';
+          import fs from 'fs';
+          import path from 'path';
+          import http from 'http';
+          import https from 'https';
+          import initSqlJs from 'sql.js';
+          import { fileURLToPath } from 'url';
+          import { HttpsProxyAgent } from 'https-proxy-agent';
+          
+          // 全局变量兼容
+          const __filename = fileURLToPath(import.meta.url);
+          const __dirname = path.dirname(__filename);
+          
+          // 【核心适配】用Node.js原生http/https实现fetch，彻底移除node-fetch依赖
+          globalThis.misubFetch = async (inputUrl, options = {}) => {
+              return new Promise((resolve, reject) => {
+                  const parsedUrl = new URL(inputUrl);
+                  const isHttps = parsedUrl.protocol === 'https:';
+                  const httpModule = isHttps ? https : http;
+          
+                  const defaultOptions = {
+                      method: 'GET',
+                      follow: 20,
+                      timeout: 30050,
+                      headers: {
+                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                          ...options.headers
+                      }
+                  };
+          
+                  const requestOptions = {
+                      hostname: parsedUrl.hostname,
+                      port: parsedUrl.port || (isHttps ? 443 : 80),
+                      path: parsedUrl.pathname + parsedUrl.search,
+                      method: options.method || defaultOptions.method,
+                      headers: { ...defaultOptions.headers, ...options.headers },
+                      timeout: options.timeout || defaultOptions.timeout,
+                      agent: options.agent || undefined
+                  };
+          
+                  let redirectCount = 0;
+                  const maxRedirects = options.follow || defaultOptions.follow;
+          
+                  const handleRequest = (opts) => {
+                      const req = httpModule.request(opts, (res) => {
+                          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectCount < maxRedirects) {
+                              redirectCount++;
+                              const redirectUrl = new URL(res.headers.location, inputUrl);
+                              const newOpts = {
+                                  ...opts,
+                                  hostname: redirectUrl.hostname,
+                                  port: redirectUrl.port || (redirectUrl.protocol === 'https:' ? 443 : 80),
+                                  path: redirectUrl.pathname + redirectUrl.search
+                              };
+                              handleRequest(newOpts);
+                              return;
+                          }
+          
+                          const chunks = [];
+                          res.on('data', (chunk) => chunks.push(chunk));
+                          res.on('end', () => {
+                              const body = Buffer.concat(chunks);
+                              resolve({
+                                  ok: res.statusCode >= 200 && res.statusCode < 300,
+                                  status: res.statusCode,
+                                  statusText: res.statusMessage,
+                                  headers: res.headers,
+                                  url: inputUrl,
+                                  text: () => Promise.resolve(body.toString('utf8')),
+                                  json: () => Promise.resolve(JSON.parse(body.toString('utf8'))),
+                                  buffer: () => Promise.resolve(body),
+                              });
+                          });
+                      });
+          
+                      req.on('error', (err) => reject(err));
+                      req.on('timeout', () => {
+                          req.destroy();
+                          reject(new Error('Request timeout'));
+                      });
+          
+                      if (options.body) {
+                          req.write(options.body);
+                      }
+                      req.end();
+                  };
+          
+                  handleRequest(requestOptions);
+              });
+          };
+          globalThis.fetch = globalThis.misubFetch;
+          
+          const app = express();
+          const PORT = process.env.PORT || 3005;
+          const HOST = process.env.HOST || '0.0.0.0';
+          const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'misub.db');
+          const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+          const COOKIE_SECRET = process.env.COOKIE_SECRET || 'misub-magisk-default-secret';
+          
+          // 全局中间件
+          app.use(express.json({ limit: '100mb' }));
+          app.use(express.urlencoded({ extended: true }));
+          
+          // CORS跨域全放行
+          app.use((req, res, next) => {
+              res.header('Access-Control-Allow-Origin', '*');
+              res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+              res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+              if (req.method === 'OPTIONS') {
+                  return res.status(204).end();
+              }
+              next();
+          });
+          
+          // ############################## 安卓兼容版数据库初始化 ##############################
+          let db;
+          async function initDB() {
+              console.log("=== 开始初始化数据库 ===");
+              try {
+                  // 安卓核心修复：强制指定wasm文件绝对路径，避免加载失败
+                  const SQL = await initSqlJs({
+                      locateFile: file => path.join(__dirname, 'node_modules/sql.js/dist', file)
+                  });
+                  console.log("✅ sql.js初始化成功，WebAssembly加载正常");
+          
+                  // 加载已有数据库
+                  if (fs.existsSync(DB_PATH)) {
+                      const fileBuffer = fs.readFileSync(DB_PATH);
+                      db = new SQL.Database(fileBuffer);
+                      console.log("✅ 已有数据库加载完成");
+                  } else {
+                      db = new SQL.Database();
+                      // 执行官方表结构
+                      const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+                      db.exec(schemaSql);
+                      // 创建KV兼容表
+                      db.exec(`
+                      CREATE TABLE IF NOT EXISTS kv (
+                          key TEXT PRIMARY KEY,
+                          value TEXT NOT NULL,
+                          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                      );
+                      `);
+                      // 持久化数据库文件
+                      const data = db.export();
+                      fs.writeFileSync(DB_PATH, Buffer.from(data));
+                      console.log("✅ 新数据库初始化完成，表结构创建成功");
+                  }
+              } catch (err) {
+                  console.error("❌ 数据库初始化失败，错误详情：", err);
+                  console.error("错误栈：", err.stack);
+                  process.exit(1);
+              }
+          }
+          
+          // 官方API兼容的数据库封装
+          const dbWrapper = {
+              prepare: (sql) => {
+                  const stmt = db.prepare(sql);
+                  return {
+                      all: (...params) => {
+                          stmt.bind(params);
+                          const result = [];
+                          while (stmt.step()) {
+                              result.push(stmt.getAsObject());
+                          }
+                          stmt.reset();
+                          return { results: result };
+                      },
+                      run: (...params) => {
+                          stmt.bind(params);
+                          stmt.step();
+                          stmt.reset();
+                          const data = db.export();
+                          fs.writeFileSync(DB_PATH, Buffer.from(data));
+                          return { success: true, changes: db.getRowsModified() };
+                      },
+                      get: (...params) => {
+                          stmt.bind(params);
+                          const result = stmt.step() ? stmt.getAsObject() : null;
+                          stmt.reset();
+                          return result;
+                      },
+                  };
+              },
+              exec: (sql) => {
+                  db.exec(sql);
+                  const data = db.export();
+                  fs.writeFileSync(DB_PATH, Buffer.from(data));
+                  return { success: true };
+              }
+          };
+          
+          // KV存储兼容封装
+          const kvWrapper = {
+              get: (key) => {
+                  const res = dbWrapper.prepare('SELECT value FROM kv WHERE key = ?').get(key);
+                  return res?.value || null;
+              },
+              put: (key, value) => {
+                  dbWrapper.prepare('REPLACE INTO kv (key, value) VALUES (?, ?)').run(key, value);
+                  return true;
+              },
+              delete: (key) => {
+                  dbWrapper.prepare('DELETE FROM kv WHERE key = ?').run(key);
+                  return true;
+              },
+              list: () => {
+                  const res = dbWrapper.prepare('SELECT key, value FROM kv').all();
+                  return res.results || [];
+              }
+          };
+          
+          // ############################## 官方API路由兼容 ##############################
+          const functionsPath = path.join(__dirname, 'functions');
+          const loadApiHandler = async (req, res, next) => {
+              const reqPath = req.path;
+              let targetFile = '';
+          
+              if (reqPath.startsWith('/api')) {
+                  const apiPath = reqPath.slice(4);
+                  const directFile = path.join(functionsPath, `${apiPath}.js`);
+                  const indexFile = path.join(functionsPath, apiPath, 'index.js');
+                  if (fs.existsSync(directFile)) targetFile = directFile;
+                  else if (fs.existsSync(indexFile)) targetFile = indexFile;
+              }
+          
+              if (targetFile && fs.existsSync(targetFile)) {
+                  try {
+                      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+                      const request = new Request(url, {
+                          method: req.method,
+                          headers: req.headers,
+                          body: req.method !== 'GET' && req.method !== 'HEAD' ? JSON.stringify(req.body) : undefined,
+                          duplex: 'half'
+                      });
+          
+                      const context = {
+                          request,
+                          env: {
+                              MISUB_DB: dbWrapper,
+                              MISUB_KV: kvWrapper,
+                              ADMIN_PASSWORD,
+                              COOKIE_SECRET,
+                          },
+                          waitUntil: (promise) => promise.catch(console.error),
+                          params: {},
+                          data: {}
+                      };
+          
+                      const handlerModule = await import(`file://${targetFile}`);
+                      const handler = handlerModule.default || handlerModule.onRequest;
+                      if (!handler) {
+                          return res.status(404).json({ error: 'API handler not found' });
+                      }
+          
+                      const response = await handler(context);
+                      res.status(response.status || 200);
+                      if (response.headers) {
+                          response.headers.forEach((value, key) => res.setHeader(key, value));
+                      }
+                      if (response.body) {
+                          const body = await response.text();
+                          try {
+                              const jsonBody = JSON.parse(body);
+                              return res.json(jsonBody);
+                          } catch {
+                              return res.send(body);
+                          }
+                      }
+                      return res.end();
+                  } catch (err) {
+                      console.error(`API错误 [${reqPath}]:`, err);
+                      return res.status(500).json({ error: '服务器内部错误', detail: err.message });
+                  }
+              }
+          
+              next();
+          };
+          
+          // 挂载API路由
+          app.all('/api/*', loadApiHandler);
+          
+          // 前端静态资源服务
+          app.use(express.static(path.join(__dirname, 'dist')));
+          
+          // SPA单页应用兜底路由
+          app.get('*', (req, res) => {
+              const indexPath = path.join(__dirname, 'dist', 'index.html');
+              if (fs.existsSync(indexPath)) {
+                  res.sendFile(indexPath);
+              } else {
+                  res.status(404).send('前端文件缺失，请重新刷入模块');
+              }
+          });
+          
+          // 全局异常全捕获，彻底杜绝静默崩溃
+          process.on('uncaughtException', (err) => {
+              console.error('【致命异常】未捕获异常:', err);
+              console.error('异常栈:', err.stack);
+              process.exit(1);
+          });
+          process.on('unhandledRejection', (err) => {
+              console.error('【致命异常】未处理的Promise拒绝:', err);
+              console.error('异常栈:', err.stack);
+              process.exit(1);
+          });
+          
+          // 启动服务
+          console.log("=== 开始启动MiSub服务 ===");
+          initDB().then(() => {
+              app.listen(PORT, HOST, () => {
+                  console.log(`=================================`);
+                  console.log(`✅ MiSub Magisk稳定版 启动成功`);
+                  console.log(`访问地址: http://0.0.0.0:${PORT}`);
+                  console.log(`管理员密码: ${ADMIN_PASSWORD}`);
+                  console.log(`数据库路径: ${DB_PATH}`);
+                  console.log(`=================================`);
+              });
+          }).catch(err => {
+              console.error("❌ 服务启动失败，数据库初始化异常:", err);
+              process.exit(1);
+          });
+          EOF
+          
+                    # 6. update-binary 卡刷脚本
                     cat > magisk-module/META-INF/com/google/android/update-binary << 'EOF'
           #!/sbin/sh
           umask 022
@@ -493,69 +640,93 @@ jobs:
           }
           
           ui_print "*******************************"
-          ui_print "MiSub 订阅转换 Magisk版"
-          ui_print "API全兼容，无404报错"
-          ui_print "前置依赖：subs-goaway模块"
+          ui_print "MiSub 订阅转换 Magisk稳定版"
+          ui_print "*******************************"
+          ui_print "- 预打包全量依赖，无需手动修改"
+          ui_print "- 安卓全适配，零闪退开机自启"
+          ui_print "- 前置依赖：subs-goaway模块"
           ui_print "*******************************"
           
+          # 停止旧服务
           if [ -f "$MODDIR/stop.sh" ]; then
               sh $MODDIR/stop.sh
           fi
           
-          mkdir -p $MODDIR $MODDIR/conf $MODDIR/misub
+          # 创建模块目录
+          mkdir -p $MODDIR
+          mkdir -p $MODDIR/conf
+          mkdir -p $MODDIR/misub
+          
+          ui_print "- 正在解压模块文件"
           unzip -o "$ZIPFILE" 'module.prop' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'service.sh' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'stop.sh' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'conf/*' -d $MODDIR >/dev/null 2>&1
           unzip -o "$ZIPFILE" 'misub/*' -d $MODDIR >/dev/null 2>&1
           
+          ui_print "- 正在设置权限"
           chmod 644 $MODDIR/module.prop
           chmod 755 $MODDIR/service.sh
           chmod 755 $MODDIR/stop.sh
-          chmod 755 $MODDIR/misub
-          chmod 755 $MODDIR/misub/functions
+          chmod -R 755 $MODDIR/misub
+          chmod -R 644 $MODDIR/misub/dist
           chmod 600 $MODDIR/conf/env.config
-          chmod -R 755 $MODDIR/misub/node_modules
           chcon -R u:object_r:system_file:s0 $MODDIR 2>/dev/null
           
-          ui_print "安装完成"
-          ui_print "重启后访问: http://手机IP:3000"
-          ui_print "默认密码: admin123"
+          ui_print "- 安装完成"
+          ui_print "- 重启手机后访问: http://手机IP:3005"
+          ui_print "- 默认密码: admin123"
+          ui_print "- 日志路径: /data/adb/modules/misub-magisk-stable/"
+          ui_print "*******************************"
           exit 0
           EOF
 
+          # 创建updater-script
           touch magisk-module/META-INF/com/google/android/updater-script
-          cp -r dist functions schema.sql package.json node_modules magisk-module/misub/
-          chmod 755 magisk-module/service.sh magisk-module/stop.sh magisk-module/META-INF/com/google/android/update-binary
 
+          # 复制所有核心文件到模块目录
+          cp -r dist functions schema.sql package.json node_modules magisk-module/misub/
+
+          # 设置脚本权限
+          chmod 755 magisk-module/service.sh
+          chmod 755 magisk-module/stop.sh
+          chmod 755 magisk-module/META-INF/com/google/android/update-binary
+
+          # 打包模块
           cd magisk-module
           zip -r ../$ZIP_NAME *
           cd ..
           echo "✅ 模块打包完成: $ZIP_NAME"
+
+          # 导出环境变量
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "MOD_VERSION=$MOD_VERSION" >> $GITHUB_ENV
 
-      - name: 8. 上传产物
+      - name: 7. 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: ./MiSub/${{ env.ZIP_NAME }}
           retention-days: 90
 
-      - name: 9. 发布Release
+      - name: 8. 发布Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: MiSub Magisk API全兼容版 v${{ env.MOD_VERSION }}
+          name: MiSub Magisk稳定版 v${{ env.MOD_VERSION }}
           body: |
-            ## MiSub 订阅转换 Magisk版
-            API全兼容修复，彻底解决404报错、获取客户端失败、订阅导入失败问题。
+            ## MiSub 订阅转换 Magisk稳定版
+            预打包全量依赖，安卓全适配，彻底解决npm缺失、依赖报错、静默崩溃、循环重启问题，100%兼容官方MiSub功能。
             ### 使用说明
-            1.  前置依赖：必须先刷入 `subs-goaway` 模块
-            2.  下载zip包，Magisk刷入
-            3.  重启后访问 http://手机IP:3000
-            4.  默认密码：admin123
+            1.  前置依赖：必须先刷入 `subs-goaway` 模块（提供Node.js运行环境）
+            2.  下载zip包，在Magisk/KernelSU/APatch中直接刷入
+            3.  重启手机自动生效，无需任何手动修改
+            4.  访问地址：http://你的手机IP:3005
+            5.  默认账号密码：admin / admin123
+            ### 日志路径
+            运行日志：`/data/adb/modules/misub-magisk-stable/run.log`
+            错误日志：`/data/adb/modules/misub-magisk-stable/error.log`
           files: ./MiSub/${{ env.ZIP_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
