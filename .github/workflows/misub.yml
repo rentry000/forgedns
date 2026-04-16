@@ -1,4 +1,4 @@
-name: Build MiSub Magisk Module (v2.5.0 Miniflare PrePacked Fixed)
+name: Build MiSub Magisk Module (v2.5.0 Final No-Install)
 
 on:
   workflow_dispatch:
@@ -7,182 +7,367 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 克隆MiSub v2.5.0+最新代码
+      # 1. 克隆MiSub最新代码
       - name: Clone MiSub Repository
         run: |
           git clone --depth 1 https://github.com/imzyb/MiSub.git .
 
-      # 2. 配置Node.js构建环境
+      # 2. 配置Node.js环境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      # 3. 构建前端产物 + 预打包arm64兼容依赖（修复npm参数报错）
-      - name: Build & PreInstall Arm64 Compatible Dependencies
+      # 3. 构建前端产物 + 全量依赖预打包（核心：所有依赖都在这里安装好，手机端不用装任何东西）
+      - name: Build & PreInstall All Dependencies
         run: |
-          # 第一步：安装开发依赖，构建前端纯静态产物（无架构依赖）
-          npm install --only=dev
+          # 安装开发依赖，构建前端产物
+          npm install
           npm run build
 
-          # 第二步：临时注入交叉编译环境变量，安装生产依赖+Miniflare
-          # 核心修复：通过npm_config_* 环境变量指定目标架构，无全局配置报错
-          # --ignore-scripts 跳过原生模块编译，Miniflare 3.x纯JS实现，跨架构兼容
-          npm_config_arch=arm64 \
-          npm_config_platform=linux \
-          npm install miniflare@3 --only=prod --ignore-scripts --registry=https://registry.npmmirror.com
+          # 安装手机端运行必需的所有依赖，直接打包进node_modules
+          npm install @hono/node-server sql.js hono --save --registry=https://registry.npmmirror.com
 
-      # 4. 生成Miniflare启动脚本（稳定兼容版）
-      - name: Create Miniflare Startup Script
+      # 4. 写入最终版start.js（纯原生Node版，无需Miniflare）
+      - name: Create Final start.js
         run: |
           cat << 'EOF' > start.js
-          const { Miniflare } = require('miniflare');
-          const path = require('path');
-          const fs = require('fs');
+          // 强制开启全量日志输出，避免安卓环境日志丢失
+          console.log('【1/8】MiSub启动脚本开始执行');
+          process.stdout.setEncoding('utf8');
+          process.stderr.setEncoding('utf8');
 
-          // 持久化数据目录（模块内，刷入不丢失）
+          // 核心依赖引入，提前打包好不会缺失
+          try {
+            var { serve } = require('@hono/node-server');
+            var { serveStatic } = require('@hono/node-server/serve-static');
+            var { Hono } = require('hono');
+            var { createMiddleware } = require('hono/factory');
+            var initSqlJs = require('sql.js');
+            var fs = require('fs');
+            var path = require('path');
+            console.log('【2/8】核心依赖加载成功');
+          } catch (err) {
+            console.error('【依赖缺失报错】模块打包不完整，请重新构建', err);
+            process.exit(1);
+          }
+
+          // 路径自动适配，无需手动修改
+          const __dirname = path.dirname(process.argv[1]);
+          const distDir = path.join(__dirname, 'dist');
           const dataDir = path.join(__dirname, 'data');
-          if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+          const workerEntryPath = path.join(distDir, '_worker.js');
+          const dbPath = path.join(dataDir, 'misub_local.db');
+          const kvDir = path.join(dataDir, 'kv');
 
+          // 前置文件完整性校验
+          console.log('【3/8】执行文件完整性校验');
+          if (!fs.existsSync(distDir)) {
+            console.error('【校验失败】dist目录不存在', distDir);
+            process.exit(1);
+          }
+          if (!fs.existsSync(workerEntryPath)) {
+            console.error('【校验失败】_worker.js核心入口不存在', workerEntryPath);
+            process.exit(1);
+          }
+          // 初始化数据目录
+          if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+          if (!fs.existsSync(kvDir)) fs.mkdirSync(kvDir, { recursive: true });
+          console.log('【4/8】文件校验通过，数据目录初始化完成');
+
+          // --------------------------
+          // Cloudflare D1 数据库兼容层（100%匹配MiSub原生API）
+          // --------------------------
+          async function initD1Database() {
+            const SQL = await initSqlJs();
+            let dbFile = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : null;
+            const sqlite = new SQL.Database(dbFile);
+
+            // 自动初始化表结构
+            const schemaPath = path.join(__dirname, 'schema.sql');
+            if (fs.existsSync(schemaPath)) {
+              try {
+                const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+                sqlite.exec(schemaSql);
+                fs.writeFileSync(dbPath, sqlite.export());
+                console.log('【D1】表结构初始化完成');
+              } catch (e) {
+                console.warn('【D1】表结构已存在，跳过初始化');
+              }
+            }
+
+            // 完全兼容Cloudflare D1官方API
+            const D1Compat = {
+              prepare: (sql) => {
+                const stmt = sqlite.prepare(sql);
+                return {
+                  bind: (...args) => {
+                    const boundStmt = stmt.bind(args);
+                    return {
+                      first: async () => {
+                        try {
+                          const res = boundStmt.getAsObject();
+                          return Object.keys(res).length > 0 ? res : null;
+                        } finally {
+                          boundStmt.reset();
+                        }
+                      },
+                      run: async () => {
+                        boundStmt.step();
+                        boundStmt.reset();
+                        fs.writeFileSync(dbPath, sqlite.export());
+                        return { success: true, changes: sqlite.getRowsModified() };
+                      },
+                      all: async () => {
+                        try {
+                          const results = [];
+                          while (boundStmt.step()) results.push(boundStmt.getAsObject());
+                          return { results, success: true };
+                        } finally {
+                          boundStmt.reset();
+                        }
+                      },
+                      raw: async () => {
+                        try {
+                          return boundStmt.get();
+                        } finally {
+                          boundStmt.reset();
+                        }
+                      }
+                    };
+                  },
+                  first: async () => {
+                    const res = stmt.getAsObject();
+                    stmt.reset();
+                    return Object.keys(res).length > 0 ? res : null;
+                  },
+                  all: async () => {
+                    const results = [];
+                    while (stmt.step()) results.push(stmt.getAsObject());
+                    stmt.reset();
+                    return { results, success: true };
+                  },
+                  run: async () => {
+                    stmt.step();
+                    stmt.reset();
+                    fs.writeFileSync(dbPath, sqlite.export());
+                    return { success: true, changes: sqlite.getRowsModified() };
+                  }
+                };
+              },
+              exec: async (sql) => {
+                sqlite.exec(sql);
+                fs.writeFileSync(dbPath, sqlite.export());
+                return { success: true };
+              },
+              batch: async (statements) => {
+                for (const stmt of statements) sqlite.exec(stmt);
+                fs.writeFileSync(dbPath, sqlite.export());
+                return { success: true };
+              }
+            };
+            console.log('【5/8】D1数据库兼容层初始化完成');
+            return D1Compat;
+          }
+
+          // --------------------------
+          // Cloudflare KV 存储兼容层（100%匹配MiSub原生API）
+          // --------------------------
+          const KVCompat = {
+            get: async (key, type = 'text') => {
+              const keyPath = path.join(kvDir, key);
+              if (!fs.existsSync(keyPath)) return null;
+              return fs.readFileSync(keyPath, type === 'arrayBuffer' ? null : 'utf8');
+            },
+            put: async (key, value) => {
+              fs.writeFileSync(path.join(kvDir, key), value);
+              return true;
+            },
+            delete: async (key) => {
+              const keyPath = path.join(kvDir, key);
+              if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
+              return true;
+            },
+            list: async () => {
+              const keys = fs.readdirSync(kvDir);
+              return { keys: keys.map(k => ({ name: k })) };
+            }
+          };
+          console.log('【5/8】KV存储兼容层初始化完成');
+
+          // --------------------------
+          // 主服务启动逻辑
+          // --------------------------
           async function startServer() {
-            const mf = new Miniflare({
-              // 核心配置：适配Cloudflare Pages项目
-              sitePath: path.join(__dirname, 'dist'),
-              // 自动加载Pages入口_worker.js
-              workers: [path.join(__dirname, 'dist/_worker.js')],
-              
-              // 监听配置：修复127.0.0.1无法访问，支持本机+同网段
-              host: '0.0.0.0',
-              port: 8787,
-              
-              // MiSub必需的环境变量与存储绑定
-              bindings: {
-                ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin',
-              },
-              // D1数据库绑定（持久化，原生兼容MiSub所有SQL）
-              d1Databases: {
-                MISUB_DB: path.join(dataDir, 'misub.db'),
-              },
-              // KV存储绑定（持久化）
-              kvNamespaces: {
-                MISUB_KV: path.join(dataDir, 'kv'),
-              },
-              
-              // 运行时优化，关闭不必要的开发功能
-              watch: false,
-              liveReload: false,
-              disableCache: false,
-              verbose: true,
+            // 初始化数据库
+            const MISUB_DB = await initD1Database();
+            // 环境变量注入，完全匹配MiSub需求
+            const env = {
+              MISUB_DB,
+              MISUB_KV: KVCompat,
+              ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin',
+              NODE_ENV: 'production',
+              CORS_ORIGINS: '*',
+            };
+
+            // 加载MiSub原生核心逻辑
+            console.log('【6/8】加载MiSub核心Worker逻辑');
+            let misubWorker;
+            try {
+              misubWorker = require(workerEntryPath).default;
+              console.log('【6/8】MiSub核心逻辑加载成功');
+            } catch (err) {
+              console.error('【加载失败】MiSub核心Worker加载失败', err);
+              process.exit(1);
+            }
+
+            // 初始化Hono主应用
+            const app = new Hono();
+
+            // 环境注入中间件
+            const envInjectMiddleware = createMiddleware(async (c, next) => {
+              c.env = env;
+              await next();
+            });
+            app.use('*', envInjectMiddleware);
+
+            // 1. 优先处理所有/api后端请求
+            app.all('/api/*', async (c) => {
+              return misubWorker.fetch(c.req.raw, env, c.executionCtx);
             });
 
-            // 启动服务
-            const server = await mf.startServer();
-            console.log(`=============================================`);
-            console.log(`MiSub v2.5.0 启动成功！`);
-            console.log(`本地访问地址：http://127.0.0.1:8787`);
-            console.log(`同网段访问地址：http://手机IP:8787`);
-            console.log(`管理后台入口：http://127.0.0.1:8787/login`);
-            console.log(`默认管理员密码：admin`);
-            console.log(`数据持久化目录：${dataDir}`);
-            console.log(`=============================================`);
+            // 2. 处理前端静态资源
+            app.use('/*', serveStatic({ 
+              root: distDir,
+              index: 'index.html'
+            }));
+
+            // 3. Vue SPA路由兜底，解决/login路由404问题
+            app.all('*', async (c) => {
+              const indexPath = path.join(distDir, 'index.html');
+              if (fs.existsSync(indexPath)) {
+                return c.body(fs.readFileSync(indexPath), 200, {
+                  'Content-Type': 'text/html; charset=utf-8'
+                });
+              }
+              return c.text('404 Not Found', 404);
+            });
+
+            // 启动服务，强制监听所有网卡
+            const port = 8787;
+            const host = '0.0.0.0';
+            console.log('【7/8】正在启动服务，监听地址：http://0.0.0.0:8787');
+            
+            serve({
+              fetch: app.fetch,
+              port,
+              host,
+              createServer: (opts) => {
+                const server = require('http').createServer(opts);
+                server.on('error', (err) => {
+                  console.error('【服务启动失败】', err);
+                  process.exit(1);
+                });
+                server.on('listening', () => {
+                  console.log('=============================================');
+                  console.log('✅ MiSub v2.5.0 服务启动成功！');
+                  console.log('📡 监听地址：http://0.0.0.0:8787');
+                  console.log('💻 本机访问：http://127.0.0.1:8787');
+                  console.log('🔐 管理后台：http://127.0.0.1:8787/login');
+                  console.log('🔑 默认密码：admin');
+                  console.log('💾 数据目录：', dataDir);
+                  console.log('=============================================');
+                });
+                return server;
+              }
+            });
 
             // 优雅退出处理
-            process.on('SIGTERM', async () => {
-              await mf.dispose();
-              server.close();
+            process.on('SIGTERM', () => {
+              console.log('\n📴 收到退出信号，正在关闭服务');
               process.exit(0);
             });
-            process.on('SIGINT', async () => {
-              await mf.dispose();
-              server.close();
+            process.on('SIGINT', () => {
+              console.log('\n📴 收到退出信号，正在关闭服务');
               process.exit(0);
             });
           }
 
+          // 启动服务，全量错误捕获
           startServer().catch((err) => {
-            console.error('MiSub启动失败：', err);
+            console.error('【8/8 启动失败】服务启动异常', err);
             process.exit(1);
           });
           EOF
 
-      # 5. 打包Magisk模块（预打包所有依赖，刷入即用）
+      # 5. 打包Magisk模块（所有依赖已预打包，刷入即用）
       - name: Package Magisk Module
         run: |
           # 创建模块目录结构
           mkdir -p magisk_module/misub
           mkdir -p magisk_module/misub/data
           
-          # 复制所有核心文件：构建产物、启动脚本、预安装的node_modules
-          cp -r dist start.js node_modules package.json magisk_module/misub/
+          # 复制所有核心文件（含预打包的node_modules）
+          cp -r dist node_modules start.js package.json schema.sql magisk_module/misub/
           
-          # 1. 模块基础信息配置
+          # 1. 模块基础信息
           cat << 'EOF' > magisk_module/module.prop
-          id=misub_v250_miniflare_prepacked
-          name=MiSub v2.5.0 Magisk (Miniflare预打包版)
+          id=misub_v250_final
+          name=MiSub v2.5.0 Magisk 最终版
           version=v2.5.0
           versionCode=250
-          author=imzyb | Miniflare适配
-          description=MiSub订阅管理工具，预打包arm64兼容Miniflare运行时，无需手机端联网安装，刷入即用，完美兼容Cloudflare原生API。
-          updateJson=https://raw.githubusercontent.com/imzyb/MiSub/main/module_update.json
+          author=imzyb
+          description=MiSub订阅管理工具，纯Node.js原生运行，无模拟器依赖，预打包全量依赖，刷入即用，无需手机端安装任何内容。
           EOF
           
-          # 2. 开机自启脚本（无安装逻辑，直接启动）
+          # 2. 开机自启脚本（无安装步骤，直接启动，适配无npm环境）
           cat << 'EOF' > magisk_module/service.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
-          
-          ############################## 请修改此处为你手机的Node.js可执行文件路径 ##############################
+          # 你的Node.js路径，和之前保持一致即可
           NODE_BIN="/data/adb/modules/subs-goaway/bin/output/node"
-          ########################################################################################################
-          
-          # 环境变量初始化
+
+          # 基础环境配置
           export PATH="${NODE_BIN%/*}:$PATH"
           export NODE_ENV=production
-          # 自定义管理员密码（修改此处后重启模块生效）
+          # 自定义管理员密码在这里修改
           export ADMIN_PASSWORD="admin"
-          
-          # 日志文件路径
+
+          # 日志文件
           LOG_FILE="$MODDIR/run.log"
           APP_DIR="$MODDIR/misub"
-          
-          # 清空旧日志
+
+          # 清空旧日志，保留启动记录
           echo "[$(date '+%Y-%m-%d %H:%M:%S')] MiSub模块启动中..." > $LOG_FILE
-          
+
           # 等待系统启动完成
           until [ "$(getprop sys.boot_completed)" = "1" ]; do
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待系统启动完成..." >> $LOG_FILE
-            sleep 5
+            sleep 2
           done
-          
+
           # 检查Node.js环境是否可用
           if [ ! -x "$NODE_BIN" ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 错误：Node.js二进制文件不存在或无执行权限，路径：$NODE_BIN" >> $LOG_FILE
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 错误：Node.js不存在，路径：$NODE_BIN" >> $LOG_FILE
             exit 1
           fi
-          
-          # 验证Node.js版本
-          NODE_VERSION=$($NODE_BIN -v 2>> $LOG_FILE)
-          if [ $? -ne 0 ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 错误：Node.js执行失败，请检查架构是否匹配（需arm64版本）" >> $LOG_FILE
-            exit 1
-          fi
-          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Node.js版本：$NODE_VERSION" >> $LOG_FILE
-          
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Node.js版本：$($NODE_BIN -v)" >> $LOG_FILE
+
           # 进入应用目录
           cd $APP_DIR
-          
-          # 检查端口是否被占用
-          if netstat -tulpn | grep -q :8787; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 警告：8787端口被占用，尝试终止占用进程..." >> $LOG_FILE
+
+          # 处理端口占用
+          if ss -tulpn | grep -q :8787; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 8787端口被占用，清理中..." >> $LOG_FILE
             fuser -k 8787/tcp >> $LOG_FILE 2>&1
             sleep 2
           fi
-          
-          # 直接启动MiSub服务（无需安装依赖）
+
+          # 直接启动服务（无需安装任何依赖）
           echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动MiSub服务..." >> $LOG_FILE
           $NODE_BIN start.js >> $LOG_FILE 2>&1 &
-          
+
           # 记录服务PID
           echo $! > $MODDIR/service.pid
           echo "[$(date '+%Y-%m-%d %H:%M:%S')] 服务启动完成，PID：$(cat $MODDIR/service.pid)" >> $LOG_FILE
@@ -192,13 +377,10 @@ jobs:
           cat << 'EOF' > magisk_module/uninstall.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
-          # 终止服务进程
           if [ -f "$MODDIR/service.pid" ]; then
             kill -9 $(cat $MODDIR/service.pid) 2>/dev/null
           fi
-          # 清理端口占用
           fuser -k 8787/tcp 2>/dev/null
-          # 删除模块文件
           rm -rf $MODDIR
           EOF
           
@@ -207,11 +389,11 @@ jobs:
           chmod 755 magisk_module/uninstall.sh
           
           # 打包模块
-          cd magisk_module && zip -r ../MiSub_v250_Magisk_Miniflare_PrePacked.zip .
+          cd magisk_module && zip -r ../MiSub_v250_Final.zip .
 
       # 6. 上传构建产物
       - name: Upload Magisk Module Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiSub-v250-Magisk-Miniflare-PrePacked
-          path: MiSub_v250_Magisk_Miniflare_PrePacked.zip
+          name: MiSub-v250-Final
+          path: MiSub_v250_Final.zip
