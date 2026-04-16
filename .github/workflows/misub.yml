@@ -1,4 +1,4 @@
-name: Build MiSub v2.5.0 Magisk (Universal Fix)
+name: Build MiSub Magisk Module (v2.5.0 Direct)
 
 on:
   workflow_dispatch:
@@ -7,26 +7,27 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 使用直接克隆，绕过 Git Fetch 匹配问题
+      # 1. 直接克隆整个仓库的最新代码 (main 分支目前即 v2.5.0+)
       - name: Clone Repository
         run: |
-          git clone --depth 1 --branch v2.5.0 https://github.com/imzyb/MiSub.git .
-          # 如果 v2.5.0 tag 不存在，会自动回退到 main
-          if [ $? -ne 0 ]; then git clone --depth 1 https://github.com/imzyb/MiSub.git .; fi
+          git clone --depth 1 https://github.com/imzyb/MiSub.git .
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install & Build Frontend
+      # 2. 安装依赖并注入 Hono 适配器
+      - name: Install & Build
         run: |
           npm install
-          # 安装 hono 的 node 适配器和纯 JS 的 SQL 引擎 (无需 native 编译)
+          # 安装能让 Node.js 运行 Worker 代码的适配器，以及纯 JS 的 SQL 引擎
           npm install @hono/node-server sql.js
           npm run build
 
-      - name: Inject Backend Adapter (entry.js)
+      # 3. 编写本地运行适配层 (entry.js)
+      # 这个文件会将静态前端和 D1 数据库后端揉在一起
+      - name: Create Entry Script
         run: |
           cat << 'EOF' > entry.js
           const { serve } = require('@hono/node-server');
@@ -35,14 +36,13 @@ jobs:
           const fs = require('fs');
           const path = require('path');
 
-          async function start() {
-            // 1. 初始化纯 JS 数据库环境 (模拟 D1)
+          async function initApp() {
+            // A. 初始化模拟数据库 (D1 兼容层)
             const SQL = await initSqlJs();
-            const dbPath = path.join(__dirname, 'misub.db');
+            const dbPath = path.join(__dirname, 'misub_local.db');
             let dbFile = fs.existsSync(dbPath) ? fs.readFileSync(dbPath) : null;
             const sqlite = new SQL.Database(dbFile);
 
-            // 简单的 D1 接口模拟
             const D1Mock = {
               prepare: (sql) => ({
                 bind: (...args) => ({
@@ -68,65 +68,68 @@ jobs:
               })
             };
 
-            // 2. 加载后端 Hono App
-            // 注意：v2.5.0 编译后的入口通常在 .output/server 或 dist/_worker.js
-            const appModule = require('./dist/_worker.js'); 
-            const app = appModule.default;
+            // B. 加载后端 Logic (注意: v2.5.0 的入口在 _worker.js)
+            const worker = require('./dist/_worker.js').default;
 
-            // 3. 注入环境变量
-            const handler = (req) => {
-              return app.fetch(req, {
-                MISUB_DB: D1Mock, // 对应 wrangler-cf-pages.toml 里的绑定
-                ADMIN_PASSWORD: "admin"
+            // C. 使用 Hono 重新包装，同时托管静态网页和 API
+            const { Hono } = require('hono');
+            const app = new Hono();
+
+            // 托管前端静态文件 (Vite build 后的产物)
+            app.use('/*', serveStatic({ root: './dist' }));
+
+            // 拦截所有发往 /api 的请求，并注入我们的 D1Mock 数据库
+            app.all('/api/*', (c) => {
+              return worker.fetch(c.req.raw, {
+                MISUB_DB: D1Mock, // 对应 toml 里的数据库名
+                ADMIN_PASSWORD: "admin" // 默认密码
               });
-            };
+            });
 
-            // 4. 启动服务并托管静态文件
-            const server = new (require('hono').Hono)();
-            server.use('/*', serveStatic({ root: './dist' })); // 托管前端
-            server.all('/api/*', (c) => handler(c.req.raw)); // 托管 API
-
-            serve({ fetch: server.fetch, port: 8787 });
-            console.log("MiSub v2.5.0 is running on http://127.0.0.1:8787");
+            const port = 8787;
+            console.log(`MiSub v2.5.0 已就绪: http://127.0.0.1:${port}`);
+            serve({ fetch: app.fetch, port });
           }
 
-          start();
+          initApp().catch(console.error);
           EOF
 
-      - name: Create Magisk Module
+      # 4. 生成 Magisk 模块包
+      - name: Package Magisk Module
         run: |
           mkdir -p magisk_module/misub
-          # 只拷贝构建后的产物，减小体积
+          # 关键点：我们要把 dist, entry.js 和 node_modules 全部打包进去
           cp -r dist entry.js node_modules package.json magisk_module/misub/
-          cp schema.sql magisk_module/misub/ || true
 
           cat << 'EOF' > magisk_module/module.prop
-          id=misub_v250_js_fixed
-          name=MiSub v2.5.0 (No-Native)
+          id=misub_v250_portable
+          name=MiSub v2.5.0 Magisk
           version=v2.5.0
           versionCode=250
           author=GitHub_Actions
-          description=使用 sql.js 纯 JS 模拟层运行的 v2.5.0。不依赖 C++ 编译，兼容手机 Node。
+          description=基于作者 v2.5.0 的最新代码，通过 Hono Node 适配器和纯 JS D1 模拟层实现本地化运行。
           EOF
 
           cat << 'EOF' > magisk_module/service.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
+          # 指定你手机里的 Node 路径
           NODE_BIN="/data/adb/modules/subs-goaway/bin/output/node"
           export PATH="${NODE_BIN%/*}:$PATH"
-          
-          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 5; done
-          
-          cd $MODDIR/misub
-          # 增加内存限制，防止手机上 Node 占用过高
-          $NODE_BIN --max-old-space-size=256 entry.js > $MODDIR/run.log 2>&1 &
-          EOF
-          
-          chmod +x magisk_module/service.sh
-          cd magisk_module && zip -r ../MiSub_v250_Portable.zip .
 
-      - name: Upload
+          # 等待系统彻底启动
+          until [ "$(getprop sys.boot_completed)" = "1" ]; do sleep 5; done
+
+          cd $MODDIR/misub
+          # 运行适配层，并将日志输出到模块目录
+          $NODE_BIN entry.js > $MODDIR/run.log 2>&1 &
+          EOF
+
+          chmod +x magisk_module/service.sh
+          cd magisk_module && zip -r ../MiSub_v250_Magisk.zip .
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiSub-v250-Portable
-          path: MiSub_v250_Portable.zip
+          name: MiSub-v250-Magisk
+          path: MiSub_v250_Magisk.zip
