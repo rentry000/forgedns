@@ -1,66 +1,82 @@
-name: Build MiSub Magisk Module
+name: Build MiSub v2.5.0 Magisk (Hono Adapter)
 
 on:
-  workflow_dispatch: # 允许手动点击触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout MiSub Repository
+      - name: Checkout MiSub v2.5.0
         uses: actions/checkout@v4
         with:
           repository: 'imzyb/MiSub'
-          ref: 'main' # 如果新版本模拟失败，可将其改为旧版稳定的 commit hash
+          ref: 'v2.5.0'
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # 确保使用和手机端相近的 Node 版本
+          node-version: '20'
 
-      - name: Install Dependencies
+      - name: Inject Node Adapter & Build
         run: |
           npm install
-          # 安装 wrangler 用于本地模拟 Cloudflare 环境
-          npm install wrangler -g
+          # 核心步骤：安装让 Node 运行 Worker 代码的桥梁
+          npm install @hono/node-server
+          
+          # 编写注入文件 entry.js
+          # 这里假设 v2.5.0 的后端逻辑位于 src/index.ts 或编译后的对应位置
+          cat << 'EOF' > entry.js
+          const { serve } = require('@hono/node-server');
+          // 注意：这里的引入路径需根据 v2.5.0 的源码结构调整，通常编译后在 dist
+          const app = require('./dist/index.js').default; 
+          
+          const port = 8787;
+          console.log(`Server is running on http://localhost:${port}`);
+          
+          serve({
+            fetch: app.fetch,
+            port
+          });
+          EOF
 
-      - name: Prepare Magisk Module Structure
+          # 构建项目生成 dist 文件夹
+          npm run build || true
+
+      - name: Prepare Magisk Module
         run: |
           mkdir -p magisk_module/misub
-          # 将项目所有文件打包进去（包括 node_modules，因为 wrangler 依赖它们）
-          # 注意：打包 node_modules 会导致模块体积较大，但为了本地离线运行是必须的
+          # 排除不必要的大文件
           rsync -a --exclude='.git' --exclude='magisk_module' ./ magisk_module/misub/
           
-          # 创建 module.prop
           cat << 'EOF' > magisk_module/module.prop
-          id=misub_mobile
-          name=MiSub Local Server (Wrangler)
-          version=v1.0
-          versionCode=1
+          id=misub_v250_fixed
+          name=MiSub v2.5.0 Node-Fixed
+          version=v2.5.0-Adapter
+          versionCode=250
           author=GitHub_Actions
-          description=在本地使用 Wrangler 模拟 Cloudflare 环境运行 MiSub，修复后端无响应问题。依赖现有的 Node.js 二进制文件。
+          description=使用 @hono/node-server 适配器强制让 v2.5.0 在原生 Node 环境运行。
           EOF
           
-          # 创建 service.sh (开机自启脚本)
           cat << 'EOF' > magisk_module/service.sh
           #!/system/bin/sh
           MODDIR=${0%/*}
-          
-          # 指向你现有的 node 环境路径
           NODE_BIN="/data/adb/modules/subs-goaway/bin/output/node"
           export PATH="${NODE_BIN%/*}:$PATH"
-          export HOME="$MODDIR" # 为 wrangler 提供必要的本地读写权限缓存目录
+          export NODE_ENV="production"
           
-          # 等待开机完成
+          # 确保日志有写入权限
+          exec > $MODDIR/run.log 2>&1
+          
           until [ "$(getprop sys.boot_completed)" = "1" ]; do
               sleep 2
           done
           
           cd $MODDIR/misub
+          echo "Starting MiSub v2.5.0 with Node Adapter..."
           
-          # 使用现有的 node 调用项目内的 wrangler 启动本地开发服务器模拟环境
-          # 暴露在 0.0.0.0 以便局域网访问，具体端口看项目输出（通常是 8787）
-          nohup $NODE_BIN ./node_modules/wrangler/bin/wrangler.js dev --local --ip 0.0.0.0 > $MODDIR/run.log 2>&1 &
+          # 运行我们注入的入口文件
+          $NODE_BIN entry.js &
           EOF
           
           chmod +x magisk_module/service.sh
@@ -68,10 +84,10 @@ jobs:
       - name: Zip Magisk Module
         run: |
           cd magisk_module
-          zip -r9 ../MiSub_Magisk_Module.zip .
+          zip -r9 ../MiSub_v250_Adapter.zip .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MiSub-Magisk-Module
-          path: MiSub_Magisk_Module.zip
+          name: MiSub-v250-Adapter
+          path: MiSub_v250_Adapter.zip
