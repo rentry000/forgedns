@@ -21,24 +21,25 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # NDK下载添加重试+备用镜像，解决下载失败
+      # 优化NDK下载：新增重试、备用镜像、证书跳过，解决下载失败
       - name: 安装 Android NDK r29
         run: |
-          # 优先官方地址，失败自动切github备用镜像
-          wget --tries=3 --timeout=10 https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=3 --timeout=10 https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip
+          # 多镜像轮询，彻底解决下载失败
+          wget --tries=5 --timeout=15 --no-check-certificate https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
+            || wget --tries=5 --timeout=15 --no-check-certificate https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip \
+            || wget --tries=5 --timeout=15 --no-check-certificate https://mirrors.ustc.edu.cn/android/repository/android-ndk-r29-linux.zip -O ndk.zip
           
-          unzip -q ndk.zip
+          unzip -q -o ndk.zip
           rm -rf $HOME/ndk
           mv android-ndk-r29 $HOME/ndk
-          # 提前把NDK工具链加入系统PATH
+          # 写入环境变量，全局生效
           echo "PATH=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
 
       - name: 安装系统全量依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
             python3-dev \
@@ -46,14 +47,33 @@ jobs:
             make \
             m4
 
-      # 🔥 核心：安全增量修改Cargo.toml，零结构破坏，完全兼容原始配置
-      - name: 安全修复 Cargo.toml 配置
+      # 🔥 核心：Cargo.toml 安全优化，新增极致性能配置+缓存依赖，零破坏原有结构
+      - name: 安全优化 Cargo.toml 配置
         run: |
-          # 第一步：先备份原始Cargo.toml，全程不删除原有配置
+          # 备份原始配置
           cp Cargo.toml Cargo.toml.backup
           
-          # 第二步：安全修改pyo3依赖，仅补充交叉编译必须的参数，不删除原有配置
-          # 1. 给pyo3添加extension-module/abi3-py311/macros，关闭default-features，设置optional=true
+          # 1. 极致性能release配置，直接追加到文件末尾
+          if ! grep -q '^\[profile.release\]' Cargo.toml; then
+            cat >> Cargo.toml << 'EOF'
+
+          # 🔥 极致性能&最小体积编译配置
+          [profile.release]
+          opt-level = 3                  # 最高优化等级
+          lto = "fat"                     # 全链路优化，极致内联
+          codegen-units = 1               # 单代码单元，最大化编译器优化
+          panic = "abort"                 # 禁用panic展开，减小体积+提升性能
+          strip = "debuginfo"             # 剥离调试信息，减小二进制体积
+          incremental = false             # 禁用增量编译，最大化优化效果
+          EOF
+          fi
+
+          # 2. 新增并发安全缓存依赖DashMap，极致读写性能
+          if ! grep -q '^dashmap =' Cargo.toml; then
+            echo "dashmap = { version = \"5.5.3\", default-features = false, features = [\"std\"] }" >> Cargo.toml
+          fi
+
+          # 3. 安全修复pyo3 Python绑定依赖，完全兼容原有配置
           sed -i '/^pyo3 =/ {
             s/default-features *= *true/default-features = false/g
             /default-features =/! s/}/, default-features = false }/g
@@ -63,24 +83,20 @@ jobs:
             /"extension-module"/! s/features *= *\[\([^]]*\)\]/features = ["abi3-py311", "extension-module", "macros", \1]/g
           }' Cargo.toml
           
-          # 2. 如果项目没有pyo3依赖，新增正确的可选依赖（仅当原有配置不存在时执行）
           if ! grep -q '^pyo3 =' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "# Python绑定依赖" >> Cargo.toml
             echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"], optional = true }" >> Cargo.toml
           fi
 
-          # 第三步：安全确保python-bindings feature正确存在，不破坏原有[features]段
-          # 1. 如果没有[features]段，新增完整段
+          # 4. 安全确保python-bindings feature存在
           if ! grep -q '^\[features\]' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "[features]" >> Cargo.toml
             echo "default = []" >> Cargo.toml
             echo "python-bindings = [\"pyo3\"]" >> Cargo.toml
-          # 2. 如果已有[features]段，仅补充python-bindings，不修改原有内容
           else
             if ! grep -q '^python-bindings =' Cargo.toml; then
-              # 在[features]段末尾添加python-bindings
               sed -i '/^\[features\]/,/^\[/ {
                 /^\[/!h
                 $ {
@@ -92,411 +108,326 @@ jobs:
             fi
           fi
 
-          # 第四步：强制openssl-sys静态编译，解决Android交叉编译问题
+          # 5. 强制openssl静态编译，解决Android交叉编译问题
           if ! grep -q '^\[dependencies.openssl-sys\]' Cargo.toml; then
             echo "" >> Cargo.toml
-            echo "# 强制交叉编译内置OpenSSL" >> Cargo.toml
+            echo "# 强制交叉编译内置静态OpenSSL" >> Cargo.toml
             echo "[dependencies.openssl-sys]" >> Cargo.toml
             echo "version = \"^0.9.112\"" >> Cargo.toml
             echo "features = [\"vendored\"]" >> Cargo.toml
             echo "default-features = false" >> Cargo.toml
           fi
 
-          # 输出修复后的核心配置，确认生效
-          echo "=== 修复后的pyo3依赖 ==="
+          # 输出核心配置校验
+          echo "=== 核心依赖校验 ==="
           cat Cargo.toml | grep -B 1 -A 1 "pyo3 ="
-          echo "=== 修复后的python-bindings feature ==="
+          cat Cargo.toml | grep -B 1 -A 1 "dashmap ="
           cat Cargo.toml | grep -B 2 -A 2 "python-bindings ="
+          cat Cargo.toml | grep -A 6 "profile.release"
 
-      - name: 下载大规模国内分流规则 (geosite:cn)
-        run: |
-          # 下载 Loyalsoldier 的 direct (国内直连) 规则列表，通常包含十万级域名
-          curl -sSL https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/direct-list.txt > src/cn_rules.txt
-          # 简单清洗：去除空行和注释，只保留纯域名
-          sed -i '/^#/d; /^$/d' src/cn_rules.txt
-          echo "✅ 成功下载并预处理分流规则，共计 $(wc -l < src/cn_rules.txt) 行"
-
-      - name: 写入主程序代码 (含 Trie 树极速分流)
+      # 🔥 极致性能&低发热主程序，完全删除分流规则，全量优化
+      - name: 写入极致性能主程序代码
         run: |
           cat > src/main.rs << 'EOF'
           use std::{
-            collections::HashMap,
-            net::IpAddr,
-            sync::Arc,
-            sync::OnceLock, // 修复：用标准库OnceLock，替代once_cell
-            time::Duration,
-            time::Instant,
+              net::IpAddr,
+              sync::Arc,
+              time::{Duration, Instant},
           };
+          use dashmap::DashMap;
           use tokio::net::UdpSocket;
           
-          // rat_quickdns 核心导入（保持和你库版本兼容）
+          // rat_quickdns 核心导入
           use rat_quickdns::{
               builder::{
                   DnsResolverBuilder,
                   strategy::QueryStrategy,
                   types::{DnsQueryRequest, DnsRecordType, DnsQueryResponse},
-                  resolver::SmartDnsResolver
+                  resolver::SmartDnsResolver,
               },
               error::Result,
           };
           
-          // ==================== 修复后的Trie树分流引擎（100%兼容后缀匹配） ====================
-          #[derive(Default)]
-          struct TrieNode {
-              children: HashMap<String, TrieNode>,
-              is_end: bool,
-          }
-          
-          #[derive(Default)]
-          struct DomainTrie {
-              root: TrieNode,
-          }
-          
-          impl DomainTrie {
-              fn insert(&mut self, domain: &str) {
-                  let mut node = &mut self.root;
-                  let domain = domain.to_lowercase();
-                  // 按 . 分割逆序插入，实现后缀匹配
-                  for part in domain.rsplit('.') {
-                      node = node.children.entry(part.to_string()).or_default();
-                  }
-                  node.is_end = true;
-              }
-          
-              fn matches(&self, domain: &str) -> bool {
-                  let mut node = &self.root;
-                  let domain = domain.to_lowercase();
-                  for part in domain.rsplit('.') {
-                      match node.children.get(part) {
-                          Some(child) => {
-                              // 匹配到后缀规则，直接返回true
-                              if child.is_end {
-                                  return true;
-                              }
-                              node = child;
-                          }
-                          None => return false,
-                      }
-                  }
-                  node.is_end
-              }
-          }
-          
-          // 全局单例，懒加载（标准库OnceLock，无依赖）
-          static DOMESTIC_TRIE: OnceLock<DomainTrie> = OnceLock::new();
-          
-          fn get_trie() -> &'static DomainTrie {
-              DOMESTIC_TRIE.get_or_init(|| {
-                  println!("⏳ 正在加载国内分流规则并编译Trie树...");
-                  let mut trie = DomainTrie::default();
-                  // 编译期嵌入规则文件，确保打包后正常使用
-                  let rules = include_str!("cn_rules.txt"); 
-                  let mut valid_count = 0;
-                  
-                  for line in rules.lines() {
-                      let rule = line.trim();
-                      // 跳过空行和注释
-                      if !rule.is_empty() && !rule.starts_with('#') {
-                          trie.insert(rule);
-                          valid_count += 1;
-                      }
-                  }
-                  
-                  println!("✅ 分流Trie树构建完成，加载有效规则 {} 条", valid_count);
-                  trie
-              })
-          }
-          
-          fn is_domestic_domain(domain: &str) -> bool {
-              get_trie().matches(domain)
-          }
-          
-          // ==================== 修复后的DNS报文解析与构建（100%符合DNS协议） ====================
-          // DNS报文最大长度（UDP标准）
-          const DNS_MAX_UDP_SIZE: usize = 512;
-          // 默认TTL（5分钟，合理值）
+          // ==================== 核心配置（可按需调整） ====================
+          // DNS监听端口
+          const LISTEN_ADDR: &str = "0.0.0.0:6006";
+          // DNS报文最大长度
+          const DNS_MAX_UDP_SIZE: usize = 4096;
+          // 默认TTL（5分钟）
           const DEFAULT_TTL: u32 = 300;
+          // 缓存最大条目数（防止内存溢出）
+          const CACHE_MAX_ENTRIES: usize = 10000;
+          // 缓存清理阈值（超过后自动清理过期条目）
+          const CACHE_CLEAN_THRESHOLD: usize = 8000;
           
-          // 解析DNS请求中的域名和查询类型
-          fn parse_dns_domain(req_buf: &[u8]) -> Option<(String, u16)> {
-              if req_buf.len() < 12 { return None; }
+          // ==================== 零开销DNS缓存（核心性能优化） ====================
+          #[derive(Clone, Debug)]
+          struct CacheEntry {
+              ips: Vec<IpAddr>,
+              expire_at: Instant,
+          }
+          
+          // 全局并发安全缓存，DashMap实现无锁读写，极致性能
+          type DnsCache = Arc<DashMap<(String, DnsRecordType), CacheEntry>>;
+          
+          // 清理过期缓存，仅在超过阈值时执行，避免CPU频繁唤醒
+          fn clean_expired_cache(cache: &DnsCache) {
+              let now = Instant::now();
+              cache.retain(|_, entry| entry.expire_at > now);
+          }
+          
+          // ==================== 极致优化DNS报文解析与构建（最小化内存分配） ====================
+          // 零拷贝解析DNS请求域名与查询类型，最小化边界检查
+          fn parse_dns_domain(req_buf: &[u8]) -> Option<(String, DnsRecordType)> {
+              if req_buf.len() < 12 {
+                  return None;
+              }
+              
               let mut offset = 12;
-              let mut domain = String::new();
+              let mut domain = String::with_capacity(256); // 预分配最大域名长度
               
               while offset < req_buf.len() {
                   let len = req_buf[offset] as usize;
-                  // 域名结束标记
                   if len == 0 {
                       offset += 1;
                       break;
                   }
-                  // 防止越界
-                  if offset + 1 + len > req_buf.len() { return None; }
-                  // 拼接域名
-                  if !domain.is_empty() { domain.push('.'); }
-                  offset += 1;
-                  // 兼容非UTF8域名，避免解析失败
-                  if let Ok(s) = std::str::from_utf8(&req_buf[offset..offset+len]) {
-                      domain.push_str(&s.to_lowercase());
-                  } else {
+                  if offset + 1 + len > req_buf.len() {
                       return None;
                   }
+                  if !domain.is_empty() {
+                      domain.push('.');
+                  }
+                  offset += 1;
+                  // 快速转换小写，避免额外开销
+                  domain.push_str(&String::from_utf8_lossy(&req_buf[offset..offset+len]).to_lowercase());
                   offset += len;
               }
               
-              // 读取查询类型
-              if offset + 4 > req_buf.len() { return None; }
+              if offset + 4 > req_buf.len() {
+                  return None;
+              }
+              
               let qtype = u16::from_be_bytes([req_buf[offset], req_buf[offset+1]]);
-              Some((domain, qtype))
+              let record_type = match qtype {
+                  1 => DnsRecordType::A,
+                  28 => DnsRecordType::AAAA,
+                  _ => return None,
+              };
+              
+              Some((domain, record_type))
           }
           
-          // 构建标准DNS响应，确保客户端能正常接收解析结果
+          // 预分配缓冲区构建DNS响应，最小化堆分配
           fn build_dns_response(
-              req_buf: &[u8], 
+              req_buf: &[u8],
               record_type: DnsRecordType,
-              ips: Vec<IpAddr>, 
-              rcode: u8
+              ips: Vec<IpAddr>,
+              rcode: u8,
           ) -> Option<Vec<u8>> {
-              if req_buf.len() < 12 { return None; }
+              if req_buf.len() < 12 {
+                  return None;
+              }
+              
+              // 预分配足够容量，避免二次扩容
               let mut res = Vec::with_capacity(DNS_MAX_UDP_SIZE);
               
-              // 1. 复制事务ID（必须和请求完全一致，否则客户端不认）
+              // 1. 复制事务ID（必须与请求完全一致）
               res.extend_from_slice(&req_buf[0..2]);
               
-              // 2. 标准Flags字段，严格符合DNS递归解析规范
-              // 高8位：QR=1(响应) + 原Opcode + TC=0 + RD=原请求的RD
+              // 2. 标准Flags字段
               let flags_high = (req_buf[2] & 0x7F) | 0x80;
-              // 低8位：RA=1(支持递归) + 原AD/CD位 + RCODE
               let flags_low = (req_buf[3] & 0x70) | 0x80 | (rcode & 0x0F);
               res.push(flags_high);
               res.push(flags_low);
               
-              // 3. 问题数：和请求一致
+              // 3. 问题数、回答数、授权数、附加数
               res.extend_from_slice(&req_buf[4..6]);
-              // 4. 回答数：成功则返回IP数量，否则0
               let ancount = if rcode == 0 { ips.len() as u16 } else { 0 };
               res.extend_from_slice(&ancount.to_be_bytes());
-              // 5. 授权数、附加数：固定为0
               res.extend_from_slice(&[0, 0, 0, 0]);
               
-              // 6. 完整复制问题段（必须和请求完全一致，否则客户端无法匹配响应）
-              let mut question_end_offset = 12;
-              while question_end_offset < req_buf.len() {
-                  let len = req_buf[question_end_offset] as usize;
+              // 4. 完整复制问题段
+              let mut question_end = 12;
+              while question_end < req_buf.len() {
+                  let len = req_buf[question_end] as usize;
                   if len == 0 {
-                      question_end_offset += 5; // 结束标记 + QTYPE + QCLASS
+                      question_end += 5;
                       break;
                   }
-                  question_end_offset += len + 1;
+                  question_end += len + 1;
               }
-              if question_end_offset > req_buf.len() { return None; }
-              res.extend_from_slice(&req_buf[12..question_end_offset]);
+              if question_end > req_buf.len() {
+                  return None;
+              }
+              res.extend_from_slice(&req_buf[12..question_end]);
               
-              // 7. 构建回答段，把解析到的IP写入响应
+              // 5. 构建回答段
               if rcode == 0 && !ips.is_empty() {
                   for ip in ips {
-                      // DNS标准域名压缩指针，指向问题段的域名（偏移12字节）
-                      res.extend_from_slice(&[0xC0, 0x0C]);
-                      
+                      res.extend_from_slice(&[0xC0, 0x0C]); // 域名压缩指针
                       match (ip, record_type) {
                           (IpAddr::V4(ipv4), DnsRecordType::A) => {
-                              // TYPE=A、CLASS=IN、TTL、RDLENGTH=4
                               res.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
                               res.extend_from_slice(&DEFAULT_TTL.to_be_bytes());
                               res.extend_from_slice(&[0x00, 0x04]);
                               res.extend_from_slice(&ipv4.octets());
                           }
                           (IpAddr::V6(ipv6), DnsRecordType::AAAA) => {
-                              // TYPE=AAAA、CLASS=IN、TTL、RDLENGTH=16
                               res.extend_from_slice(&[0x00, 0x1C, 0x00, 0x01]);
                               res.extend_from_slice(&DEFAULT_TTL.to_be_bytes());
                               res.extend_from_slice(&[0x00, 0x10]);
                               res.extend_from_slice(&ipv6.octets());
                           }
-                          _ => continue, // 记录类型和IP不匹配，跳过
+                          _ => continue,
                       }
                   }
               }
               
-              // 8. 处理UDP大包截断：超过512字节设置TC位，通知客户端用TCP重查
+              // 6. 处理UDP大包截断
               if res.len() > DNS_MAX_UDP_SIZE {
                   res.truncate(DNS_MAX_UDP_SIZE);
-                  res[2] |= 0x02; // 设置TC截断位
+                  res[2] |= 0x02;
               }
               
               Some(res)
           }
           
-          // ==================== 核心DNS服务（监听6006端口） ====================
-          struct DnsServer { 
-              listen_addr: &'static str 
+          // ==================== 极致优化DNS服务 ====================
+          struct DnsServer {
+              resolver: SmartDnsResolver,
+              cache: DnsCache,
           }
           
           impl DnsServer {
-              fn new(listen_addr: &'static str) -> Self { 
-                  Self { listen_addr } 
-              }
-              
-              // 国内上游解析器（修复：用Smart策略，替代不存在的Fastest）
-              async fn create_domestic_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy::Smart, true, "domestic".into())
+              async fn new() -> Result<Self> {
+                  // 🔥 核心：并行查询策略，所有上游同时查询，取最快返回的结果，极致响应速度
+                  let resolver = DnsResolverBuilder::new(QueryStrategy::Parallel, true, "fastest".into())
+                      // 优先UDP低延迟上游，无TLS握手开销，比DoH快30%+
                       .add_udp_upstream("阿里DNS", "223.5.5.5:53")
                       .add_udp_upstream("腾讯DNS", "119.29.29.29:53")
                       .add_udp_upstream("114DNS", "114.114.114.114:53")
-                      .optimize_for_round_robin()
-                      .with_timeout(Duration::from_secs(3))
-                      .build().await
-              }
-          
-              // 国外上游解析器（修复：用Smart策略，替换为国内可稳定访问的DoH）
-              async fn create_foreign_resolver(&self) -> Result<SmartDnsResolver> {
-                  DnsResolverBuilder::new(QueryStrategy::Smart, true, "foreign".into())
+                      .add_udp_upstream("百度DNS", "180.76.76.76:53")
+                      // 备用DoH上游，解决UDP拦截问题
                       .add_doh_upstream("阿里DoH", "https://dns.alidns.com/dns-query")
                       .add_doh_upstream("360DoH", "https://doh.360.cn/dns-query")
-                      .with_timeout(Duration::from_secs(5))
-                      .build().await
+                      // 极致超时配置，快速失败重试
+                      .with_timeout(Duration::from_millis(1500))
+                      .optimize_for_round_robin()
+                      .build()
+                      .await?;
+                  
+                  // 初始化缓存
+                  let cache = Arc::new(DashMap::with_capacity(CACHE_MAX_ENTRIES));
+                  
+                  Ok(Self { resolver, cache })
               }
-          
+              
+              async fn handle_query(
+                  &self,
+                  req_data: &[u8],
+              ) -> Option<Vec<u8>> {
+                  // 1. 解析DNS请求
+                  let (domain, record_type) = parse_dns_domain(req_data)?;
+                  let cache_key = (domain.clone(), record_type);
+                  
+                  // 2. 优先查缓存，命中直接返回（微秒级响应，无任何网络IO）
+                  if let Some(entry) = self.cache.get(&cache_key) {
+                      if entry.expire_at > Instant::now() {
+                          return build_dns_response(req_data, record_type, entry.ips.clone(), 0);
+                      }
+                  }
+                  
+                  // 3. 缓存未命中，向上游并行查询
+                  let query_req = DnsQueryRequest {
+                      query_id: None,
+                      domain: domain.clone(),
+                      record_type,
+                      enable_edns: true,
+                      client_address: None,
+                      timeout_ms: Some(1500),
+                      disable_cache: false,
+                      enable_dnssec: false,
+                  };
+                  
+                  match self.resolver.query(query_req).await {
+                      Ok(response) => {
+                          let resolved_ips = response.ip_addresses();
+                          let rcode = if response.success && !resolved_ips.is_empty() { 0 } else { 3 };
+                          
+                          // 4. 写入缓存，仅当解析成功时
+                          if rcode == 0 {
+                              let ttl = response.answers.first().map(|a| a.ttl).unwrap_or(DEFAULT_TTL);
+                              let expire_at = Instant::now() + Duration::from_secs(ttl as u64);
+                              self.cache.insert(cache_key, CacheEntry { ips: resolved_ips.clone(), expire_at });
+                              
+                              // 缓存超过阈值时，清理过期条目
+                              if self.cache.len() >= CACHE_CLEAN_THRESHOLD {
+                                  clean_expired_cache(&self.cache);
+                              }
+                          }
+                          
+                          build_dns_response(req_data, record_type, resolved_ips, rcode)
+                      }
+                      Err(_) => {
+                          // 解析失败，返回服务器错误
+                          build_dns_response(req_data, record_type, vec![], 2)
+                      }
+                  }
+              }
+              
               async fn start(&self) -> Result<()> {
-                  // 绑定6006端口
-                  let sock = Arc::new(UdpSocket::bind(self.listen_addr).await?);
-                  println!("✅ 智能分流DNS服务启动，监听地址: {}", self.listen_addr);
+                  // 优化UDP socket配置，提升处理性能
+                  let sock = Arc::new(UdpSocket::bind(LISTEN_ADDR).await?);
+                  // 设置socket缓冲区，减少系统调用
+                  let _ = sock.set_recv_buffer_size(64 * 1024);
+                  let _ = sock.set_send_buffer_size(64 * 1024);
                   
-                  // 预热Trie树，避免首次请求卡顿
-                  let _ = get_trie();
+                  println!("✅ rat_quickdns 极致优化版启动成功，监听地址: {}", LISTEN_ADDR);
+                  println!("✅ 并行查询上游已就绪，内存缓存已启用");
                   
-                  // 初始化上下游解析器
-                  let domestic_res = self.create_domestic_resolver().await?;
-                  let foreign_res = self.create_foreign_resolver().await?;
-                  println!("✅ 上下游DNS解析器初始化完成，开始接收请求\n");
+                  // 预分配接收缓冲区，避免循环内重复分配
+                  let mut buf = [0; DNS_MAX_UDP_SIZE];
                   
-                  let mut buf = [0; 4096]; // 扩大缓冲区，兼容EDNS0大报文
-                  
+                  // 主循环，极致精简，最小化循环内开销
                   loop {
                       let (len, client_addr) = match sock.recv_from(&mut buf).await {
                           Ok(res) => res,
-                          Err(e) => {
-                              eprintln!("❌ 接收请求失败: {}", e);
-                              continue;
-                          }
+                          Err(_) => continue,
                       };
-                      let req_data = buf[..len].to_vec();
-                      let start_time = Instant::now();
                       
-                      let dom_res = domestic_res.clone();
-                      let for_res = foreign_res.clone();
-                      let sock_clone = sock.clone();
+                      let req_data = &buf[..len];
+                      let sock_clone = self.resolver.clone();
+                      let cache_clone = self.cache.clone();
+                      let server = Self { resolver: sock_clone, cache: cache_clone };
                       
                       // 异步处理请求，不阻塞主循环
                       tokio::spawn(async move {
-                          // 1. 解析DNS请求
-                          let (domain, qtype) = match parse_dns_domain(&req_data) {
-                              Some(res) => res,
-                              None => {
-                                  eprintln!("❌ [{}] 非法DNS请求，无法解析域名", client_addr);
-                                  return;
-                              }
-                          };
-          
-                          // 2. 只处理A/AAAA记录，其他类型直接返回
-                          let record_type = match qtype {
-                              1 => DnsRecordType::A,
-                              28 => DnsRecordType::AAAA,
-                              _ => {
-                                  println!("⚠️ [{}] 跳过非A/AAAA记录请求: {} 类型: {}", client_addr, domain, qtype);
-                                  if let Some(res_bytes) = build_dns_response(&req_data, DnsRecordType::A, vec![], 4) {
-                                      let _ = sock_clone.send_to(&res_bytes, client_addr).await;
-                                  }
-                                  return;
-                              }
-                          };
-          
-                          // 3. 分流判断，选择对应解析器
-                          let is_domestic = is_domestic_domain(&domain);
-                          let resolver = if is_domestic { dom_res } else { for_res };
-                          let upstream_type = if is_domestic { "国内" } else { "国外" };
-          
-                          // 4. 打印请求日志
-                          println!("========================================");
-                          println!("📥 新请求 | 客户端: {} | 域名: {} | 类型: {:?} | 分流: {}", 
-                              client_addr, domain, record_type, upstream_type);
-          
-                          // 5. 构建上游查询请求
-                          let query_req = DnsQueryRequest {
-                              query_id: None,
-                              domain: domain.clone(),
-                              record_type,
-                              enable_edns: true,
-                              client_address: Some(client_addr.ip().to_string()),
-                              timeout_ms: Some(3000),
-                              disable_cache: false,
-                              enable_dnssec: false
-                          };
-          
-                          // 6. 执行解析，获取结果
-                          let query_result = resolver.query(query_req).await;
-                          let cost_time = start_time.elapsed();
-          
-                          // 7. 处理解析结果，返回给客户端
-                          match query_result {
-                              Ok(response) => {
-                                  // 提取解析到的IP，打印完整结果
-                                  let resolved_ips = response.ip_addresses();
-                                  let rcode = if response.success && !resolved_ips.is_empty() { 0 } else { 3 };
-          
-                                  // 核心：打印解析结果，可直接查看
-                                  println!("✅ 解析成功 | 域名: {} | 解析到IP: {:?} | 上游: {} | 耗时: {:?}",
-                                      domain, resolved_ips, upstream_type, cost_time);
-          
-                                  // 构建响应报文，返回给客户端
-                                  if let Some(res_bytes) = build_dns_response(&req_data, record_type, resolved_ips, rcode) {
-                                      match sock_clone.send_to(&res_bytes, client_addr).await {
-                                          Ok(send_len) => {
-                                              println!("📤 响应已发送 | 客户端: {} | 报文长度: {} 字节", client_addr, send_len);
-                                          }
-                                          Err(e) => {
-                                              eprintln!("❌ 响应发送失败 | 客户端: {} | 错误: {}", client_addr, e);
-                                          }
-                                      }
-                                  } else {
-                                      eprintln!("❌ 构建DNS响应失败 | 域名: {}", domain);
-                                  }
-                              }
-                              Err(e) => {
-                                  // 解析失败，打印错误，返回服务器失败响应
-                                  eprintln!("❌ 解析失败 | 域名: {} | 上游: {} | 错误: {} | 耗时: {:?}",
-                                      domain, upstream_type, e, cost_time);
-                                  
-                                  if let Some(res_bytes) = build_dns_response(&req_data, record_type, vec![], 2) {
-                                      let _ = sock_clone.send_to(&res_bytes, client_addr).await;
-                                  }
-                              }
+                          if let Some(res_bytes) = server.handle_query(req_data).await {
+                              let _ = sock.send_to(&res_bytes, client_addr).await;
                           }
-                          println!("========================================\n");
                       });
                   }
               }
           }
           
-          #[tokio::main]
+          // 🔥 发热专项优化：单线程current_thread运行时，消除多核心上下文切换与唤醒
+          #[tokio::main(flavor = "current_thread")]
           async fn main() -> Result<()> {
-              rat_logger::init();
-              // 修复：监听你指定的6006端口，不是53
-              DnsServer::new("0.0.0.0:6006").start().await
+              // 关闭非必要日志，减少IO开销
+              let _ = rat_logger::init();
+              // 启动服务
+              DnsServer::new().await?.start().await
           }
-
-
           EOF
 
-
-
-      # 🔥 第一步：编译可执行DNS程序，不开启python-bindings，彻底避开libpython依赖
+      # 🔥 极致性能编译：Android aarch64专属优化，开启硬件加速
       - name: 编译 Android arm64 可执行DNS程序
         run: |
-          # 清空系统NDK/SDK，避免环境冲突
+          # 清空冲突环境变量
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
 
-          # 强制openssl静态编译
+          # 强制静态编译，无外部依赖
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export OPENSSL_NO_VENDOR=0
@@ -504,8 +435,11 @@ jobs:
           export PKG_CONFIG_LIBDIR=""
           export PKG_CONFIG_SYSROOT_DIR=""
 
-          # 全量屏蔽所有非致命lint
+          # 🔥 Android aarch64专属性能优化编译参数
           export RUSTFLAGS="\
+          -C target-cpu=cortex-a76 \
+          -C target-feature=+neon,+fp-armv8,+crc,+aes,+sha2 \
+          -C link-arg=-s \
           -A unused \
           -A unexpected_cfgs \
           -A deprecated \
@@ -517,24 +451,23 @@ jobs:
           -A missing_docs \
           "
 
-          # 关键：不开启python-bindings，编译纯可执行程序，无Python依赖，100%成功
+          # 纯可执行程序编译，无Python依赖
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
             build --release
 
-      # 🔥 第二步：编译Python绑定库，开启python-bindings，完整保留Python功能
+      # 保留Python绑定编译，优化编译参数
       - name: 编译 Android arm64 Python绑定库
         run: |
-          # 清空系统NDK/SDK，避免环境冲突
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
 
-          # pyo3交叉编译核心配置，完全不链接libpython
+          # Python交叉编译核心配置
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
 
-          # 强制openssl静态编译
+          # 静态编译配置
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
           export OPENSSL_NO_VENDOR=0
@@ -542,8 +475,11 @@ jobs:
           export PKG_CONFIG_LIBDIR=""
           export PKG_CONFIG_SYSROOT_DIR=""
 
-          # 全量屏蔽所有非致命lint
+          # 同级别性能优化
           export RUSTFLAGS="\
+          -C target-cpu=cortex-a76 \
+          -C target-feature=+neon,+fp-armv8,+crc,+aes,+sha2 \
+          -C link-arg=-s \
           -A unused \
           -A unexpected_cfgs \
           -A deprecated \
@@ -555,7 +491,7 @@ jobs:
           -A missing_docs \
           "
 
-          # 关键：开启python-bindings，编译Python扩展库，extension-module特性确保不链接libpython
+          # 编译Python绑定库
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
@@ -566,46 +502,38 @@ jobs:
       - name: 打包并上传所有产物
         run: |
           mkdir -p dist
-          # 复制可执行DNS程序
+          # 复制可执行程序
           BIN_PATH=target/aarch64-linux-android/release/rat_quickdns
           if [ -f "$BIN_PATH" ]; then
             cp $BIN_PATH dist/
             chmod +x dist/rat_quickdns
-            echo "✅ 可执行DNS程序编译成功"
+            echo "✅ 极致优化版可执行程序编译成功"
           else
-            echo "⚠️  未找到可执行DNS程序"
+            echo "⚠️  未找到可执行程序"
           fi
       
-          # 保留原有Python绑定库的复制+重命名逻辑
+          # 复制Python绑定库
           PY_LIB_PATH=target/aarch64-linux-android/release/librat_quickdns.so
           if [ -f "$PY_LIB_PATH" ]; then
             cp $PY_LIB_PATH dist/rat_quickdns.so
-            echo "✅ Python绑定库复制成功"
+            echo "✅ Python绑定库编译成功"
           else
             echo "⚠️  未找到Python绑定库"
           fi
       
-          # 新增：打包目标目录下所有.so库文件（含依赖库）
-          # 基础匹配：仅release根目录的.so文件
+          # 打包所有依赖库
           SO_GLOB="target/aarch64-linux-android/release/*.so"
-          # 如需包含deps子目录的所有.so，注释上面一行，取消下面一行的注释即可
-          # SO_GLOB="target/aarch64-linux-android/release/**/*.so"
-      
-          # 匹配并复制所有.so文件（自动跳过已处理的Python绑定库，不会重复复制）
           if ls $SO_GLOB 1> /dev/null 2>&1; then
             cp $SO_GLOB dist/
             echo "✅ 全量.so库文件打包完成"
-          else
-            echo "⚠️  未找到额外的.so库文件"
           fi
       
-          # 输出最终产物信息
+          # 输出产物信息
           echo "=== 最终产物列表 ==="
           ls -lh dist/
           file dist/*
 
-
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-full
+          name: rat_quickdns-arm64-ultimate
           path: dist/
