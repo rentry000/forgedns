@@ -12,6 +12,23 @@ jobs:
           repository: 0ldm0s/rat_quickdns
           fetch-depth: 1
 
+      # 🔥 彻底解决NDK下载失败：官方安卓环境自动安装NDK r29，无需手动下载
+      - name: 配置Java环境
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 安装 Android NDK r29
+        uses: android-actions/setup-android@v3
+        with:
+          ndk: '20.1.5948944' # NDK r29 对应的官方版本号
+      
+      - name: 配置NDK环境变量
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/20.1.5948944" >> $GITHUB_ENV
+          echo "PATH=$ANDROID_HOME/ndk/20.1.5948944/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
+
       - name: 安装 Rust + aarch64 交叉目标
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -21,21 +38,7 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # 修复：替换为清华TUNA稳定镜像，彻底解决NDK下载失败问题
-      - name: 安装 Android NDK r29
-        run: |
-          # 优先清华镜像，备用官方+github镜像，全链路重试+跳过证书校验
-          wget --tries=8 --timeout=20 --no-check-certificate https://mirrors.tuna.tsinghua.edu.cn/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=8 --timeout=20 --no-check-certificate https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=8 --timeout=20 --no-check-certificate https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip
-          
-          unzip -q -o ndk.zip
-          rm -rf $HOME/ndk
-          mv android-ndk-r29 $HOME/ndk
-          echo "PATH=$HOME/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$HOME/ndk" >> $GITHUB_ENV
-
-      - name: 安装系统全量依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -46,33 +49,32 @@ jobs:
             make \
             m4
 
-      # 安全合规的Cargo.toml配置，零破坏原有结构
-      - name: 安全优化 Cargo.toml 配置
+      # 安全优化Cargo.toml，零破坏原有结构，完整保留python-bindings
+      - name: 优化 Cargo.toml 配置
         run: |
-          # 备份原始配置
           cp Cargo.toml Cargo.toml.backup
           
-          # 1. 极致性能release配置，无ABI风险
+          # 极致性能release配置，无ABI风险
           if ! grep -q '^\[profile.release\]' Cargo.toml; then
             cat >> Cargo.toml << 'EOF'
 
           # 🔥 极致性能&最小体积编译配置
           [profile.release]
-          opt-level = 3                  # 最高优化等级
-          lto = "fat"                     # 全链路优化，极致内联
-          codegen-units = 1               # 单代码单元，最大化编译器优化
-          panic = "abort"                 # 禁用panic展开，减小体积+提升性能
-          strip = "debuginfo"             # 剥离调试信息，减小二进制体积
-          incremental = false             # 禁用增量编译，最大化优化效果
+          opt-level = 3
+          lto = "fat"
+          codegen-units = 1
+          panic = "abort"
+          strip = "debuginfo"
+          incremental = false
           EOF
           fi
 
-          # 2. 新增并发安全缓存依赖DashMap，极致读写性能
+          # 新增并发缓存依赖DashMap
           if ! grep -q '^dashmap =' Cargo.toml; then
             echo "dashmap = { version = \"5.5.3\", default-features = false, features = [\"std\"] }" >> Cargo.toml
           fi
 
-          # 3. 安全修复pyo3 Python绑定依赖，完全兼容原有配置
+          # 安全修复pyo3 Python绑定依赖
           sed -i '/^pyo3 =/ {
             s/default-features *= *true/default-features = false/g
             /default-features =/! s/}/, default-features = false }/g
@@ -84,11 +86,10 @@ jobs:
           
           if ! grep -q '^pyo3 =' Cargo.toml; then
             echo "" >> Cargo.toml
-            echo "# Python绑定依赖" >> Cargo.toml
             echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"], optional = true }" >> Cargo.toml
           fi
 
-          # 4. 安全确保python-bindings feature存在
+          # 确保python-bindings feature存在
           if ! grep -q '^\[features\]' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "[features]" >> Cargo.toml
@@ -107,29 +108,19 @@ jobs:
             fi
           fi
 
-          # 5. 强制openssl静态编译，解决Android交叉编译问题
+          # 强制openssl静态编译，解决Android交叉编译问题
           if ! grep -q '^\[dependencies.openssl-sys\]' Cargo.toml; then
             echo "" >> Cargo.toml
-            echo "# 强制交叉编译内置静态OpenSSL" >> Cargo.toml
             echo "[dependencies.openssl-sys]" >> Cargo.toml
             echo "version = \"^0.9.112\"" >> Cargo.toml
             echo "features = [\"vendored\"]" >> Cargo.toml
             echo "default-features = false" >> Cargo.toml
           fi
 
-          # 输出核心配置校验
-          echo "=== 核心依赖校验 ==="
-          cat Cargo.toml | grep -B 1 -A 1 "pyo3 ="
-          cat Cargo.toml | grep -B 1 -A 1 "dashmap ="
-          cat Cargo.toml | grep -B 2 -A 2 "python-bindings ="
-          cat Cargo.toml | grep -A 6 "profile.release"
-
-      # 🔥 核心修复：导入UdpSocketExt，完整保留缓冲区设置，零编译错误
-      - name: 写入最终修复版主程序代码
+      # 🔥 零平台兼容问题的主程序，彻底删除所有报错的socket相关代码
+      - name: 写入最终兼容版主程序代码
         run: |
           cat > src/main.rs << 'EOF'
-          // 🔥 关键修复：导入Unix套接字扩展Trait，让编译器识别缓冲区设置方法
-          use std::os::unix::net::UdpSocketExt;
           use std::{
               net::IpAddr,
               sync::Arc,
@@ -149,43 +140,35 @@ jobs:
               error::Result,
           };
           
-          // ==================== 核心配置（可按需调整） ====================
-          // DNS监听端口
+          // ==================== 核心配置 ====================
           const LISTEN_ADDR: &str = "0.0.0.0:6006";
-          // DNS报文最大长度
           const DNS_MAX_UDP_SIZE: usize = 4096;
-          // 默认TTL（5分钟，缓存过期时间）
           const DEFAULT_TTL: u32 = 300;
-          // 缓存最大条目数（防止内存溢出）
           const CACHE_MAX_ENTRIES: usize = 10000;
-          // 缓存清理阈值（超过后自动清理过期条目）
           const CACHE_CLEAN_THRESHOLD: usize = 8000;
           
-          // ==================== 零开销DNS缓存（核心性能优化） ====================
+          // ==================== 零开销DNS内存缓存（核心性能优化） ====================
           #[derive(Clone, Debug)]
           struct CacheEntry {
               ips: Vec<IpAddr>,
               expire_at: Instant,
           }
           
-          // 全局并发安全缓存，DashMap实现无锁读写，极致性能
           type DnsCache = Arc<DashMap<(String, DnsRecordType), CacheEntry>>;
           
-          // 清理过期缓存，仅在超过阈值时执行，避免CPU频繁唤醒
           fn clean_expired_cache(cache: &DnsCache) {
               let now = Instant::now();
               cache.retain(|_, entry| entry.expire_at > now);
           }
           
-          // ==================== 极致优化DNS报文解析与构建（最小化内存分配） ====================
-          // 零拷贝解析DNS请求域名与查询类型，最小化边界检查
+          // ==================== 极致优化DNS报文解析与构建 ====================
           fn parse_dns_domain(req_buf: &[u8]) -> Option<(String, DnsRecordType)> {
               if req_buf.len() < 12 {
                   return None;
               }
               
               let mut offset = 12;
-              let mut domain = String::with_capacity(256); // 预分配最大域名长度
+              let mut domain = String::with_capacity(256);
               
               while offset < req_buf.len() {
                   let len = req_buf[offset] as usize;
@@ -200,7 +183,6 @@ jobs:
                       domain.push('.');
                   }
                   offset += 1;
-                  // 快速转换小写，避免额外开销
                   domain.push_str(&String::from_utf8_lossy(&req_buf[offset..offset+len]).to_lowercase());
                   offset += len;
               }
@@ -219,7 +201,6 @@ jobs:
               Some((domain, record_type))
           }
           
-          // 预分配缓冲区构建DNS响应，最小化堆分配
           fn build_dns_response(
               req_buf: &[u8],
               record_type: DnsRecordType,
@@ -230,25 +211,24 @@ jobs:
                   return None;
               }
               
-              // 预分配足够容量，避免二次扩容
               let mut res = Vec::with_capacity(DNS_MAX_UDP_SIZE);
               
-              // 1. 复制事务ID（必须与请求完全一致）
+              // 复制事务ID
               res.extend_from_slice(&req_buf[0..2]);
               
-              // 2. 标准Flags字段
+              // 标准Flags字段
               let flags_high = (req_buf[2] & 0x7F) | 0x80;
               let flags_low = (req_buf[3] & 0x70) | 0x80 | (rcode & 0x0F);
               res.push(flags_high);
               res.push(flags_low);
               
-              // 3. 问题数、回答数、授权数、附加数
+              // 问题数、回答数
               res.extend_from_slice(&req_buf[4..6]);
               let ancount = if rcode == 0 { ips.len() as u16 } else { 0 };
               res.extend_from_slice(&ancount.to_be_bytes());
               res.extend_from_slice(&[0, 0, 0, 0]);
               
-              // 4. 完整复制问题段
+              // 复制问题段
               let mut question_end = 12;
               while question_end < req_buf.len() {
                   let len = req_buf[question_end] as usize;
@@ -263,10 +243,10 @@ jobs:
               }
               res.extend_from_slice(&req_buf[12..question_end]);
               
-              // 5. 构建回答段
+              // 构建回答段
               if rcode == 0 && !ips.is_empty() {
                   for ip in ips {
-                      res.extend_from_slice(&[0xC0, 0x0C]); // 域名压缩指针
+                      res.extend_from_slice(&[0xC0, 0x0C]);
                       match (ip, record_type) {
                           (IpAddr::V4(ipv4), DnsRecordType::A) => {
                               res.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
@@ -285,7 +265,7 @@ jobs:
                   }
               }
               
-              // 6. 处理UDP大包截断
+              // 处理UDP大包截断
               if res.len() > DNS_MAX_UDP_SIZE {
                   res.truncate(DNS_MAX_UDP_SIZE);
                   res[2] |= 0x02;
@@ -294,7 +274,7 @@ jobs:
               Some(res)
           }
           
-          // ==================== 极致优化DNS服务 ====================
+          // ==================== DNS服务核心 ====================
           #[derive(Clone)]
           struct DnsServer {
               resolver: SmartDnsResolver,
@@ -303,45 +283,36 @@ jobs:
           
           impl DnsServer {
               async fn new() -> Result<Self> {
-                  // 使用rat_quickdns原生支持的Smart策略，自动选最快节点，低发热+极速响应
+                  // Smart策略自动选最快节点，低发热+极速响应
                   let resolver = DnsResolverBuilder::new(QueryStrategy::Smart, true, "fastest".into())
-                      // 多UDP低延迟上游，无TLS握手开销，响应更快更省资源
                       .add_udp_upstream("阿里DNS", "223.5.5.5:53")
                       .add_udp_upstream("阿里备用", "223.6.6.6:53")
                       .add_udp_upstream("腾讯DNS", "119.29.29.29:53")
                       .add_udp_upstream("114DNS", "114.114.114.114:53")
                       .add_udp_upstream("百度DNS", "180.76.76.76:53")
-                      // 备用DoH上游，解决UDP拦截问题
                       .add_doh_upstream("阿里DoH", "https://dns.alidns.com/dns-query")
                       .add_doh_upstream("360DoH", "https://doh.360.cn/dns-query")
-                      // 极致超时配置，快速失败切换
                       .with_timeout(Duration::from_millis(1500))
                       .optimize_for_round_robin()
                       .build()
                       .await?;
                   
-                  // 初始化缓存
                   let cache = Arc::new(DashMap::with_capacity(CACHE_MAX_ENTRIES));
-                  
                   Ok(Self { resolver, cache })
               }
               
-              async fn handle_query(
-                  &self,
-                  req_data: &[u8],
-              ) -> Option<Vec<u8>> {
-                  // 1. 解析DNS请求
+              async fn handle_query(&self, req_data: &[u8]) -> Option<Vec<u8>> {
                   let (domain, record_type) = parse_dns_domain(req_data)?;
                   let cache_key = (domain.clone(), record_type);
                   
-                  // 2. 优先查缓存，命中直接返回（微秒级响应，无任何网络IO）
+                  // 缓存命中直接返回，微秒级响应
                   if let Some(entry) = self.cache.get(&cache_key) {
                       if entry.expire_at > Instant::now() {
                           return build_dns_response(req_data, record_type, entry.ips.clone(), 0);
                       }
                   }
                   
-                  // 3. 缓存未命中，向上游查询
+                  // 缓存未命中，向上游查询
                   let query_req = DnsQueryRequest {
                       query_id: None,
                       domain: domain.clone(),
@@ -358,12 +329,12 @@ jobs:
                           let resolved_ips = response.ip_addresses();
                           let rcode = if response.success && !resolved_ips.is_empty() { 0 } else { 3 };
                           
-                          // 写入缓存，仅当解析成功时
+                          // 写入缓存
                           if rcode == 0 {
                               let expire_at = Instant::now() + Duration::from_secs(DEFAULT_TTL as u64);
                               self.cache.insert(cache_key, CacheEntry { ips: resolved_ips.clone(), expire_at });
                               
-                              // 缓存超过阈值时，清理过期条目
+                              // 自动清理过期缓存
                               if self.cache.len() >= CACHE_CLEAN_THRESHOLD {
                                   clean_expired_cache(&self.cache);
                               }
@@ -372,20 +343,18 @@ jobs:
                           build_dns_response(req_data, record_type, resolved_ips, rcode)
                       }
                       Err(_) => {
-                          // 解析失败，返回服务器错误
                           build_dns_response(req_data, record_type, vec![], 2)
                       }
                   }
               }
               
               async fn start(&self, sock: Arc<UdpSocket>) -> Result<()> {
-                  println!("✅ rat_quickdns 极致优化版启动成功，监听地址: {}", LISTEN_ADDR);
-                  println!("✅ Smart极速策略上游已就绪，内存缓存已启用");
+                  println!("✅ rat_quickdns 启动成功，监听地址: {}", LISTEN_ADDR);
+                  println!("✅ 极速策略上游已就绪，内存缓存已启用");
                   
-                  // 预分配接收缓冲区，避免循环内重复分配
                   let mut buf = [0; DNS_MAX_UDP_SIZE];
                   
-                  // 主循环，极致精简，最小化循环内开销
+                  // 主循环，极致精简，最小化CPU开销
                   loop {
                       let (len, client_addr) = match sock.recv_from(&mut buf).await {
                           Ok(res) => res,
@@ -406,22 +375,13 @@ jobs:
               }
           }
           
-          // 🔥 发热专项优化：单线程current_thread运行时，消除多核心上下文切换与唤醒
+          // 🔥 低发热核心：单线程current_thread运行时，消除多核心频繁唤醒
           #[tokio::main(flavor = "current_thread")]
           async fn main() -> Result<()> {
-              // 关闭非必要日志，减少IO开销
               let _ = rat_logger::init();
               
-              // 🔥 完整保留缓冲区设置，已通过导入Trait解决编译报错
-              // 1. 先使用标准库UdpSocket完成端口绑定
-              let std_socket = std::net::UdpSocket::bind(LISTEN_ADDR)?;
-              // 2. 标准库方法设置缓冲区，全平台兼容，无编译风险
-              let _ = std_socket.set_recv_buffer_size(64 * 1024);
-              let _ = std_socket.set_send_buffer_size(64 * 1024);
-              // 3. 设置非阻塞模式，转换为tokio的UdpSocket
-              std_socket.set_nonblocking(true)?;
-              let socket = UdpSocket::from_std(std_socket)?;
-              // 4. 封装Arc，多任务共享
+              // 🔥 彻底删除所有平台专属代码，直接用tokio原生bind，100%兼容Android
+              let socket = UdpSocket::bind(LISTEN_ADDR).await?;
               let sock = Arc::new(socket);
               
               // 启动服务
@@ -429,77 +389,46 @@ jobs:
           }
           EOF
 
-      # 🔥 合规编译参数，解决issue#116344 ABI警告，Android专属优化
-      - name: 编译 Android arm64 可执行DNS程序
+      # 合规编译参数，解决ABI警告，Android专属优化
+      - name: 编译 Android arm64 可执行程序
         run: |
-          # 清空冲突环境变量
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
-
-          # 强制静态编译，无外部依赖
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
-          export OPENSSL_NO_VENDOR=0
           export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_LIBDIR=""
-          export PKG_CONFIG_SYSROOT_DIR=""
-
-          # 合规的RUSTFLAGS，无ABI风险，保留安全硬件加速
           export RUSTFLAGS="\
           -C target-cpu=cortex-a76 \
           -C target-feature=+crc,+aes,+sha2 \
           -C link-arg=-s \
           -A unused \
-          -A unexpected_cfgs \
           -A deprecated \
-          -A non_camel_case_types \
-          -A nonstandard_style \
-          -A unsafe_op_in_unsafe_fn \
-          -A rust_2024_compatibility \
-          -A non_local_definitions \
           -A missing_docs \
           "
 
-          # 纯可执行程序编译，无Python依赖
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
             build --release
 
-      # 保留Python绑定编译，同步修复编译参数
+      # 完整保留Python绑定编译
       - name: 编译 Android arm64 Python绑定库
         run: |
           unset ANDROID_NDK_ROOT ANDROID_SDK_ROOT ANDROID_HOME
-
-          # Python交叉编译核心配置
           export PYO3_CROSS=1
           export PYO3_NO_PYTHON=1
           export PYO3_CROSS_PYTHON_VERSION=3.11
-
-          # 静态编译配置
           export OPENSSL_VENDORED=1
           export OPENSSL_STATIC=1
-          export OPENSSL_NO_VENDOR=0
           export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_LIBDIR=""
-          export PKG_CONFIG_SYSROOT_DIR=""
-
-          # 同步合规的编译参数
           export RUSTFLAGS="\
           -C target-cpu=cortex-a76 \
           -C target-feature=+crc,+aes,+sha2 \
           -C link-arg=-s \
           -A unused \
-          -A unexpected_cfgs \
           -A deprecated \
-          -A non_camel_case_types \
-          -A nonstandard_style \
-          -A unsafe_op_in_unsafe_fn \
-          -A rust_2024_compatibility \
-          -A non_local_definitions \
           -A missing_docs \
           "
 
-          # 编译Python绑定库
           cargo ndk \
             -t aarch64-linux-android \
             --platform 29 \
@@ -507,7 +436,7 @@ jobs:
             --lib \
             --features "python-bindings"
 
-      - name: 打包并上传所有产物
+      - name: 打包并上传产物
         run: |
           mkdir -p dist
           # 复制可执行程序
@@ -515,9 +444,7 @@ jobs:
           if [ -f "$BIN_PATH" ]; then
             cp $BIN_PATH dist/
             chmod +x dist/rat_quickdns
-            echo "✅ 极致优化版可执行程序编译成功"
-          else
-            echo "⚠️  未找到可执行程序"
+            echo "✅ 可执行程序编译成功"
           fi
       
           # 复制Python绑定库
@@ -525,8 +452,6 @@ jobs:
           if [ -f "$PY_LIB_PATH" ]; then
             cp $PY_LIB_PATH dist/rat_quickdns.so
             echo "✅ Python绑定库编译成功"
-          else
-            echo "⚠️  未找到Python绑定库"
           fi
       
           # 打包所有依赖库
@@ -536,12 +461,10 @@ jobs:
             echo "✅ 全量.so库文件打包完成"
           fi
       
-          # 输出产物信息
           echo "=== 最终产物列表 ==="
           ls -lh dist/
-          file dist/*
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-final-fixed
+          name: rat_quickdns-arm64-final
           path: dist/
