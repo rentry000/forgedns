@@ -14,34 +14,7 @@ jobs:
           repository: SvenShi/forgedns
           fetch-depth: 1
 
-      # 🔥 低发热核心适配：零功能删减，仅做Android平台兼容优化
-      - name: Android平台低发热适配（全功能保留）
-        run: |
-          # 校验源码文件存在
-          if [ ! -f src/main.rs ]; then
-            echo "❌ 源码文件不存在，路径错误"
-            exit 1
-          fi
-
-          # 1. 【零代码删除】Android平台条件编译适配内存分配器
-          # 仅在Android目标上使用系统原生分配器（解决jemalloc内存碎片导致的发热），其他平台完整保留jemalloc
-          # 通用匹配，兼容原代码所有格式
-          sed -i 's/^#\[global_allocator\]/#[cfg_attr(not(target_os = "android"), global_allocator)]/' src/main.rs
-          sed -i 's/^use tikv_jemallocator::Jemalloc;/#[cfg(not(target_os = "android"))]\nuse tikv_jemallocator::Jemalloc;/' src/main.rs
-
-          # 2. 【全功能保留】低发热核心：固定单线程Tokio运行时，彻底消除多核心频繁唤醒
-          # 通用匹配，兼容原代码tokio::main所有带参/无参格式
-          sed -i 's/^#\[tokio::main.*\]/#[tokio::main(worker_threads = 1)]/' src/main.rs
-
-          # 输出适配结果校验
-          echo "=== 适配完成，全功能保留确认 ==="
-          echo "✅ 完整保留jemalloc（仅Android平台条件禁用，不删除代码）"
-          echo "✅ 完整保留所有功能模块，未裁剪任何features"
-          echo "✅ 已配置单线程低发热运行时，不影响任何异步功能"
-          echo "👇 适配后代码校验："
-          cat src/main.rs | grep "#\[tokio::main"
-          cat src/main.rs | grep "global_allocator"
-          cat src/main.rs | grep "use tikv_jemallocator"
+      
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
