@@ -1,4 +1,4 @@
-name: Build ForgedNS Android ARM64 (全功能版)
+name: Build ForgedNS Android ARM64 (全功能低发热版)
 on:
   workflow_dispatch:
   push:
@@ -13,32 +13,35 @@ jobs:
         with:
           repository: SvenShi/forgedns
           fetch-depth: 1
-          path: forgedns
 
-      # 🔥 核心适配：零功能裁剪，仅做Android平台兼容性+低发热适配，不修改任何功能模块
-      - name: Android平台专属适配（不删减任何功能）
+      # 🔥 低发热核心适配：零功能删减，仅做Android平台兼容优化
+      - name: Android平台低发热适配（全功能保留）
         run: |
-          cd forgedns
-          
-          # 1. 【零功能删除】Android平台条件编译适配内存分配器，不删除任何代码
+          # 校验源码文件存在
+          if [ ! -f src/main.rs ]; then
+            echo "❌ 源码文件不存在，路径错误"
+            exit 1
+          fi
+
+          # 1. 【零代码删除】Android平台条件编译适配内存分配器
           # 仅在Android目标上使用系统原生分配器（解决jemalloc内存碎片导致的发热），其他平台完整保留jemalloc
-          sed -i 's/#\[global_allocator\]/#[cfg_attr(not(target_os = "android"), global_allocator)]/g' src/main.rs
-          sed -i 's/use tikv_jemallocator::Jemalloc;/#[cfg(not(target_os = "android"))]\nuse tikv_jemallocator::Jemalloc;/g' src/main.rs
-          
+          # 通用匹配，兼容原代码所有格式
+          sed -i 's/^#\[global_allocator\]/#[cfg_attr(not(target_os = "android"), global_allocator)]/' src/main.rs
+          sed -i 's/^use tikv_jemallocator::Jemalloc;/#[cfg(not(target_os = "android"))]\nuse tikv_jemallocator::Jemalloc;/' src/main.rs
+
           # 2. 【全功能保留】低发热核心：固定单线程Tokio运行时，彻底消除多核心频繁唤醒
-          # 不修改任何异步逻辑，仅限制worker线程数为1，完整保留所有异步功能能力
-          sed -i 's/#\[tokio::main\]/#[tokio::main(worker_threads = 1)]/g' src/main.rs
-          
-          # 3. 【零修改】不触碰Cargo.toml任何features，完整保留所有功能模块的编译开关
-          # 不删除、不修改任何default features，全量编译所有原生能力
-          
-          # 输出适配校验，确认无功能删减
+          # 通用匹配，兼容原代码tokio::main所有带参/无参格式
+          sed -i 's/^#\[tokio::main.*\]/#[tokio::main(worker_threads = 1)]/' src/main.rs
+
+          # 输出适配结果校验
           echo "=== 适配完成，全功能保留确认 ==="
           echo "✅ 完整保留jemalloc（仅Android平台条件禁用，不删除代码）"
           echo "✅ 完整保留所有功能模块，未裁剪任何features"
           echo "✅ 已配置单线程低发热运行时，不影响任何异步功能"
+          echo "👇 适配后代码校验："
           cat src/main.rs | grep "#\[tokio::main"
           cat src/main.rs | grep "global_allocator"
+          cat src/main.rs | grep "use tikv_jemallocator"
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -49,28 +52,28 @@ jobs:
       - name: 安装 cargo-ndk（官方交叉编译工具，保证全功能编译兼容性）
         run: cargo install cargo-ndk --locked
 
-      # 🔥 修复NDK下载失败：多镜像轮询+重试机制，彻底解决下载/解析失败问题
-      - name: 安装 Android NDK r29
+      # 🔥 彻底解决NDK问题：直接使用镜像预装的NDK r29，无需手动下载
+      - name: 配置NDK环境变量（使用系统预装NDK r29）
         run: |
-          # 多镜像优先级：华为镜像 → 清华镜像 → 官方镜像 → GitHub镜像，10次重试+超时保护
-          wget --tries=10 --timeout=20 --no-check-certificate https://mirrors.huaweicloud.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=10 --timeout=20 --no-check-certificate https://mirrors.tuna.tsinghua.edu.cn/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=10 --timeout=20 --no-check-certificate https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=10 --timeout=20 --no-check-certificate https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip
+          # 镜像已预装NDK r29，路径来自官方镜像文档
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+          echo "PATH=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
           
-          unzip -q -o ndk.zip
-          rm -rf $HOME/android-ndk
-          mv android-ndk-r29 $HOME/android-ndk
-          
-          # 写入全局环境变量，保证全功能编译的工具链可用性
-          echo "ANDROID_NDK_HOME=$HOME/android-ndk" >> $GITHUB_ENV
-          echo "PATH=$HOME/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
+          # 校验NDK路径有效
+          echo "✅ NDK路径: $ANDROID_NDK_LATEST_HOME"
+          ls -lh $ANDROID_NDK_LATEST_HOME
 
-      # 🔥 全功能编译+极致性能+低功耗优化，完整保留所有原生功能
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      # 🔥 全功能编译：不删减任何features，完整编译所有原生能力
       - name: 构建 Android ARM64 全功能极致优化版
         run: |
-          cd forgedns
-          
           # 交叉编译全量环境配置，保证所有功能模块正常编译
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android24-clang
           export CC_aarch64_linux_android=aarch64-linux-android24-clang
@@ -79,11 +82,10 @@ jobs:
           export RANLIB=llvm-ranlib
           
           # 🔥 Android专属全功能编译优化参数
-          # 1. 不裁剪任何功能，完整编译所有features
+          # 1. 不裁剪任何功能，完整编译所有原生features
           # 2. 针对Cortex-A76安卓大核优化，提升执行效率，降低CPU占用时间
           # 3. 全链路LTO优化，极致内联，减少运行时CPU开销
           # 4. 合规的target-feature，无ABI兼容性风险
-          # 5. 保留完整调试信息的同时剥离冗余符号，不影响功能排查
           export RUSTFLAGS="\
           -C target-cpu=cortex-a76 \
           -C target-feature=+crc,+aes,+sha2 \
@@ -101,22 +103,22 @@ jobs:
           # 🔥 全量编译所有原生功能，不使用--no-default-features，完整保留所有模块
           cargo build --release --target aarch64-linux-android
 
-      - name: 精简二进制（不影响功能，仅剥离冗余符号）
+      - name: 精简二进制（不影响功能，仅剥离冗余调试符号）
         run: |
-          cd forgedns/target/aarch64-linux-android/release
-          # 仅剥离调试符号，不影响任何功能逻辑，减小体积的同时保留完整功能可用性
-          llvm-strip --strip-debug forgedns
-          chmod +x forgedns
-          echo "=== 全功能二进制构建完成 ==="
-          ls -lh forgedns
-          file forgedns
+          BIN_PATH=target/aarch64-linux-android/release/forgedns
+          if [ -f "$BIN_PATH" ]; then
+            llvm-strip --strip-debug $BIN_PATH
+            chmod +x $BIN_PATH
+            echo "=== 全功能二进制构建完成 ==="
+            ls -lh $BIN_PATH
+            file $BIN_PATH
+          else
+            echo "❌ 二进制文件生成失败"
+            exit 1
+          fi
 
-     
-
-      - name: 上传全功能最终产物
+      - name: 上传最终产物
         uses: actions/upload-artifact@v4
         with:
           name: forgedns-android-arm64-full-features
-          path: |
-            forgedns/target/aarch64-linux-android/release/forgedns
-            
+          path: target/aarch64-linux-android/release/forgedns
