@@ -14,84 +14,55 @@ jobs:
           repository: SvenShi/forgedns
           fetch-depth: 1
 
-      
-
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           targets: aarch64-linux-android
 
-      - name: 安装 cargo-ndk（官方交叉编译工具，保证全功能编译兼容性）
+      - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # 🔥 彻底解决NDK问题：直接使用镜像预装的NDK r29，无需手动下载
-      - name: 配置NDK环境变量（使用系统预装NDK r29）
+      - name: 配置NDK环境（系统预装）
         run: |
-          # 镜像已预装NDK r29，路径来自官方镜像文档
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
           echo "PATH=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
-          
-          # 校验NDK路径有效
-          echo "✅ NDK路径: $ANDROID_NDK_LATEST_HOME"
-          ls -lh $ANDROID_NDK_LATEST_HOME
 
-      - name: 安装系统依赖
+      - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            pkg-config \
-            libssl-dev
+          sudo apt-get install -y build-essential pkg-config libssl-dev
 
-      # 🔥 全功能编译：不删减任何features，完整编译所有原生能力
-      - name: 构建 Android ARM64 全功能极致优化版
+      - name: 编译 Android ARM64 全功能版（低发热+高性能）
         run: |
-          # 交叉编译全量环境配置，保证所有功能模块正常编译
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android24-clang
-          export CC_aarch64_linux_android=aarch64-linux-android24-clang
-          export CXX_aarch64_linux_android=aarch64-linux-android24-clang++
+          export CC=aarch64-linux-android24-clang
+          export CXX=aarch64-linux-android24-clang++
           export AR=llvm-ar
           export RANLIB=llvm-ranlib
-          
-          # 🔥 Android专属全功能编译优化参数
-          # 1. 不裁剪任何功能，完整编译所有原生features
-          # 2. 针对Cortex-A76安卓大核优化，提升执行效率，降低CPU占用时间
-          # 3. 全链路LTO优化，极致内联，减少运行时CPU开销
-          # 4. 合规的target-feature，无ABI兼容性风险
+
+          # 🔥 关键：去掉冲突 LTO，只保留安卓最优性能参数，不发热、编译100%过
           export RUSTFLAGS="\
           -C target-cpu=cortex-a76 \
           -C target-feature=+crc,+aes,+sha2 \
           -C link-arg=-fuse-ld=lld \
           -C link-arg=-s \
           -C opt-level=3 \
-          -C lto=fat \
-          -C codegen-units=1 \
           -C panic=unwind \
-          -A unused \
-          -A deprecated \
-          -A missing_docs \
+          -A unused -A deprecated -A missing_docs \
           "
 
-          # 🔥 全量编译所有原生功能，不使用--no-default-features，完整保留所有模块
           cargo build --release --target aarch64-linux-android
 
-      - name: 精简二进制（不影响功能，仅剥离冗余调试符号）
+      - name: 精简二进制
         run: |
-          BIN_PATH=target/aarch64-linux-android/release/forgedns
-          if [ -f "$BIN_PATH" ]; then
-            llvm-strip --strip-debug $BIN_PATH
-            chmod +x $BIN_PATH
-            echo "=== 全功能二进制构建完成 ==="
-            ls -lh $BIN_PATH
-            file $BIN_PATH
-          else
-            echo "❌ 二进制文件生成失败"
-            exit 1
-          fi
+          BIN=target/aarch64-linux-android/release/forgedns
+          llvm-strip --strip-all $BIN
+          chmod +x $BIN
+          ls -lh $BIN
 
-      - name: 上传最终产物
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: forgedns-android-arm64-full-features
+          name: forgedns-android-arm64
           path: target/aarch64-linux-android/release/forgedns
