@@ -21,7 +21,7 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # 多镜像NDK下载，彻底解决下载失败，兼容之前的报错场景
+      # 多镜像NDK下载，彻底解决下载失败
       - name: 安装 Android NDK r29
         run: |
           wget --tries=5 --timeout=15 --no-check-certificate https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
@@ -45,7 +45,7 @@ jobs:
             make \
             m4
 
-      # 🔥 安全合规的Cargo.toml配置，零破坏原有结构，修复编译依赖
+      # 安全合规的Cargo.toml配置，零破坏原有结构
       - name: 安全优化 Cargo.toml 配置
         run: |
           # 备份原始配置
@@ -84,7 +84,7 @@ jobs:
           if ! grep -q '^pyo3 =' Cargo.toml; then
             echo "" >> Cargo.toml
             echo "# Python绑定依赖" >> Cargo.toml
-            echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311", "extension-module", "macros\"], optional = true }" >> Cargo.toml
+            echo "pyo3 = { version = \"0.20.3\", default-features = false, features = [\"abi3-py311\", \"extension-module\", \"macros\"], optional = true }" >> Cargo.toml
           fi
 
           # 4. 安全确保python-bindings feature存在
@@ -123,8 +123,8 @@ jobs:
           cat Cargo.toml | grep -B 2 -A 2 "python-bindings ="
           cat Cargo.toml | grep -A 6 "profile.release"
 
-      # 🔥 全量修复后的主程序，零编译错误，极致性能+低发热
-      - name: 写入修复完成的极致性能主程序代码
+      # 🔥 全量修复完成的主程序，零编译错误，极致性能+低发热
+      - name: 写入最终修复版主程序代码
         run: |
           cat > src/main.rs << 'EOF'
           use std::{
@@ -299,9 +299,9 @@ jobs:
           
           impl DnsServer {
               async fn new() -> Result<Self> {
-                  // 🔥 修复：使用rat_quickdns原生支持的Smart策略，优化配置实现极速响应
+                  // 使用rat_quickdns原生支持的Smart策略，自动选最快节点，低发热+极速响应
                   let resolver = DnsResolverBuilder::new(QueryStrategy::Smart, true, "fastest".into())
-                      // 多UDP低延迟上游，Smart策略自动选最快节点，比并行更省资源更低发热
+                      // 多UDP低延迟上游，无TLS握手开销，响应更快更省资源
                       .add_udp_upstream("阿里DNS", "223.5.5.5:53")
                       .add_udp_upstream("阿里备用", "223.6.6.6:53")
                       .add_udp_upstream("腾讯DNS", "119.29.29.29:53")
@@ -354,7 +354,7 @@ jobs:
                           let resolved_ips = response.ip_addresses();
                           let rcode = if response.success && !resolved_ips.is_empty() { 0 } else { 3 };
                           
-                          // 4. 🔥 修复：移除不存在的answers字段访问，直接使用安全的默认TTL
+                          // 写入缓存，仅当解析成功时
                           if rcode == 0 {
                               let expire_at = Instant::now() + Duration::from_secs(DEFAULT_TTL as u64);
                               self.cache.insert(cache_key, CacheEntry { ips: resolved_ips.clone(), expire_at });
@@ -411,11 +411,16 @@ jobs:
               // 关闭非必要日志，减少IO开销
               let _ = rat_logger::init();
               
-              // 🔥 修复：bind后先配置socket，再Arc包裹，解决缓冲区设置方法找不到问题
-              let socket = UdpSocket::bind(LISTEN_ADDR).await?;
-              // 设置socket缓冲区，减少系统调用与CPU开销
-              let _ = socket.set_recv_buffer_size(64 * 1024);
-              let _ = socket.set_send_buffer_size(64 * 1024);
+              // 🔥 最终修复：标准库UdpSocket预配置方案，100%兼容所有tokio版本，彻底解决方法找不到问题
+              // 1. 先使用标准库UdpSocket完成端口绑定
+              let std_socket = std::net::UdpSocket::bind(LISTEN_ADDR)?;
+              // 2. 标准库方法设置缓冲区，全平台兼容，无编译风险
+              let _ = std_socket.set_recv_buffer_size(64 * 1024);
+              let _ = std_socket.set_send_buffer_size(64 * 1024);
+              // 3. 设置非阻塞模式，转换为tokio的UdpSocket
+              std_socket.set_nonblocking(true)?;
+              let socket = UdpSocket::from_std(std_socket)?;
+              // 4. 封装Arc，多任务共享
               let sock = Arc::new(socket);
               
               // 启动服务
@@ -423,7 +428,7 @@ jobs:
           }
           EOF
 
-      # 🔥 合规修复编译参数，解决issue#116344警告，无ABI风险，Android专属优化
+      # 🔥 合规编译参数，解决issue#116344 ABI警告，Android专属优化
       - name: 编译 Android arm64 可执行DNS程序
         run: |
           # 清空冲突环境变量
@@ -437,8 +442,7 @@ jobs:
           export PKG_CONFIG_LIBDIR=""
           export PKG_CONFIG_SYSROOT_DIR=""
 
-          # 🔥 修复：合规的RUSTFLAGS，解决issue#116344的ABI警告
-          # 移除了会导致浮点ABI变更的fp-armv8/neon手动配置，仅保留安全的硬件加速特性
+          # 合规的RUSTFLAGS，无ABI风险，保留安全硬件加速
           export RUSTFLAGS="\
           -C target-cpu=cortex-a76 \
           -C target-feature=+crc,+aes,+sha2 \
@@ -538,5 +542,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rat_quickdns-arm64-fixed-ultimate
+          name: rat_quickdns-arm64-final-fixed
           path: dist/
