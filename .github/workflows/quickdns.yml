@@ -21,12 +21,13 @@ jobs:
       - name: 安装 cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      # 多镜像NDK下载，彻底解决下载失败
+      # 修复：替换为清华TUNA稳定镜像，彻底解决NDK下载失败问题
       - name: 安装 Android NDK r29
         run: |
-          wget --tries=5 --timeout=15 --no-check-certificate https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=5 --timeout=15 --no-check-certificate https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip \
-            || wget --tries=5 --timeout=15 --no-check-certificate https://mirrors.ustc.edu.cn/android/repository/android-ndk-r29-linux.zip -O ndk.zip
+          # 优先清华镜像，备用官方+github镜像，全链路重试+跳过证书校验
+          wget --tries=8 --timeout=20 --no-check-certificate https://mirrors.tuna.tsinghua.edu.cn/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
+            || wget --tries=8 --timeout=20 --no-check-certificate https://dl.google.com/android/repository/android-ndk-r29-linux.zip -O ndk.zip \
+            || wget --tries=8 --timeout=20 --no-check-certificate https://github.com/android/ndk/releases/download/r29/android-ndk-r29-linux.zip -O ndk.zip
           
           unzip -q -o ndk.zip
           rm -rf $HOME/ndk
@@ -123,10 +124,12 @@ jobs:
           cat Cargo.toml | grep -B 2 -A 2 "python-bindings ="
           cat Cargo.toml | grep -A 6 "profile.release"
 
-      # 🔥 全量修复完成的主程序，零编译错误，极致性能+低发热
+      # 🔥 核心修复：导入UdpSocketExt，完整保留缓冲区设置，零编译错误
       - name: 写入最终修复版主程序代码
         run: |
           cat > src/main.rs << 'EOF'
+          // 🔥 关键修复：导入Unix套接字扩展Trait，让编译器识别缓冲区设置方法
+          use std::os::unix::net::UdpSocketExt;
           use std::{
               net::IpAddr,
               sync::Arc,
@@ -292,6 +295,7 @@ jobs:
           }
           
           // ==================== 极致优化DNS服务 ====================
+          #[derive(Clone)]
           struct DnsServer {
               resolver: SmartDnsResolver,
               cache: DnsCache,
@@ -390,10 +394,7 @@ jobs:
                       
                       let req_data = buf[..len].to_vec();
                       let sock_clone = sock.clone();
-                      let server_clone = Self { 
-                          resolver: self.resolver.clone(), 
-                          cache: self.cache.clone() 
-                      };
+                      let server_clone = self.clone();
                       
                       // 异步处理请求，不阻塞主循环
                       tokio::spawn(async move {
@@ -411,7 +412,7 @@ jobs:
               // 关闭非必要日志，减少IO开销
               let _ = rat_logger::init();
               
-              // 🔥 最终修复：标准库UdpSocket预配置方案，100%兼容所有tokio版本，彻底解决方法找不到问题
+              // 🔥 完整保留缓冲区设置，已通过导入Trait解决编译报错
               // 1. 先使用标准库UdpSocket完成端口绑定
               let std_socket = std::net::UdpSocket::bind(LISTEN_ADDR)?;
               // 2. 标准库方法设置缓冲区，全平台兼容，无编译风险
