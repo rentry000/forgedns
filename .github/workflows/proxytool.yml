@@ -98,111 +98,111 @@ jobs:
 
           # 创建 Android 运行脚本
           cat > release_arm64/run_on_android.sh << 'SCRIPT'
-#!/bin/bash
-# ========================================
-# proxy_pool Android (Termux) 运行脚本
-# ========================================
-# 前提条件:
-#   1. Termux 已安装 proot-distro 和 Ubuntu
-#   2. 已进入 proot-distro login ubuntu
-#   3. Redis 可用 (远程或本地)
-# ========================================
-
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-export DB_CONN="${DB_CONN:-redis://127.0.0.1:6379/0}"
-export HOST="${HOST:-0.0.0.0}"
-export PORT="${PORT:-5010}"
-
-echo "============================================"
-echo "  proxy_pool - Android ARM64"
-echo "============================================"
-echo "Redis: $DB_CONN"
-echo "API:   http://$HOST:$PORT"
-echo "============================================"
-
-# 检查 Redis 连接
-echo "[INFO] Checking Redis connection..."
-if ! timeout 3 bash -c "echo PING | redis-cli -u $DB_CONN" &>/dev/null; then
-    echo "[WARN] Cannot connect to Redis at $DB_CONN"
-    echo "[WARN] Make sure Redis is running or set DB_CONN environment variable"
-    echo "[WARN] Example: export DB_CONN=redis://:password@your-server:6379/0"
-fi
-
-# 启动调度器 (后台)
-echo "[INFO] Starting scheduler..."
-"$SCRIPT_DIR/proxy_pool_arm64" schedule &
-SCHEDULER_PID=$!
-echo "[INFO] Scheduler PID: $SCHEDULER_PID"
-
-# 启动 API 服务 (前台)
-echo "[INFO] Starting API server..."
-trap "kill $SCHEDULER_PID 2>/dev/null; exit 0" INT TERM
-"$SCRIPT_DIR/proxy_pool_arm64" server
-SCRIPT
-
-          chmod +x release_arm64/run_on_android.sh
-
-          # 创建 README
-          cat > release_arm64/README_Android.md << 'README'
-# proxy_pool Android ARM64 使用指南
-
-## 环境准备
-
-### 1. 安装 Termux
-从 https://termux.dev 或 F-Droid 下载安装 Termux。
-
-### 2. 安装 proot-distro（推荐方式）
-```bash
-pkg update && pkg upgrade
-pkg install proot-distro
-proot-distro install ubuntu
-proot-distro login ubuntu
-```
-
-### 3. 在 Ubuntu proot 环境中安装 Redis（或使用远程 Redis）
-```bash
-apt update && apt install -y redis-server
-redis-server --daemonize yes
-```
-
-### 4. 如果使用远程 Redis，跳过步骤3，直接设置环境变量：
-```bash
-export DB_CONN=redis://:password@your-redis-host:6379/0
-```
-
-## 运行
-
-### 方式一：使用启动脚本（推荐）
-```bash
-chmod +x run_on_android.sh
-./run_on_android.sh
-```
-
-### 方式二：分别启动
-```bash
-# 启动调度器（后台）
-./proxy_pool_arm64 schedule &
-
-# 启动 API 服务
-./proxy_pool_arm64 server
-```
-
-## API 使用
-
-服务启动后访问：
-- 获取随机代理: `curl http://127.0.0.1:5010/get`
-- 获取所有代理: `curl http://127.0.0.1:5010/all`
-- 代理数量: `curl http://127.0.0.1:5010/count`
-
-## 配置
-
-修改 `setting.py` 可自定义：
-- API 监听地址和端口
-- Redis 连接信息
-- 启用的代理源列表
-README
+          #!/bin/bash
+          # ========================================
+          # proxy_pool Android (Termux) 运行脚本
+          # ========================================
+          # 前提条件:
+          #   1. Termux 已安装 proot-distro 和 Ubuntu
+          #   2. 已进入 proot-distro login ubuntu
+          #   3. Redis 可用 (远程或本地)
+          # ========================================
+          
+          set -e
+          
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          export DB_CONN="${DB_CONN:-redis://127.0.0.1:6379/0}"
+          export HOST="${HOST:-0.0.0.0}"
+          export PORT="${PORT:-5010}"
+          
+          echo "============================================"
+          echo "  proxy_pool - Android ARM64"
+          echo "============================================"
+          echo "Redis: $DB_CONN"
+          echo "API:   http://$HOST:$PORT"
+          echo "============================================"
+          
+          # 检查 Redis 连接
+          echo "[INFO] Checking Redis connection..."
+          if ! timeout 3 bash -c "echo PING | redis-cli -u $DB_CONN" &>/dev/null; then
+              echo "[WARN] Cannot connect to Redis at $DB_CONN"
+              echo "[WARN] Make sure Redis is running or set DB_CONN environment variable"
+              echo "[WARN] Example: export DB_CONN=redis://:password@your-server:6379/0"
+          fi
+          
+          # 启动调度器 (后台)
+          echo "[INFO] Starting scheduler..."
+          "$SCRIPT_DIR/proxy_pool_arm64" schedule &
+          SCHEDULER_PID=$!
+          echo "[INFO] Scheduler PID: $SCHEDULER_PID"
+          
+          # 启动 API 服务 (前台)
+          echo "[INFO] Starting API server..."
+          trap "kill $SCHEDULER_PID 2>/dev/null; exit 0" INT TERM
+          "$SCRIPT_DIR/proxy_pool_arm64" server
+          SCRIPT
+          
+                    chmod +x release_arm64/run_on_android.sh
+          
+                    # 创建 README
+                    cat > release_arm64/README_Android.md << 'README'
+          # proxy_pool Android ARM64 使用指南
+          
+          ## 环境准备
+          
+          ### 1. 安装 Termux
+          从 https://termux.dev 或 F-Droid 下载安装 Termux。
+          
+          ### 2. 安装 proot-distro（推荐方式）
+          ```bash
+          pkg update && pkg upgrade
+          pkg install proot-distro
+          proot-distro install ubuntu
+          proot-distro login ubuntu
+          ```
+          
+          ### 3. 在 Ubuntu proot 环境中安装 Redis（或使用远程 Redis）
+          ```bash
+          apt update && apt install -y redis-server
+          redis-server --daemonize yes
+          ```
+          
+          ### 4. 如果使用远程 Redis，跳过步骤3，直接设置环境变量：
+          ```bash
+          export DB_CONN=redis://:password@your-redis-host:6379/0
+          ```
+          
+          ## 运行
+          
+          ### 方式一：使用启动脚本（推荐）
+          ```bash
+          chmod +x run_on_android.sh
+          ./run_on_android.sh
+          ```
+          
+          ### 方式二：分别启动
+          ```bash
+          # 启动调度器（后台）
+          ./proxy_pool_arm64 schedule &
+          
+          # 启动 API 服务
+          ./proxy_pool_arm64 server
+          ```
+          
+          ## API 使用
+          
+          服务启动后访问：
+          - 获取随机代理: `curl http://127.0.0.1:5010/get`
+          - 获取所有代理: `curl http://127.0.0.1:5010/all`
+          - 代理数量: `curl http://127.0.0.1:5010/count`
+          
+          ## 配置
+          
+          修改 `setting.py` 可自定义：
+          - API 监听地址和端口
+          - Redis 连接信息
+          - 启用的代理源列表
+          README
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
