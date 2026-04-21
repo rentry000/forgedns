@@ -1,0 +1,360 @@
+# ============================================================
+# proxy_pool - Android (ARM64) 自动构建 GitHub Action
+# ============================================================
+# 功能：
+#   1. 在 Linux ARM64 runner 上用 PyInstaller 打包 proxy_pool
+#   2. 同时构建 x86_64 版本供普通 Linux 使用
+#   3. 自动发布到 GitHub Releases
+#
+# 使用方式：
+#   - 推送 tag (如 v2.4.2) 时自动触发构建并发布
+#   - 也可在 Actions 页面手动触发
+#
+# Android 运行前提：
+#   1. 安装 Termux (https://termux.dev)
+#   2. 安装 proot-distro: pkg install proot-distro
+#   3. 安装 Ubuntu: proot-distro install ubuntu
+#   4. 进入 Ubuntu: proot-distro login ubuntu
+#   5. 需要 Redis 服务（可连接远程 Redis 或在 proot 内安装）
+# ============================================================
+
+name: Build proxy_pool for Android (ARM64)
+
+on:
+  push:
+    tags:
+      - 'v*'           # 推送 tag 时触发
+  workflow_dispatch:    # 手动触发
+
+env:
+  PYTHON_VERSION: '3.11'
+  PROJECT_NAME: 'proxy_pool'
+
+jobs:
+  # ==================== ARM64 构建（Android/Termux 兼容） ====================
+  build-arm64:
+    runs-on: ubuntu-24.04-arm    # GitHub ARM64 runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libxml2-dev \
+            libxslt1-dev \
+            zlib1g-dev \
+            libffi-dev \
+            libssl-dev
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller (ARM64)
+        run: |
+          pyinstaller --onefile \
+            --name proxy_pool_arm64 \
+            --hidden-import=flask \
+            --hidden-import=flask.json \
+            --hidden-import=werkzeug \
+            --hidden-import=werkzeug.routing \
+            --hidden-import=apscheduler \
+            --hidden-import=apscheduler.schedulers \
+            --hidden-import=apscheduler.schedulers.background \
+            --hidden-import=apscheduler.triggers \
+            --hidden-import=apscheduler.triggers.interval \
+            --hidden-import=lxml \
+            --hidden-import=lxml._elementpath \
+            --hidden-import=redis \
+            --hidden-import=requests \
+            --hidden-import=click \
+            --collect-data flask \
+            --collect-data werkzeug \
+            --collect-data apscheduler \
+            proxyPool.py
+
+      - name: Verify binary
+        run: |
+          file dist/proxy_pool_arm64
+          chmod +x dist/proxy_pool_arm64
+          dist/proxy_pool_arm64 --help || true
+
+      - name: Package distribution
+        run: |
+          mkdir -p release_arm64
+          cp dist/proxy_pool_arm64 release_arm64/
+          cp setting.py release_arm64/
+          cp start.sh release_arm64/
+
+          # 创建 Android 运行脚本
+          cat > release_arm64/run_on_android.sh << 'SCRIPT'
+#!/bin/bash
+# ========================================
+# proxy_pool Android (Termux) 运行脚本
+# ========================================
+# 前提条件:
+#   1. Termux 已安装 proot-distro 和 Ubuntu
+#   2. 已进入 proot-distro login ubuntu
+#   3. Redis 可用 (远程或本地)
+# ========================================
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export DB_CONN="${DB_CONN:-redis://127.0.0.1:6379/0}"
+export HOST="${HOST:-0.0.0.0}"
+export PORT="${PORT:-5010}"
+
+echo "============================================"
+echo "  proxy_pool - Android ARM64"
+echo "============================================"
+echo "Redis: $DB_CONN"
+echo "API:   http://$HOST:$PORT"
+echo "============================================"
+
+# 检查 Redis 连接
+echo "[INFO] Checking Redis connection..."
+if ! timeout 3 bash -c "echo PING | redis-cli -u $DB_CONN" &>/dev/null; then
+    echo "[WARN] Cannot connect to Redis at $DB_CONN"
+    echo "[WARN] Make sure Redis is running or set DB_CONN environment variable"
+    echo "[WARN] Example: export DB_CONN=redis://:password@your-server:6379/0"
+fi
+
+# 启动调度器 (后台)
+echo "[INFO] Starting scheduler..."
+"$SCRIPT_DIR/proxy_pool_arm64" schedule &
+SCHEDULER_PID=$!
+echo "[INFO] Scheduler PID: $SCHEDULER_PID"
+
+# 启动 API 服务 (前台)
+echo "[INFO] Starting API server..."
+trap "kill $SCHEDULER_PID 2>/dev/null; exit 0" INT TERM
+"$SCRIPT_DIR/proxy_pool_arm64" server
+SCRIPT
+
+          chmod +x release_arm64/run_on_android.sh
+
+          # 创建 README
+          cat > release_arm64/README_Android.md << 'README'
+# proxy_pool Android ARM64 使用指南
+
+## 环境准备
+
+### 1. 安装 Termux
+从 https://termux.dev 或 F-Droid 下载安装 Termux。
+
+### 2. 安装 proot-distro（推荐方式）
+```bash
+pkg update && pkg upgrade
+pkg install proot-distro
+proot-distro install ubuntu
+proot-distro login ubuntu
+```
+
+### 3. 在 Ubuntu proot 环境中安装 Redis（或使用远程 Redis）
+```bash
+apt update && apt install -y redis-server
+redis-server --daemonize yes
+```
+
+### 4. 如果使用远程 Redis，跳过步骤3，直接设置环境变量：
+```bash
+export DB_CONN=redis://:password@your-redis-host:6379/0
+```
+
+## 运行
+
+### 方式一：使用启动脚本（推荐）
+```bash
+chmod +x run_on_android.sh
+./run_on_android.sh
+```
+
+### 方式二：分别启动
+```bash
+# 启动调度器（后台）
+./proxy_pool_arm64 schedule &
+
+# 启动 API 服务
+./proxy_pool_arm64 server
+```
+
+## API 使用
+
+服务启动后访问：
+- 获取随机代理: `curl http://127.0.0.1:5010/get`
+- 获取所有代理: `curl http://127.0.0.1:5010/all`
+- 代理数量: `curl http://127.0.0.1:5010/count`
+
+## 配置
+
+修改 `setting.py` 可自定义：
+- API 监听地址和端口
+- Redis 连接信息
+- 启用的代理源列表
+README
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy_pool_arm64
+          path: release_arm64/
+
+  # ==================== x86_64 构建（普通 Linux） ====================
+  build-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libxml2-dev \
+            libxslt1-dev \
+            zlib1g-dev \
+            libffi-dev \
+            libssl-dev
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller (x86_64)
+        run: |
+          pyinstaller --onefile \
+            --name proxy_pool_x86_64 \
+            --hidden-import=flask \
+            --hidden-import=flask.json \
+            --hidden-import=werkzeug \
+            --hidden-import=werkzeug.routing \
+            --hidden-import=apscheduler \
+            --hidden-import=apscheduler.schedulers \
+            --hidden-import=apscheduler.schedulers.background \
+            --hidden-import=apscheduler.triggers \
+            --hidden-import=apscheduler.triggers.interval \
+            --hidden-import=lxml \
+            --hidden-import=lxml._elementpath \
+            --hidden-import=redis \
+            --hidden-import=requests \
+            --hidden-import=click \
+            --collect-data flask \
+            --collect-data werkzeug \
+            --collect-data apscheduler \
+            proxyPool.py
+
+      - name: Verify binary
+        run: |
+          file dist/proxy_pool_x86_64
+          chmod +x dist/proxy_pool_x86_64
+          dist/proxy_pool_x86_64 --help || true
+
+      - name: Package distribution
+        run: |
+          mkdir -p release_x86_64
+          cp dist/proxy_pool_x86_64 release_x86_64/
+          cp setting.py release_x86_64/
+          cp start.sh release_x86_64/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy_pool_x86_64
+          path: release_x86_64/
+
+  # ==================== 发布 Release ====================
+  release:
+    needs: [build-arm64, build-x86_64]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy_pool_arm64
+          path: release_arm64/
+
+      - name: Download x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: proxy_pool_x86_64
+          path: release_x86_64/
+
+      - name: Create distribution archives
+        run: |
+          cd release_arm64 && tar czf ../proxy_pool_arm64.tar.gz . && cd ..
+          cd release_x86_64 && tar czf ../proxy_pool_x86_64.tar.gz . && cd ..
+
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum proxy_pool_arm64.tar.gz > checksums.txt
+          sha256sum proxy_pool_x86_64.tar.gz >> checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "proxy_pool ${{ github.ref_name }}"
+          body: |
+            ## proxy_pool ${{ github.ref_name }}
+
+            ### 📦 下载
+
+            | 文件 | 架构 | 适用平台 |
+            |------|------|----------|
+            | `proxy_pool_arm64.tar.gz` | ARM64 | Android (Termux/proot)、ARM 服务器 |
+            | `proxy_pool_x86_64.tar.gz` | x86_64 | Linux PC/服务器 |
+
+            ### 🤖 Android 使用
+
+            1. 安装 [Termux](https://termux.dev)
+            2. 安装 proot-distro: `pkg install proot-distro && proot-distro install ubuntu`
+            3. 进入 Ubuntu: `proot-distro login ubuntu`
+            4. 解压并运行:
+            ```bash
+            tar xzf proxy_pool_arm64.tar.gz
+            export DB_CONN=redis://:password@your-redis:6379/0
+            ./run_on_android.sh
+            ```
+
+            ### 🖥️ Linux 使用
+
+            ```bash
+            tar xzf proxy_pool_x86_64.tar.gz
+            export DB_CONN=redis://127.0.0.1:6379/0
+            ./proxy_pool_x86_64 schedule &
+            ./proxy_pool_x86_64 server
+            ```
+
+            > ⚠️ 需要先启动 Redis 服务
+
+          files: |
+            proxy_pool_arm64.tar.gz
+            proxy_pool_x86_64.tar.gz
+            checksums.txt
+          draft: false
+          prerelease: false
