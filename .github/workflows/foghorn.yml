@@ -1,140 +1,317 @@
-name: 构建 foghorn ARM64 全量功能二进制
+# ============================================================
+# Foghorn DNS Server — Android ARM64 构建
+# ============================================================
+# 产出: foghorn-aarch64 (ELF 64-bit LSB executable, ARM aarch64)
+# 方案: PyInstaller standalone + glibc runtime
+#   在 QEMU ARM64 容器中原生编译, 产出兼容 Android proot 的
+#   独立二进制 + .so 运行时, 无需目标设备装 Python
+# 触发: push tag v* / manual dispatch
+# ============================================================
+
+name: Build Foghorn Android ARM64
+
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Python version (3.11 or 3.12)'
+        required: false
+        default: '3.12'
+      foghorn_ref:
+        description: 'Git ref (tag/branch/commit) to build'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write
 
 jobs:
-  build-arm64-full:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: 清理环境
-        run: |
-          sudo rm -rf ${{ github.workspace }}/*
-          docker rm -f foghorn-build 2>/dev/null || true
-          mkdir -p ${{ github.workspace }}/output
+  build-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
 
-      - name: 检出官方源码
+    steps:
+      - name: Checkout foghorn source
         uses: actions/checkout@v4
         with:
-          repository: zallison/foghorn
-          ref: v0.7.0
-          fetch-depth: 1
+          repository: zackalla/foghorn
+          ref: ${{ inputs.foghorn_ref || 'main' }}
+          path: foghorn-src
 
-      - name: 配置ARM64跨架构环境
+      - name: Determine version
+        id: version
+        run: |
+          cd foghorn-src
+          VER=$(grep '^version' pyproject.toml | head -1 | sed "s/version.*=.*['\"]//;s/['\"].*//")
+          TAG="${GITHUB_REF_NAME:-v${VER}-build$(date +%Y%m%d%H%M)}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Foghorn version: ${VER}, tag: ${TAG}"
+
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: linux/arm64
 
-      - name: 全量功能构建（零语法错误版）
-        run: |
-          docker run -d --name foghorn-build --platform linux/arm64 python:3.11-bookworm sleep infinity
-          docker cp ${{ github.workspace }}/. foghorn-build:/foghorn-src/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-          # 全量构建，所有here-document结束符顶格无缩进，无任何语法歧义
-          docker exec foghorn-build bash -euxo pipefail << 'EOF'
-          set -e
-          # 1. 安装全量系统依赖
-          apt update && apt install -y --no-install-recommends \
-            gcc g++ patchelf binutils git ca-certificates \
-            libmariadb-dev libpq-dev libssl-dev build-essential \
-            mosquitto-dev libsqlite3-dev libffi-dev zlib1g-dev \
-            default-libmysqlclient-dev redis-tools
-          
-          # 2. 安装系统级Python依赖，避免pip冲突
-          apt install -y --no-install-recommends \
-            python3-cryptography python3-yaml python3-requests \
-            python3-aiosqlite python3-paho-mqtt python3-redis \
-            python3-psycopg2 python3-mysqldb
-          
-          # 3. 安装项目全量依赖
+      - name: Build in ARM64 container
+        run: |
+          mkdir -p build-output
+
+          # 写构建脚本
+          cat > build-output/build.sh << 'BUILDEOF'
+          #!/bin/bash
+          set -ex
+          echo "=== Foghorn Android ARM64 Build ==="
+          echo "Arch: $(uname -m), Python: $(python3 --version)"
+
+          # 系统依赖
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            gcc g++ make patchelf binutils \
+            libffi-dev libssl-dev libsqlite3-dev \
+            libbz2-dev liblzma-dev libreadline-dev \
+            zlib1g-dev libexpat1-dev libc6-dev
+
           pip install --upgrade pip setuptools wheel
-          pip install --root-user-action=ignore /foghorn-src/[all]
-          pip install --root-user-action=ignore pyinstaller==6.19.0
-          
-          # 4. 生成模块验证脚本，结束符顶格无缩进
-          cat > /validate.py << 'PYEOF'
-          from foghorn.cli import main
-          import fastapi
-          import uvicorn
-          import dnslib
-          import dns
-          import cryptography
-          import yaml
-          import aiosqlite
-          import requests
-          import pymysql
-          import psycopg2
-          import paho.mqtt.client
-          import redis
-          print("✅ 全量模块导入成功")
-          PYEOF
-          
-          # 执行验证
-          python3 /validate.py
-          
-          # 5. 生成打包入口脚本，结束符顶格无缩进
-          cat > /entry.py << 'PYEOF'
-          #!/usr/bin/env python3
-          import sys
-          import os
-          if getattr(sys, 'frozen', False):
-              app_path = sys._MEIPASS
-              sys.path.insert(0, app_path)
-              os.environ['PATH'] = app_path + os.pathsep + os.environ['PATH']
-          from foghorn.cli import main
-          if __name__ == '__main__':
-              main()
-          PYEOF
-          
-          # 6. 全量打包，输出到绝对路径/dist
+
+          # 安装 foghorn + 核心依赖
+          cd /src
+          pip install -e . --no-deps 2>/dev/null || true
+          pip install \
+            cachetools "dnslib>=0.9.24" "jsonschema>=4.17.3" pydantic \
+            "pyyaml>=6.0.1" "requests>=2.31.0" cryptography "dnspython>=2.6.1" \
+            "fastapi>=0.111.0" psutil python-multipart "uvicorn>=0.30.0" \
+            paramiko publicsuffix2 watchdog zeroconf paho-mqtt pymemcache
+
+          pip install pyinstaller
+
+          # ---------- PyInstaller 构建 ----------
+          mkdir -p /tmp/build
           pyinstaller \
-            --onefile \
-            --name foghorn-linux-arm64-full \
-            --target-architecture aarch64 \
-            --distpath /dist \
-            --workpath /build \
-            --strip \
+            --name foghorn \
             --clean \
             --noconfirm \
-            --root-user-action=ignore \
-            --console \
-            --collect-all=foghorn \
-            --collect-all=uvicorn \
-            --collect-all=fastapi \
-            --add-data /foghorn-src/assets:assets \
-            --add-data /foghorn-src/example_configs:example_configs \
-            /entry.py
-          
-          # 7. 强制验证二进制
-          ls -la /dist/
-          chmod +x /dist/foghorn-linux-arm64-full
-          /dist/foghorn-linux-arm64-full --help
-          echo "✅ 全量功能二进制构建成功"
-          EOF
+            --onedir \
+            --strip \
+            --workpath /tmp/build/work \
+            --distpath /tmp/build/dist \
+            --specpath /tmp/build \
+            --hidden-import foghorn \
+            --hidden-import foghorn.main \
+            --hidden-import foghorn.config \
+            --hidden-import foghorn.config.config_parser \
+            --hidden-import foghorn.config.config_schema \
+            --hidden-import foghorn.plugins \
+            --hidden-import foghorn.plugins.resolve \
+            --hidden-import foghorn.plugins.resolve.etc_hosts \
+            --hidden-import foghorn.plugins.resolve.zone_records \
+            --hidden-import foghorn.plugins.resolve.file_downloader \
+            --hidden-import foghorn.plugins.resolve.filter \
+            --hidden-import foghorn.plugins.resolve.upstream \
+            --hidden-import foghorn.plugins.resolve.new_domain \
+            --hidden-import foghorn.plugins.resolve.rate_limit \
+            --hidden-import foghorn.plugins.resolve.flaky_server \
+            --hidden-import foghorn.plugins.resolve.greylist \
+            --hidden-import foghorn.plugins.resolve.mdns \
+            --hidden-import foghorn.plugins.resolve.access_control \
+            --hidden-import foghorn.plugins.resolve.custom_records \
+            --hidden-import foghorn.resolve \
+            --hidden-import foghorn.resolve.resolver \
+            --hidden-import foghorn.resolve.cache \
+            --hidden-import foghorn.server \
+            --hidden-import dnslib \
+            --hidden-import dnslib.server \
+            --hidden-import dnslib.dns \
+            --hidden-import dns.resolver \
+            --hidden-import dns.ecc \
+            --hidden-import cryptography \
+            --hidden-import cryptography.hazmat \
+            --hidden-import cryptography.hazmat.primitives \
+            --hidden-import cryptography.hazmat.backends \
+            --hidden-import uvicorn \
+            --hidden-import uvicorn.literals \
+            --hidden-import fastapi \
+            --hidden-import pydantic \
+            --hidden-import pydantic.deprecated \
+            --hidden-import pydantic.deprecated.decorator \
+            --hidden-import jsonschema \
+            --hidden-import watchdog \
+            --hidden-import zeroconf \
+            --hidden-import paramiko \
+            --hidden-import publicsuffix2 \
+            --collect-data foghorn \
+            --collect-all dnslib \
+            --collect-all pydantic \
+            --exclude-module tkinter \
+            --exclude-module matplotlib \
+            --exclude-module PIL \
+            --exclude-module scipy \
+            --exclude-module numpy.testing \
+            --exclude-module docker \
+            --exclude-module redis \
+            --exclude-module pymongo \
+            --exclude-module psycopg2 \
+            --exclude-module mariadb \
+            --exclude-module mysql \
+            --exclude-module PyQt5 \
+            --exclude-module PyQt6 \
+            src/foghorn/main.py
 
-      - name: 拷出最终二进制文件
+          echo "=== PyInstaller output ==="
+          ls -la /tmp/build/dist/foghorn/
+
+          # ---------- 打包运行时 ----------
+          DIST=/tmp/build/dist/foghorn
+          OUT=/output/foghorn-android-arm64
+          mkdir -p "$OUT/bin" "$OUT/lib"
+
+          # 主二进制
+          cp "$DIST/foghorn" "$OUT/bin/foghorn"
+          chmod +x "$OUT/bin/foghorn"
+
+          # PyInstaller _internal 下的 .so
+          find "$DIST/_internal" -name '*.so*' -exec cp -L {} "$OUT/lib/" \; 2>/dev/null || true
+
+          # 系统 glibc 运行时 (proot 必需)
+          for lib in \
+            ld-linux-aarch64.so.1 \
+            libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 \
+            libresolv.so.2 libnss_dns.so.2 libnss_files.so.2 \
+            libnss_compat.so.2 libgcc_s.so.1 libz.so.1 \
+            libssl.so.3 libcrypto.so.3 libffi.so.8 \
+            libexpat.so.1 libbz2.so.1.0 liblzma.so.5 \
+            libreadline.so.8 libncursesw.so.6 libtinfo.so.6 \
+            libsqlite3.so.0 libmariadb.so.3; do
+            for d in /lib/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu; do
+              [ -f "$d/$lib" ] && cp -L "$d/$lib" "$OUT/lib/" && echo "  + $lib" && break
+            done
+          done
+
+          # 去重 + strip
+          cd "$OUT/lib"
+          for f in *.so*; do
+            [ -L "$f" ] && continue
+            strip --strip-unneeded "$f" 2>/dev/null || true
+          done
+
+          echo "=== Package ready ==="
+          ls -lhR "$OUT/"
+          BUILDEOF
+
+          chmod +x build-output/build.sh
+
+          # 在 ARM64 容器中执行
+          docker run --rm --platform linux/arm64 \
+            -v "$(pwd)/foghorn-src:/src:ro" \
+            -v "$(pwd)/build-output:/output" \
+            python:${{ inputs.python_version || '3.12' }}-bookworm \
+            bash /output/build.sh
+
+      - name: Verify build
         run: |
-          docker cp foghorn-build:/dist/foghorn-linux-arm64-full ${{ github.workspace }}/output/
-          
-          echo "=== 最终产物校验 ==="
-          ls -la ${{ github.workspace }}/output/
-          BIN_FILE=${{ github.workspace }}/output/foghorn-linux-arm64-full
-          
-          if [ ! -f "$BIN_FILE" ]; then
-            echo "❌ 文件拷出失败"
+          OUT="build-output/foghorn-android-arm64"
+          if [ -f "$OUT/bin/foghorn" ]; then
+            echo "✅ Binary: $(du -h "$OUT/bin/foghorn" | cut -f1)"
+            echo "✅ .so files: $(ls "$OUT/lib/"*.so* 2>/dev/null | wc -l)"
+            ls -lh "$OUT/lib/"
+          else
+            echo "❌ Build failed — no binary found"
+            find build-output/ -type f 2>/dev/null
             exit 1
           fi
-          
-          chmod +x $BIN_FILE
-          file $BIN_FILE
-          echo "✅ 全量功能二进制成功获取！"
 
-      - name: 清理容器
-        run: docker rm -f foghorn-build
+      - name: Create start script
+        run: |
+          OUT="build-output/foghorn-android-arm64"
+          cat > "$OUT/start_foghorn.sh" << 'STARTEOF'
+          #!/system/bin/sh
+          # Foghorn DNS Server — Android 启动脚本
+          # 用法:
+          #   adb push foghorn-android-arm64 /data/local/tmp/
+          #   adb shell sh /data/local/tmp/foghorn-android-arm64/start_foghorn.sh [config_path]
+          #
+          #   Magisk 模块:
+          #   /data/adb/modules/fastdns_module/bin/foghorn_android/start_foghorn.sh
 
-      - name: 上传产物
+          BASE="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$BASE/lib"
+
+          CONFIG="${1:-/data/adb/modules/fastdns_module/config.yaml}"
+
+          echo "Starting Foghorn DNS Server..."
+          echo "  Binary: $BASE/bin/foghorn"
+          echo "  Config: $CONFIG"
+
+          exec "$BASE/lib/ld-linux-aarch64.so.1" \
+            --library-path "$BASE/lib" \
+            "$BASE/bin/foghorn" \
+            --config "$CONFIG"
+          STARTEOF
+          chmod +x "$OUT/start_foghorn.sh"
+
+      - name: Create zip
+        run: |
+          cd build-output
+          zip -r foghorn-android-arm64.zip foghorn-android-arm64/
+          ls -lh foghorn-android-arm64.zip
+
+      - name: Upload directory artifact
         uses: actions/upload-artifact@v4
         with:
-          name: foghorn-linux-arm64-full
-          path: ${{ github.workspace }}/output/foghorn-linux-arm64-full
+          name: foghorn-android-arm64
+          path: build-output/foghorn-android-arm64/
           retention-days: 90
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: foghorn-android-arm64-zip
+          path: build-output/foghorn-android-arm64.zip
+          retention-days: 90
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Foghorn ${{ steps.version.outputs.tag }}
+          body: |
+            ## Foghorn DNS Server ${{ steps.version.outputs.tag }} — Android ARM64
+
+            ### 产出文件
+            - `foghorn-android-arm64.zip` — 完整部署包 (二进制 + glibc 运行时)
+
+            ### 包内容
+            ```
+            foghorn-android-arm64/
+            ├── bin/foghorn          # PyInstaller standalone 二进制
+            ├── lib/                 # aarch64 glibc 运行时 + Python .so
+            │   ├── ld-linux-aarch64.so.1   # proot 必需
+            │   ├── libc.so.6
+            │   ├── libssl.so.3
+            │   └── ...
+            └── start_foghorn.sh     # Android 启动脚本
+            ```
+
+            ### 部署方法
+            ```bash
+            # adb
+            adb push foghorn-android-arm64 /data/local/tmp/
+            adb shell sh /data/local/tmp/foghorn-android-arm64/start_foghorn.sh
+
+            # Magisk 模块
+            cp -r foghorn-android-arm64 /data/adb/modules/fastdns_module/bin/foghorn_android/
+            ```
+
+            ### 运行要求
+            - Android ARM64 设备
+            - proot 或 root 权限 (glibc 运行时需要 ld-linux)
+          files: build-output/foghorn-android-arm64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
